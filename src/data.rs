@@ -17,6 +17,7 @@ pub enum Direction {
     Right,
 }
 
+// TODO: Remove in favor of concrete variant
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InteractGeneric<T> {
     pub location: Location,

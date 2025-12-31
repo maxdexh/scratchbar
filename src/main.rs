@@ -1,7 +1,9 @@
 mod clients;
 mod data;
+mod display_panel;
 mod logging;
 mod procs;
+mod tui;
 mod utils;
 
 #[tokio::main(flavor = "multi_thread")]

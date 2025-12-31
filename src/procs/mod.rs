@@ -23,6 +23,7 @@ const BASE_DIR_ENV: &str = "BAR_BASE_DIR";
 const SOCKET_PATH_ENV: &str = "BAR_PANEL_SOCKET_PATH";
 const MONITOR_NAME_ENV: &str = "BAR_MONITOR_NAME";
 
+// FIXME: Simplify after display panel migration
 async fn run_panel_controller_side<Ev, Upd>(
     socket_name: &str,
     display: Arc<str>,
@@ -181,6 +182,7 @@ pub async fn entry_point() -> Result<()> {
 
             let mut tasks = JoinSet::new();
 
+            // FIXME: Merge code after display panel migration
             let handle_main = match mode.as_str() {
                 INTERNAL_BAR_PANEL_ARG => {
                     init_logger(ProcKindForLogger::Bar(monitor.clone()));
@@ -189,12 +191,14 @@ pub async fn entry_point() -> Result<()> {
                     tasks.spawn(read_cobs_sock(upd_read, upd_tx));
                     tasks.spawn(write_cobs_sock(ev_write, ev_rx));
 
-                    let fut_io = tasks.join_next();
                     let (fut_main, handle_main) = futures::future::abortable(async move {
-                        if let Err(err) = bar_panel::main(ev_tx, upd_rx, monitor.into()).await {
+                        if let Err(err) =
+                            crate::display_panel::main(ev_tx, upd_rx, monitor.into()).await
+                        {
                             log::error!("Bar panel failed: {err}");
                         }
                     });
+                    let fut_io = tasks.join_next();
                     tokio::pin!(fut_io, fut_main);
                     _ = futures::future::select(fut_main, fut_io).await;
                     handle_main
@@ -206,12 +210,12 @@ pub async fn entry_point() -> Result<()> {
                     tasks.spawn(read_cobs_sock(upd_read, upd_tx));
                     tasks.spawn(write_cobs_sock(ev_write, ev_rx));
 
-                    let fut_io = tasks.join_next();
                     let (fut_main, handle_main) = futures::future::abortable(async move {
                         if let Err(err) = menu_panel::main(ev_tx, upd_rx).await {
                             log::error!("Menu panel failed: {err}");
                         }
                     });
+                    let fut_io = tasks.join_next();
                     tokio::pin!(fut_io, fut_main);
                     _ = futures::future::select(fut_main, fut_io).await;
                     handle_main

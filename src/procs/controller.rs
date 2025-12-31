@@ -26,6 +26,12 @@ async fn into_send_all<T: serde::Serialize + Send + 'static>(
         send_update(&tx, upd)
     }
 }
+async fn into_send_all2<T>(tx: impl Fn(T), stream: impl futures::Stream<Item = T>) {
+    tokio::pin!(stream);
+    while let Some(upd) = stream.next().await {
+        tx(upd)
+    }
+}
 
 #[track_caller]
 fn send_update<T>(tx: &broadcast::Sender<Arc<T>>, upd: T) {
@@ -43,19 +49,25 @@ pub async fn main() -> Result<()> {
     let mut subtasks = JoinSet::new();
 
     let (do_reload, reload_rx) = ReloadRx::new();
-    let (bar_tx, bar_events, menu_tx, menu_events) = {
-        // Channel to send updates to panels. Messages are sent to every instance
-        // of the panel, through clones of rx.
-        let bar_upd_tx = broadcast::Sender::<Arc<BarUpdate>>::new(1000);
+
+    let (bar_upd_send, bar_events, menu_tx, menu_events) = {
+        // TODO: Consider using WeakSender
+        let bar_ui_tx = broadcast::Sender::new(100);
+
         let menu_upd_tx = broadcast::Sender::<Arc<MenuUpdate>>::new(1000);
 
         // Channel to receive events from panels. Messages are collected
         // into an unbounded channel to ensure that we do not block the
         // sockets.
-        let (bar_ev_tx, mut bar_ev_rx) = mpsc::unbounded_channel();
+        let (bar_panel_ev_tx, bar_panel_ev_rx) = mpsc::unbounded_channel();
         let (menu_ev_tx, mut menu_ev_rx) = mpsc::unbounded_channel();
 
-        let bar_upd_tx_clone = bar_upd_tx.clone();
+        let (bar_send, bar_events) = crate::procs::bar_panel::control_panels(
+            &mut subtasks,
+            bar_ui_tx.clone(),
+            bar_panel_ev_rx,
+        );
+
         let menu_upd_tx_clone = menu_upd_tx.clone();
         subtasks.spawn(async move {
             let tasks = BasicTaskMap::new();
@@ -71,9 +83,9 @@ pub async fn main() -> Result<()> {
 
                 let should_reload = !added.is_empty();
                 for display in added {
-                    let bar_upd_rx = bar_upd_tx_clone.subscribe();
+                    let bar_ui_tx = bar_ui_tx.subscribe();
                     let menu_upd_rx = menu_upd_tx_clone.subscribe();
-                    let bar_ev_tx = bar_ev_tx.clone();
+                    let bar_ev_tx = bar_panel_ev_tx.clone();
                     let menu_ev_tx = menu_ev_tx.clone();
                     tasks.insert_spawn(display.clone(), async move {
                         let mut panels = JoinSet::new();
@@ -81,7 +93,7 @@ pub async fn main() -> Result<()> {
                             "bar-panel.sock",
                             display.clone(),
                             bar_ev_tx,
-                            bar_upd_rx,
+                            bar_ui_tx,
                             super::bar_panel::controller_spawn_panel,
                         ));
                         panels.spawn(super::run_panel_controller_side(
@@ -102,8 +114,8 @@ pub async fn main() -> Result<()> {
         });
 
         (
-            bar_upd_tx,
-            futures::stream::poll_fn(move |cx| bar_ev_rx.poll_recv(cx)),
+            bar_send,
+            bar_events,
             menu_upd_tx,
             futures::stream::poll_fn(move |cx| menu_ev_rx.poll_recv(cx)),
         )
@@ -111,18 +123,21 @@ pub async fn main() -> Result<()> {
 
     {
         let (ws, am) = clients::hypr::connect(reload_rx.resubscribe());
-        subtasks.spawn(into_send_all(bar_tx.clone(), ws.map(BarUpdate::Desktop)));
+        subtasks.spawn(into_send_all2(
+            bar_upd_send.clone(),
+            ws.map(BarUpdate::Desktop),
+        ));
         subtasks.spawn(into_send_all(
             menu_tx.clone(),
             am.map(MenuUpdate::ActiveMonitor),
         ));
     }
-    subtasks.spawn(into_send_all(
-        bar_tx.clone(),
+    subtasks.spawn(into_send_all2(
+        bar_upd_send.clone(),
         clients::upower::connect(reload_rx.resubscribe()).map(BarUpdate::Energy),
     ));
-    subtasks.spawn(into_send_all(
-        bar_tx.clone(),
+    subtasks.spawn(into_send_all2(
+        bar_upd_send.clone(),
         clients::clock::connect(reload_rx.resubscribe()).map(BarUpdate::Time),
     ));
 
@@ -138,12 +153,18 @@ pub async fn main() -> Result<()> {
     };
     let ppd_switch_tx = {
         let (tx, profiles) = clients::ppd::connect(reload_rx.resubscribe());
-        subtasks.spawn(into_send_all(bar_tx.clone(), profiles.map(BarUpdate::Ppd)));
+        subtasks.spawn(into_send_all2(
+            bar_upd_send.clone(),
+            profiles.map(BarUpdate::Ppd),
+        ));
         tx
     };
     let audio_upd_tx = {
         let (tx, events) = clients::pulse::connect(reload_rx.resubscribe());
-        subtasks.spawn(into_send_all(bar_tx.clone(), events.map(BarUpdate::Pulse)));
+        subtasks.spawn(into_send_all2(
+            bar_upd_send.clone(),
+            events.map(BarUpdate::Pulse),
+        ));
         tx
     };
 
@@ -162,7 +183,7 @@ pub async fn main() -> Result<()> {
         // in that case.
         match controller_update {
             Upd::Tray(event, state) => {
-                send_update(&bar_tx, BarUpdate::SysTray(state.items.clone()));
+                bar_upd_send(BarUpdate::SysTray(state.items.clone()));
                 tray_state = state;
 
                 match event {
@@ -265,7 +286,6 @@ pub async fn main() -> Result<()> {
                         }
                     }
                     (IK::Click(MouseButton::Left), IT::Audio(target)) => {
-                        // FIXME: This sender should not block us here.
                         if let Err(err) = audio_upd_tx.send(clients::pulse::PulseUpdate {
                             target,
                             kind: clients::pulse::PulseUpdateKind::ToggleMute,
@@ -274,7 +294,6 @@ pub async fn main() -> Result<()> {
                         }
                     }
                     (IK::Click(MouseButton::Right), IT::Audio(target)) => {
-                        // FIXME: This sender should not block us here.
                         if let Err(err) = audio_upd_tx.send(clients::pulse::PulseUpdate {
                             target,
                             kind: clients::pulse::PulseUpdateKind::ResetVolume,
@@ -283,7 +302,6 @@ pub async fn main() -> Result<()> {
                         }
                     }
                     (IK::Scroll(direction), IT::Audio(target)) => {
-                        // FIXME: This sender should not block us here.
                         if let Err(err) = audio_upd_tx.send(clients::pulse::PulseUpdate {
                             target,
                             kind: clients::pulse::PulseUpdateKind::VolumeDelta(

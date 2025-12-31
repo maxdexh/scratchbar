@@ -1,26 +1,29 @@
 use std::{ffi::OsString, sync::Arc};
 
-use ratatui::{Terminal, prelude::*, widgets::Paragraph};
-use ratatui_image::FontSize;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use system_tray::item::StatusNotifierItem;
-use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
+use tokio::{
+    sync::{broadcast, mpsc},
+    task::JoinSet,
+};
+use tokio_stream::StreamExt as _;
 
 use crate::{
     clients::{
         pulse::{PulseDeviceKind, PulseDeviceState, PulseState},
         upower::{BatteryState, EnergyState},
     },
-    data::{BasicDesktopState, InteractKind, Location, WorkspaceId},
-    utils::rect_center,
+    data::{BasicDesktopState, WorkspaceId},
+    display_panel::{PanelEvent, PanelInteract, PanelUpdate},
+    tui,
 };
 
 pub async fn controller_spawn_panel(
     _: &std::path::Path,
     display: &str,
     envs: Vec<(OsString, OsString)>,
-    _: &tokio::sync::mpsc::UnboundedSender<BarEvent>,
+    _: &tokio::sync::mpsc::UnboundedSender<impl Sized>,
 ) -> anyhow::Result<tokio::process::Child> {
     let child = tokio::process::Command::new("kitten")
         .envs(envs)
@@ -46,6 +49,54 @@ pub async fn controller_spawn_panel(
         .spawn()?;
 
     Ok(child)
+}
+
+pub fn control_panels(
+    tasks: &mut JoinSet<()>,
+    panel_upd_tx: broadcast::Sender<Arc<PanelUpdate>>,
+    mut panel_ev_rx: mpsc::UnboundedReceiver<PanelEvent>,
+) -> (
+    impl Fn(BarUpdate) + Send + 'static + Clone + use<>,
+    impl Stream<Item = BarEvent> + use<>,
+) {
+    let (bar_upd_tx, mut bar_upd_rx) = mpsc::unbounded_channel();
+    tasks.spawn(async move {
+        let mut state = BarState::default();
+
+        while let Some(upd) = bar_upd_rx.recv().await {
+            state.apply_update(upd);
+            while let Ok(upd) = bar_upd_rx.try_recv() {
+                state.apply_update(upd);
+            }
+            if panel_upd_tx
+                .send(Arc::new(PanelUpdate::Display(to_tui(&state))))
+                .is_err()
+            {
+                log::warn!("No panels to update")
+            }
+        }
+    });
+    (
+        move |upd: BarUpdate| {
+            bar_upd_tx.send(upd).unwrap();
+        },
+        futures::stream::poll_fn(move |cx| panel_ev_rx.poll_recv(cx)).map(|panel_event| {
+            match panel_event {
+                PanelEvent::Interact(PanelInteract {
+                    location,
+                    target,
+                    kind,
+                }) => BarEvent::Interact(Interact {
+                    location,
+                    kind,
+                    target: match target {
+                        Some(tag) => BarInteractTarget::deserialize_tag(&tag),
+                        None => BarInteractTarget::None,
+                    },
+                }),
+            }
+        }),
+    )
 }
 
 type Interact = crate::data::InteractGeneric<BarInteractTarget>;
@@ -75,77 +126,18 @@ pub enum BarInteractTarget {
     Audio(PulseDeviceKind),
     Tray(Arc<str>),
 }
-
-#[derive(Debug, Default)]
-pub struct RenderedLayout {
-    widgets: Vec<(Rect, BarInteractTarget)>,
-}
-impl RenderedLayout {
-    pub fn insert(&mut self, rect: Rect, widget: BarInteractTarget) {
-        self.widgets.push((rect, widget));
+impl BarInteractTarget {
+    fn serialize_tag(&self) -> tui::InteractTag {
+        tui::InteractTag::from_bytes(&postcard::to_stdvec(self).unwrap())
     }
-
-    // TODO: Delay until hover
-    // TODO: Pre-filter and pre-chunk interactions here, especially scrolls
-    pub fn interpret_mouse_event(
-        &mut self,
-        event: crossterm::event::MouseEvent,
-        font_size: FontSize,
-    ) -> Option<Interact> {
-        use crossterm::event::*;
-
-        let MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: _,
-        } = event;
-        let pos = Position { x: column, y: row };
-
-        let (rect, widget) = self
-            .widgets
-            .iter()
-            .find(|(r, _)| r.contains(pos))
-            .map_or_else(
-                || {
-                    (
-                        Rect {
-                            x: pos.x,
-                            y: pos.y,
-                            ..Default::default()
-                        },
-                        &BarInteractTarget::None,
-                    )
-                },
-                |(r, w)| (*r, w),
-            );
-
-        type DR = crate::data::Direction;
-        type IK = crate::data::InteractKind;
-        type MK = crossterm::event::MouseEventKind;
-        let kind = match kind {
-            MK::Down(button) => IK::Click(button),
-            MK::Moved => IK::Hover,
-            MK::ScrollDown => IK::Scroll(DR::Down),
-            MK::ScrollUp => IK::Scroll(DR::Up),
-            MK::ScrollLeft => IK::Scroll(DR::Left),
-            MK::ScrollRight => IK::Scroll(DR::Right),
-            MK::Up(_) | MK::Drag(_) => {
-                return None;
-            }
-        };
-
-        Some(Interact {
-            location: rect_center(rect, font_size),
-            target: widget.clone(),
-            kind,
-        })
+    fn deserialize_tag(tag: &tui::InteractTag) -> Self {
+        postcard::from_bytes(tag.as_bytes()).unwrap()
     }
 }
 
+// FIXME: Modularize, using direct access to clients
 #[derive(Debug, Default, Clone)]
-struct BarState {
-    monitor: Arc<str>,
+pub struct BarState {
     systray: Arc<[(Arc<str>, StatusNotifierItem)]>,
     desktop: BasicDesktopState,
     ppd_profile: Arc<str>,
@@ -153,99 +145,87 @@ struct BarState {
     pulse: PulseState,
     time: String,
 }
-
-// FIXME: Debounce all rendering events
-fn render(
-    picker: &ratatui_image::picker::Picker,
-    frame: &mut ratatui::Frame,
-    state: &BarState,
-) -> RenderedLayout {
-    let square_icon_len = {
-        let (font_w, font_h) = picker.font_size();
-        font_h.div_ceil(font_w)
-    };
-
-    let mut ui = RenderedLayout::default();
-
-    let [mut ui_area, _] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(frame.area());
-
-    // Margin of one cell from both edges
-    [_, ui_area, _] = Layout::horizontal([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .areas(ui_area);
-
-    let active_ws = state
-        .desktop
-        .monitors
-        .iter()
-        .find(|mr| mr.name == state.monitor)
-        .map(|mr| &mr.active_workspace);
-    for ws in state.desktop.workspaces.iter() {
-        let ws_area;
-        [ws_area, _, ui_area] = Layout::horizontal([
-            Constraint::Length(ws.name.chars().count() as _),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-        ])
-        .areas(ui_area);
-        let mut pg = Paragraph::new(&ws.name as &str);
-        if active_ws == Some(&ws.id) {
-            pg = pg.green();
+impl BarState {
+    fn apply_update(&mut self, update: BarUpdate) {
+        match update {
+            BarUpdate::SysTray(systray) => self.systray = systray,
+            BarUpdate::Desktop(hypr) => self.desktop = hypr,
+            BarUpdate::Energy(energy) => self.energy = energy,
+            BarUpdate::Ppd(profile) => self.ppd_profile = profile,
+            BarUpdate::Pulse(pulse) => self.pulse = pulse,
+            BarUpdate::Time(time) => self.time = time,
         }
-        frame.render_widget(pg, ws_area);
-        ui.insert(ws_area, BarInteractTarget::HyprWorkspace(ws.id.clone()));
     }
+}
+
+fn to_tui(state: &BarState) -> tui::Tui {
+    let mut subdiv = Vec::new();
+
+    subdiv.push(tui::SubPart::spacing(tui::Constraint::Length(1)));
+
+    for ws in state.desktop.workspaces.iter() {
+        // FIXME: Green active_ws
+        subdiv.extend([
+            tui::SubPart {
+                constr: tui::Constraint::Length(ws.name.chars().count() as _),
+                elem: tui::Element {
+                    tag: Some(BarInteractTarget::HyprWorkspace(ws.id.clone()).serialize_tag()),
+                    kind: tui::ElementKind::Raw(ws.name.clone()),
+                },
+            },
+            tui::SubPart::spacing(tui::Constraint::Length(1)),
+        ])
+    }
+
+    subdiv.push(tui::SubPart::spacing(tui::Constraint::Fill(1)));
 
     const SPACING: u16 = 3;
 
-    if !state.time.is_empty() {
-        let time_area;
-        [ui_area, _, time_area] = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Length(SPACING),
-            Constraint::Length(state.time.chars().count() as _),
-        ])
-        .areas(ui_area);
+    for (addr, item) in state.systray.iter() {
+        for system_tray::item::IconPixmap {
+            width,
+            height,
+            pixels,
+        } in item.icon_pixmap.as_deref().unwrap_or(&[])
+        {
+            let mut img = match image::RgbaImage::from_vec(
+                width.cast_unsigned(),
+                height.cast_unsigned(),
+                pixels.clone(),
+            ) {
+                Some(img) => img,
+                None => {
+                    log::error!("Failed to load image from bytes");
+                    continue;
+                }
+            };
 
-        frame.render_widget(Paragraph::new(&state.time as &str), time_area);
-        ui.insert(time_area, BarInteractTarget::Time);
-    }
+            // https://users.rust-lang.org/t/argb32-color-model/92061/4
+            for image::Rgba(pixel) in img.pixels_mut() {
+                *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
+            }
+            let mut png_data = Vec::new();
+            if let Err(err) = img.write_with_encoder(image::codecs::png::PngEncoder::new(
+                std::io::Cursor::new(&mut png_data),
+            )) {
+                log::error!("Error encoding image: {err}");
+                continue;
+            }
 
-    if state.energy.should_show {
-        // TODO: Time estimate tooltip
-        let percentage = state.energy.percentage.round() as i64;
-        let sign = match state.energy.bstate {
-            BatteryState::Discharging | BatteryState::PendingDischarge => '-',
-            _ => '+',
-        };
-        let rate = format!("{sign}{:.1}W", state.energy.rate);
-        let energy = format!("{percentage:>3}% {rate:<6}");
-
-        let ppd_symbol = match &state.ppd_profile as &str {
-            "balanced" => " ",
-            "performance" => " ",
-            "power-saver" => " ",
-            _ => "",
-        };
-
-        let (ppd_area, energy_area);
-        [ui_area, _, ppd_area, energy_area] = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Length(SPACING),
-            Constraint::Length(ppd_symbol.chars().count() as _),
-            Constraint::Length(energy.chars().count() as _),
-        ])
-        .areas(ui_area);
-
-        frame.render_widget(Paragraph::new(energy), energy_area);
-        ui.insert(energy_area, BarInteractTarget::Energy);
-
-        frame.render_widget(Paragraph::new(ppd_symbol), ppd_area);
-        ui.insert(ppd_area, BarInteractTarget::Ppd);
+            subdiv.extend([
+                tui::SubPart {
+                    constr: tui::Constraint::FitImage,
+                    elem: tui::Element {
+                        tag: Some(BarInteractTarget::Tray(addr.clone()).serialize_tag()),
+                        kind: tui::ElementKind::Image(tui::Image {
+                            data: png_data,
+                            format: image::ImageFormat::Png,
+                        }),
+                    },
+                },
+                tui::SubPart::spacing(tui::Constraint::Length(1)),
+            ])
+        }
     }
 
     {
@@ -268,174 +248,84 @@ fn render(
         // FIXME: The muted symbol is double-width, the regular symbol is not
         let source = fmt_audio_device(&state.pulse.source, " ", [" "]);
 
-        let (source_area, sink_area);
-        [ui_area, _, source_area, _, sink_area] = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Length(SPACING),
-            Constraint::Length(source.chars().count() as _),
-            Constraint::Length(SPACING),
-            Constraint::Length(sink.chars().count() as _),
+        subdiv.extend([
+            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
+            tui::SubPart {
+                constr: tui::Constraint::Length(source.chars().count() as _),
+                elem: tui::Element {
+                    tag: Some(BarInteractTarget::Audio(PulseDeviceKind::Source).serialize_tag()),
+                    kind: tui::ElementKind::Raw(source.into()),
+                },
+            },
+            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
+            tui::SubPart {
+                constr: tui::Constraint::Length(sink.chars().count() as _),
+                elem: tui::Element {
+                    tag: Some(BarInteractTarget::Audio(PulseDeviceKind::Sink).serialize_tag()),
+                    kind: tui::ElementKind::Raw(sink.into()),
+                },
+            },
+        ]);
+    }
+
+    if state.energy.should_show {
+        // TODO: Time estimate tooltip
+        let percentage = state.energy.percentage.round() as i64;
+        let sign = match state.energy.bstate {
+            BatteryState::Discharging | BatteryState::PendingDischarge => '-',
+            _ => '+',
+        };
+        let rate = format!("{sign}{:.1}W", state.energy.rate);
+        let energy = format!("{percentage:>3}% {rate:<6}");
+
+        let ppd_symbol = match &state.ppd_profile as &str {
+            "balanced" => " ",
+            "performance" => " ",
+            "power-saver" => " ",
+            _ => "",
+        };
+
+        subdiv.extend([
+            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
+            tui::SubPart {
+                constr: tui::Constraint::Length(ppd_symbol.chars().count() as _),
+                elem: tui::Element {
+                    tag: Some(BarInteractTarget::Ppd.serialize_tag()),
+                    kind: tui::ElementKind::Raw(ppd_symbol.into()),
+                },
+            },
+            tui::SubPart {
+                constr: tui::Constraint::Length(energy.chars().count() as _),
+                elem: tui::Element {
+                    tag: Some(BarInteractTarget::Energy.serialize_tag()),
+                    kind: tui::ElementKind::Raw(energy.into()),
+                },
+            },
+        ]);
+    }
+
+    if !state.time.is_empty() {
+        subdiv.extend([
+            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
+            tui::SubPart {
+                constr: tui::Constraint::Length(state.time.chars().count() as _),
+                elem: tui::Element {
+                    tag: Some(BarInteractTarget::Time.serialize_tag()),
+                    kind: tui::ElementKind::Raw(state.time.as_str().into()),
+                },
+            },
         ])
-        .areas(ui_area);
-
-        frame.render_widget(Paragraph::new(sink), sink_area);
-        ui.insert(sink_area, BarInteractTarget::Audio(PulseDeviceKind::Sink));
-
-        frame.render_widget(Paragraph::new(source), source_area);
-        ui.insert(
-            source_area,
-            BarInteractTarget::Audio(PulseDeviceKind::Source),
-        );
     }
 
-    for (addr, item) in state.systray.iter() {
-        for system_tray::item::IconPixmap {
-            width,
-            height,
-            pixels,
-        } in item.icon_pixmap.as_deref().unwrap_or(&[])
-        {
-            let mut img = match image::RgbaImage::from_vec(
-                width.cast_unsigned(),
-                height.cast_unsigned(),
-                pixels.clone(),
-            ) {
-                Some(img) => img,
-                None => {
-                    log::error!("Failed to load image from bytes");
-                    continue;
-                }
-            };
+    subdiv.push(tui::SubPart::spacing(tui::Constraint::Length(1)));
 
-            let icon_area;
-            [ui_area, _, icon_area] = Layout::horizontal([
-                Constraint::Fill(1),
-                Constraint::Length(1),
-                Constraint::Length(square_icon_len),
-            ])
-            .areas(ui_area);
-
-            // https://users.rust-lang.org/t/argb32-color-model/92061/4
-            for image::Rgba(pixel) in img.pixels_mut() {
-                *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
-            }
-            let img = image::DynamicImage::ImageRgba8(img);
-            if let Ok(img) = picker
-                .new_protocol(img, icon_area, ratatui_image::Resize::Fit(None))
-                .map_err(|err| log::error!("Failed to create image: {err}"))
-            {
-                frame.render_widget(ratatui_image::Image::new(&img), icon_area);
-            }
-            ui.insert(icon_area, BarInteractTarget::Tray(addr.clone()));
-        }
+    tui::Tui {
+        root: tui::Element {
+            tag: None,
+            kind: tui::ElementKind::Subdivide(tui::Subdiv {
+                axis: tui::Axis::Horizontal,
+                parts: subdiv.into(),
+            }),
+        },
     }
-
-    ui
-}
-
-// TODO: Spawn as needed for monitors
-pub async fn main(
-    ctrl_tx: mpsc::UnboundedSender<BarEvent>,
-    mut ctrl_rx: mpsc::UnboundedReceiver<BarUpdate>,
-    monitor: Arc<str>,
-) -> anyhow::Result<()> {
-    log::info!("Starting bar");
-
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::cursor::Hide,
-        crossterm::event::EnableMouseCapture,
-    )?;
-    crossterm::terminal::enable_raw_mode()?;
-
-    let picker = ratatui_image::picker::Picker::from_query_stdio()?;
-    let mut state = BarState {
-        monitor,
-        ..Default::default()
-    };
-    let mut ui = RenderedLayout::default();
-
-    let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout().lock()))?;
-
-    // HACK: There is a bug that causes double width characters to be
-    // small when rendered by ratatui on kitty, seemingly because
-    // the spaces around them are not drawn at the beginning
-    // (since the unfilled cell is seen as a space?). The workaround
-    // is to fill the buffer with some non-space character.
-    if let Err(err) = term.draw(|frame| {
-        let area @ Rect { height, width, .. } = frame.area();
-        frame.render_widget(
-            Paragraph::new(
-                std::iter::repeat_n(
-                    std::iter::repeat_n('\u{2800}', width as _).chain(Some('\n')),
-                    height as _,
-                )
-                .flatten()
-                .collect::<String>(),
-            ),
-            area,
-        );
-    }) {
-        log::error!("Failed to prefill terminal: {err}")
-    }
-
-    enum Upd {
-        Ctrl(BarUpdate),
-        Term(crossterm::event::Event),
-    }
-    let ctrl_stream = futures::stream::poll_fn(move |cx| ctrl_rx.poll_recv(cx)).map(Upd::Ctrl);
-    let term_stream = crossterm::event::EventStream::new()
-        .filter_map(|res| {
-            res.map_err(|err| log::error!("Crossterm stream yielded: {err}"))
-                .ok()
-        })
-        .map(Upd::Term);
-    let mut events = term_stream.merge(ctrl_stream);
-
-    while let Some(bar_event) = events.next().await {
-        match bar_event {
-            Upd::Ctrl(update) => match update {
-                BarUpdate::SysTray(systray) => state.systray = systray,
-                BarUpdate::Desktop(hypr) => state.desktop = hypr,
-                BarUpdate::Energy(energy) => state.energy = energy,
-                BarUpdate::Ppd(profile) => state.ppd_profile = profile,
-                BarUpdate::Pulse(pulse) => state.pulse = pulse,
-                BarUpdate::Time(time) => state.time = time,
-            },
-            Upd::Term(event) => match event {
-                crossterm::event::Event::Paste(_) => continue,
-                crossterm::event::Event::FocusGained => continue,
-                crossterm::event::Event::Key(_) => continue,
-                crossterm::event::Event::FocusLost => {
-                    if let Err(err) = ctrl_tx.send(BarEvent::Interact(Interact {
-                        location: Location::ZERO,
-                        target: BarInteractTarget::None,
-                        kind: InteractKind::Hover,
-                    })) {
-                        log::warn!("Failed to send interaction: {err}");
-                        break;
-                    }
-                }
-                crossterm::event::Event::Mouse(event) => {
-                    let Some(interact) = ui.interpret_mouse_event(event, picker.font_size()) else {
-                        continue;
-                    };
-
-                    if let Err(err) = ctrl_tx.send(BarEvent::Interact(interact)) {
-                        log::warn!("Failed to send interaction: {err}")
-                    }
-
-                    continue;
-                }
-                crossterm::event::Event::Resize(_, _) => (),
-            },
-        }
-
-        if let Err(err) = term.draw(|frame| ui = render(&picker, frame, &state)) {
-            log::error!("Failed to draw: {err}");
-        }
-    }
-
-    unreachable!()
 }

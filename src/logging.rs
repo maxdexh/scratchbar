@@ -16,7 +16,7 @@ impl std::fmt::Display for ProcKindForLogger {
         match self {
             Self::Controller => write!(f, "CONTROLLER"),
             Self::Bar(display) => write!(f, "BAR @ {display}"),
-            Self::Menu(display) => write!(f, "BAR @ {display}"),
+            Self::Menu(display) => write!(f, "MENU @ {display}"),
         }
     }
 }
