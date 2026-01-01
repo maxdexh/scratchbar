@@ -1,12 +1,7 @@
 use std::{ffi::OsString, sync::Arc};
 
 use anyhow::anyhow;
-use ratatui::{
-    Terminal,
-    layout::{Rect, Size},
-    prelude::*,
-    widgets::{Block, Paragraph},
-};
+use ratatui::{Terminal, prelude::*};
 use ratatui_image::{FontSize, picker::Picker};
 use serde::{Deserialize, Serialize};
 use system_tray::item::Tooltip;
@@ -15,9 +10,8 @@ use tokio_stream::StreamExt;
 
 use crate::{
     clients::tray::{TrayMenuExt, TrayMenuInteract},
-    data::{ActiveMonitorInfo, InteractKind, Location},
+    data::{ActiveMonitorInfo, Location},
     tui,
-    utils::rect_center,
 };
 
 pub async fn controller_spawn_panel(
@@ -140,7 +134,7 @@ pub enum MenuUpdate {
     SwitchSubject {
         new_menu: Menu,
         location: Location,
-    }, // TODO: Monitor info
+    },
     UpdateTrayMenu(Arc<str>, TrayMenuExt),
     UpdateTrayTooltip(Arc<str>, Option<Tooltip>),
     RemoveTray(Arc<str>),
@@ -182,69 +176,11 @@ impl Menu {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct RenderedLayout {
-    widgets: Vec<(Rect, MenuInteractTarget)>,
-}
 type Interact = crate::data::InteractGeneric<MenuInteractTarget>;
 
-impl RenderedLayout {
-    pub fn insert(&mut self, rect: Rect, widget: MenuInteractTarget) {
-        self.widgets.push((rect, widget));
-    }
-
-    pub fn interpret_mouse_event(
-        &mut self,
-        event: crossterm::event::MouseEvent,
-        font_size: FontSize,
-    ) -> Option<Interact> {
-        use crossterm::event::MouseEventKind as MEK;
-        use crossterm::event::*;
-
-        let MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: _,
-        } = event;
-        let pos = Position { x: column, y: row };
-
-        let (rect, widget) = {
-            let mut targets = self.widgets.iter().filter(|(r, _)| r.contains(pos));
-            if let Some(found @ (r, w)) = targets.next() {
-                if let Some(extra) = targets.next() {
-                    log::error!("Multiple widgets contain {pos}: {extra:#?}, {found:#?}");
-                }
-                (*r, w)
-            } else {
-                return None;
-            }
-        };
-
-        let kind = match kind {
-            // TODO: Consider using Up instead
-            MEK::Down(button) => InteractKind::Click(button),
-            MEK::Moved => InteractKind::Hover,
-            MEK::Up(_)
-            | MEK::ScrollDown
-            | MEK::ScrollUp
-            | MEK::ScrollLeft
-            | MEK::ScrollRight
-            | MEK::Drag(_) => {
-                return None;
-            }
-        };
-
-        Some(Interact {
-            location: rect_center(rect, font_size),
-            target: widget.clone(),
-            kind,
-        })
-    }
-}
 #[derive(Debug, Clone, PartialEq)]
 pub struct Geometry {
-    size: Size,
+    size: tui::Size,
     location: Location,
     font_size: FontSize,
     monitor: Option<ActiveMonitorInfo>,
@@ -256,7 +192,10 @@ async fn adjust_terminal(
     menu_is_visible: bool,
 ) -> anyhow::Result<bool> {
     let &Geometry {
-        size: Size { width, height },
+        size: tui::Size {
+            w: width,
+            h: height,
+        },
         location: Location { x, y: _ },
         font_size: (font_w, _),
         ref monitor,
@@ -296,7 +235,7 @@ async fn adjust_terminal(
         // HACK: The margin calculation is always slightly too small, so add a few cells to the
         // calculation
         // TODO: Find out if this needs to increase with the width or if the error is constant
-        let half_pix_w = (u32::from(width + 3) * u32::from(font_w)).div_ceil(2);
+        let half_pix_w = (u32::from(width + 1) * u32::from(font_w)).div_ceil(2);
 
         // The left margin should be such that half the space is between
         // left margin and x. Use saturating_sub so that the left
@@ -365,143 +304,12 @@ async fn adjust_terminal(
     Ok(pending_resize)
 }
 
-fn text_size(text: &str) -> Size {
-    let (width, height) = text.lines().fold((0, 0), |(w, h), line| {
-        (w.max(line.chars().count() as u16), h + 1)
-    });
-    Size { width, height }
-}
-fn extend_size_down(dst: &mut Size, src: Size) {
-    dst.width = dst.width.max(src.width);
-    dst.height += src.height;
-}
-
-fn render_tray_menu_item(
-    picker: &Picker,
-    depth: u16,
-    item: &system_tray::menu::MenuItem,
-    addr: &Arc<str>,
-    menu_path: Option<&Arc<str>>,
-    out: &mut RenderReq,
-) {
-    use system_tray::menu::*;
-    match item {
-        MenuItem { visible: false, .. } => (),
-        MenuItem {
-            visible: true,
-            menu_type: MenuType::Separator,
-            ..
-        } => match out {
-            RenderReq::Precalc(size) => size.height += 1,
-            RenderReq::Render(frame, _, area) => {
-                let separator_area;
-                [separator_area, *area] =
-                    Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(*area);
-                frame.render_widget(
-                    Block::new()
-                        .borders(ratatui::widgets::Borders::TOP)
-                        .border_style(Color::DarkGray),
-                    separator_area,
-                );
-            }
-        },
-        MenuItem {
-            id,
-            menu_type: MenuType::Standard,
-            label: Some(label),
-            enabled: _,
-            visible: true,
-            icon_name: _,
-            icon_data,
-            shortcut: _,
-            toggle_type: _,  // TODO
-            toggle_state: _, // TODO
-            children_display: _,
-            disposition: _, // TODO: ???
-            submenu,
-        } => {
-            let square_icon_len = {
-                let (font_w, font_h) = picker.font_size();
-                font_h.div_ceil(font_w)
-            };
-
-            let mut label_size = text_size(label);
-            label_size.width += depth;
-
-            // FIXME: Probably better to just shove the image in the first line at
-            // normal size rather than this.
-            let img_width = if icon_data.is_some() {
-                square_icon_len * label_size.height
-            } else {
-                0
-            };
-
-            label_size.width += img_width + 1;
-
-            match out {
-                RenderReq::Render(frame, rendered_layout, area) => {
-                    let mut text_area;
-                    [text_area, *area] = Layout::vertical([
-                        Constraint::Length(label_size.height),
-                        Constraint::Fill(1),
-                    ])
-                    .areas(*area);
-                    if let Some(icon_data) = icon_data {
-                        let [icon_area, _, rest] = Layout::horizontal([
-                            Constraint::Length(img_width),
-                            Constraint::Length(1),
-                            Constraint::Fill(1),
-                        ])
-                        .areas(text_area);
-
-                        if let Ok(img) =
-                            image::codecs::png::PngDecoder::new(std::io::Cursor::new(icon_data))
-                                .and_then(image::DynamicImage::from_decoder)
-                                .map_err(|err| log::error!("Invalid icon data: {err}"))
-                        {
-                            frame.render_stateful_widget(
-                                ratatui_image::StatefulImage::default(),
-                                icon_area,
-                                &mut picker.new_resize_protocol(img),
-                            );
-                        }
-
-                        text_area = rest;
-                    }
-                    frame.render_widget(
-                        Paragraph::new(format!("{}{label}", " ".repeat(depth as _))),
-                        text_area,
-                    );
-                    if let Some(mp) = menu_path {
-                        rendered_layout.insert(
-                            text_area,
-                            MenuInteractTarget::TrayMenu(TrayMenuInteract {
-                                addr: addr.clone(),
-                                menu_path: mp.clone(),
-                                id: *id,
-                            }),
-                        );
-                    }
-                }
-                RenderReq::Precalc(size) => {
-                    extend_size_down(size, label_size);
-                }
-            }
-
-            if !submenu.is_empty() {
-                render_tray_menu(picker, depth + 1, submenu, addr, menu_path, out);
-            }
-        }
-
-        _ => log::warn!("Unhandled menu item: {item:#?}"),
-    }
-}
 fn tray_menu_item_to_tui(
     depth: u16,
     item: &system_tray::menu::MenuItem,
     addr: &Arc<str>,
     menu_path: Option<&Arc<str>>,
-) -> Option<tui::Element> {
+) -> Option<tui::Elem> {
     use system_tray::menu::*;
     let main_elem = match item {
         MenuItem { visible: false, .. } => return None,
@@ -509,21 +317,19 @@ fn tray_menu_item_to_tui(
             visible: true,
             menu_type: MenuType::Separator,
             ..
-        } => tui::Element {
-            tag: None,
-            kind: tui::ElementKind::Block(tui::Block {
-                borders: tui::Borders {
-                    top: true,
-                    ..Default::default()
-                },
-                border_style: tui::Style {
-                    fg: Some(tui::Color::DarkGray),
-                    ..Default::default()
-                },
-                border_set: tui::LineSet::normal(),
-                inner: None,
-            }),
-        },
+        } => tui::Block {
+            borders: tui::Borders {
+                top: true,
+                ..Default::default()
+            },
+            border_style: tui::Style {
+                fg: Some(tui::Color::DarkGray),
+                ..Default::default()
+            },
+            border_set: tui::LineSet::normal(),
+            inner: None,
+        }
+        .into(),
 
         MenuItem {
             id,
@@ -538,45 +344,48 @@ fn tray_menu_item_to_tui(
             toggle_state: _, // TODO
             children_display: _,
             disposition: _, // TODO: ???
-            submenu,
-        } => tui::Element {
-            tag: menu_path.map(|it| {
-                MenuInteractTarget::TrayMenu(TrayMenuInteract {
-                    addr: addr.clone(),
-                    menu_path: it.clone(),
-                    id: *id,
-                })
-                .serialize_tag()
-            }),
-            kind: if let Some(icon) = icon_data {
-                tui::ElementKind::Subdivide(tui::Subdiv {
-                    axis: tui::Axis::Horizontal,
-                    // FIXME: Put in the first line instead
-                    parts: Box::new([
-                        tui::SubPart {
-                            constr: tui::Constraint::Auto,
-                            elem: tui::Element {
-                                tag: None,
-                                kind: tui::ElementKind::Image(tui::Image {
+            submenu: _,
+        } => {
+            let elem = tui::Subdiv::horizontal([
+                tui::DivPart::spacing(depth + 1),
+                if let Some(icon) = icon_data {
+                    let mut lines = label.lines();
+                    let first_line = lines.next().unwrap_or_default();
+                    tui::DivPart::auto(tui::Subdiv::vertical([
+                        tui::DivPart::length(
+                            1,
+                            tui::Subdiv::horizontal([
+                                tui::DivPart::auto(tui::Image {
                                     data: icon.clone(),
                                     format: image::ImageFormat::Png,
                                     cached: None,
                                 }),
-                            },
-                        },
-                        tui::SubPart {
-                            constr: tui::Constraint::Auto,
-                            elem: tui::Element {
-                                tag: None,
-                                kind: tui::ElementKind::PlainText(label.as_str().into()),
-                            },
-                        },
-                    ]),
-                })
-            } else {
-                tui::ElementKind::PlainText(label.as_str().into())
-            },
-        },
+                                tui::DivPart::spacing(1),
+                                tui::DivPart::auto(tui::Text::plain(first_line.into())),
+                            ]),
+                        ),
+                        tui::DivPart::auto(tui::Text::plain(lines.collect::<String>().into())),
+                    ]))
+                } else {
+                    tui::DivPart::auto(tui::Text::plain(label.as_str().into()))
+                },
+                tui::DivPart::spacing(1),
+            ])
+            .into();
+            match menu_path {
+                Some(it) => tui::TagElem {
+                    elem,
+                    tag: MenuInteractTarget::TrayMenu(TrayMenuInteract {
+                        addr: addr.clone(),
+                        menu_path: it.clone(),
+                        id: *id,
+                    })
+                    .serialize_tag(),
+                }
+                .into(),
+                None => elem,
+            }
+        }
 
         _ => {
             log::error!("Unhandled menu item: {item:#?}");
@@ -587,150 +396,29 @@ fn tray_menu_item_to_tui(
     Some(if item.submenu.is_empty() {
         main_elem
     } else {
-        tui::Element {
-            tag: None,
-            kind: tui::Subdiv {
-                axis: tui::Axis::Vertical,
-                parts: Box::new([
-                    tui::SubPart {
-                        constr: tui::Constraint::Auto,
-                        elem: main_elem,
-                    },
-                    tui::SubPart {
-                        constr: tui::Constraint::Auto,
-                        elem: tray_menu_to_tui(depth + 1, &item.submenu, addr, menu_path),
-                    },
-                ]),
-            }
-            .into(),
-        }
+        tui::Subdiv::vertical([
+            tui::DivPart::auto(main_elem),
+            tui::DivPart::auto(tray_menu_to_tui(depth + 1, &item.submenu, addr, menu_path)),
+        ])
+        .into()
     })
 }
 
-fn render_tray_menu(
-    picker: &Picker,
-    depth: u16,
-    items: &[system_tray::menu::MenuItem],
-    addr: &Arc<str>,
-    menu_path: Option<&Arc<str>>,
-    out: &mut RenderReq,
-) {
-    if depth > 5 {
-        log::error!("Tray menu is nested too deeply, skipping {items:#?}");
-        return;
-    }
-
-    for item in items {
-        render_tray_menu_item(picker, depth, item, addr, menu_path, out);
-    }
-}
 fn tray_menu_to_tui(
     depth: u16,
     items: &[system_tray::menu::MenuItem],
     addr: &Arc<str>,
     menu_path: Option<&Arc<str>>,
-) -> tui::Element {
-    let subdiv = tui::Subdiv {
-        axis: tui::Axis::Vertical,
-        parts: items
-            .iter()
-            .filter_map(|item| {
-                Some(tui::SubPart {
-                    constr: tui::Constraint::Auto,
-                    elem: tray_menu_item_to_tui(depth, item, addr, menu_path)?,
-                })
-            })
-            .collect(),
-    };
-
-    tui::Element {
-        tag: None,
-        kind: tui::ElementKind::Subdivide(tui::Subdiv {
-            axis: tui::Axis::Horizontal,
-            parts: Box::new([
-                tui::SubPart {
-                    constr: tui::Constraint::Length(1),
-                    elem: tui::Element {
-                        kind: tui::ElementKind::Empty,
-                        tag: None,
-                    },
-                },
-                tui::SubPart {
-                    constr: tui::Constraint::Auto,
-                    elem: tui::Element {
-                        tag: None,
-                        kind: tui::ElementKind::Subdivide(subdiv),
-                    },
-                },
-            ]),
-        }),
-    }
+) -> tui::Elem {
+    tui::Subdiv::vertical(items.iter().filter_map(|item| {
+        Some(tui::DivPart {
+            constr: tui::Constr::Auto,
+            elem: tray_menu_item_to_tui(depth, item, addr, menu_path)?,
+        })
+    }))
+    .into()
 }
 
-fn render_or_calc(picker: &Picker, menu: &Menu, out: &mut RenderReq) {
-    match menu {
-        Menu::None => (),
-        Menu::TrayContext {
-            addr,
-            tmenu:
-                TrayMenuExt {
-                    id: _,
-                    menu_path,
-                    submenus,
-                },
-        } => {
-            // Draw a frame around the context menu
-            match out {
-                RenderReq::Render(frame, _, area) => {
-                    let block = ratatui::widgets::Block::bordered()
-                        .border_style(Color::DarkGray)
-                        .border_type(ratatui::widgets::BorderType::Thick);
-                    let inner_area = block.inner(*area);
-                    frame.render_widget(block, *area);
-                    *area = inner_area;
-                }
-                RenderReq::Precalc(size) => {
-                    size.width += 2;
-                    size.height += 2;
-                }
-            }
-            // Then render the items
-            render_tray_menu(picker, 0, submenus, addr, menu_path.as_ref(), out)
-        }
-        Menu::TrayTooltip {
-            addr: _,
-            tooltip:
-                Tooltip {
-                    icon_name: _,
-                    icon_data: _,
-                    title,
-                    description,
-                },
-        } => {
-            let title_size = text_size(title);
-            let desc_size = text_size(description);
-
-            match out {
-                RenderReq::Render(frame, _, area) => {
-                    let [title_area, desc_area] = Layout::vertical([
-                        Constraint::Length(title_size.height),
-                        Constraint::Length(desc_size.height),
-                    ])
-                    .areas(*area);
-                    frame.render_widget(
-                        Paragraph::new(title.as_str()).centered().bold(),
-                        title_area,
-                    );
-                    frame.render_widget(Paragraph::new(description.as_str()), desc_area);
-                }
-                RenderReq::Precalc(size) => {
-                    extend_size_down(size, title_size);
-                    extend_size_down(size, desc_size);
-                }
-            }
-        }
-    }
-}
 pub fn to_tui(menu: &Menu) -> Option<tui::Tui> {
     Some(match menu {
         Menu::None => return None,
@@ -745,23 +433,21 @@ pub fn to_tui(menu: &Menu) -> Option<tui::Tui> {
         } => {
             // Then render the items
             tui::Tui {
-                root: tui::Element {
-                    tag: None,
-                    kind: tui::ElementKind::Block(tui::Block {
-                        borders: tui::Borders::all(),
-                        border_style: tui::Style {
-                            fg: Some(tui::Color::DarkGray),
-                            ..Default::default()
-                        },
-                        border_set: tui::LineSet::thick(),
-                        inner: Some(Box::new(tray_menu_to_tui(
-                            0,
-                            submenus,
-                            addr,
-                            menu_path.as_ref(),
-                        ))),
-                    }),
-                },
+                root: tui::Block {
+                    borders: tui::Borders::all(),
+                    border_style: tui::Style {
+                        fg: Some(tui::Color::DarkGray),
+                        ..Default::default()
+                    },
+                    border_set: tui::LineSet::thick(),
+                    inner: Some(Box::new(tray_menu_to_tui(
+                        0,
+                        submenus,
+                        addr,
+                        menu_path.as_ref(),
+                    ))),
+                }
+                .into(),
             }
         }
         Menu::TrayTooltip {
@@ -774,52 +460,14 @@ pub fn to_tui(menu: &Menu) -> Option<tui::Tui> {
                     description,
                 },
         } => tui::Tui {
-            root: tui::Element {
-                tag: None,
-                kind: tui::Subdiv {
-                    axis: tui::Axis::Vertical,
-                    parts: Box::new([
-                        tui::SubPart {
-                            constr: tui::Constraint::Auto,
-                            elem: tui::Element {
-                                tag: None,
-                                kind: tui::ElementKind::PlainText(title.as_str().into()),
-                            },
-                        },
-                        tui::SubPart {
-                            constr: tui::Constraint::Auto,
-                            elem: tui::Element {
-                                tag: None,
-                                kind: tui::ElementKind::PlainText(description.as_str().into()),
-                            },
-                        },
-                    ]),
-                }
-                .into(),
-            },
+            root: tui::Subdiv::vertical([
+                // FIXME: Should be bold and centered
+                tui::DivPart::auto(tui::Text::plain(title.as_str().into())),
+                tui::DivPart::auto(tui::Text::plain(description.as_str().into())),
+            ])
+            .into(),
         },
     })
-}
-fn calc_size(picker: &Picker, menu: &Menu) -> Size {
-    let mut size = Size::default();
-    render_or_calc(picker, menu, &mut RenderReq::Precalc(&mut size));
-    size
-}
-fn render_menu(picker: &Picker, menu: &Menu, frame: &mut ratatui::Frame) -> RenderedLayout {
-    let mut out = RenderedLayout::default();
-    render_or_calc(
-        picker,
-        menu,
-        &mut RenderReq::Render(frame, &mut out, frame.area()),
-    );
-    out
-}
-
-// TODO: Try https://sw.kovidgoyal.net/kitty/launch/#watchers for listening to hide
-// and focus loss events.
-enum RenderReq<'a, 'b> {
-    Render(&'a mut ratatui::Frame<'b>, &'a mut RenderedLayout, Rect),
-    Precalc(&'a mut Size),
 }
 
 // TODO: Handle hovers by highlighting option
@@ -848,7 +496,26 @@ pub async fn main(
     let picker = Picker::from_query_stdio()?;
 
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout().lock()))?;
-    let mut ui = RenderedLayout::default();
+    let mut ui = crate::display_panel::RenderedLayout::default();
+    let siz_ctx = || tui::SizingContext {
+        font_size: tui::Size::ratatui_picker_font_size(&picker),
+        div_w: None,
+        div_h: None,
+    };
+    let mut do_render = |tui: &mut tui::Tui, ui: &mut _| {
+        let res = term.draw(|frame| {
+            let mut ctx = tui::RatatuiRenderContext {
+                picker: &picker,
+                frame,
+                layout: Default::default(),
+            };
+            tui.render_ratatui(&mut ctx, siz_ctx());
+            *ui = ctx.layout;
+        });
+        if let Err(err) = res {
+            log::error!("Failed to draw: {err}")
+        }
+    };
 
     let mut geometry = Geometry {
         size: Default::default(),
@@ -856,7 +523,7 @@ pub async fn main(
         font_size: picker.font_size(),
         monitor: None,
     };
-    let mut pending_resize = false;
+    let mut cur_tui = None;
 
     #[derive(Debug)]
     enum Upd {
@@ -902,20 +569,24 @@ pub async fn main(
         match menu_event {
             Upd::Ctrl(MenuUpdate::Watcher(MenuWatcherEvent::Resize))
             | Upd::Term(TE::Resize(_, _)) => {
-                if pending_resize {
-                    log::debug!("Pending resize completed: {menu_event:?}");
-                    pending_resize = false;
-                } else {
-                    continue;
+                log::debug!("Pending resize completed: {menu_event:?}");
+
+                //if let Err(err) = term.draw(|frame| ui = render_menu(&picker, &cur_menu, frame)) {
+                //    log::error!("Failed to draw: {err}")
+                //}
+                if let Some(tui) = &mut cur_tui {
+                    do_render(tui, &mut ui);
                 }
+
+                continue;
             }
             Upd::Term(TE::Paste(_)) => continue,
             Upd::Term(TE::FocusGained | crossterm::event::Event::Mouse(_))
                 if cur_menu.close_on_unfocus() == Some(true) =>
             {
                 // If we have a tooltip open and the cursor moves into it, that means
-                // we missed the cursor moving off the icon out of the bar, so we hide
-                // it right away
+                // we missed the cursor moving off the icon and outside the bar, so we
+                // hide it right away
                 switch_subject(&mut cur_menu, Menu::None, Location::ZERO);
             }
             Upd::Term(TE::FocusLost | crossterm::event::Event::FocusGained) => {
@@ -923,11 +594,20 @@ pub async fn main(
             }
             Upd::Term(TE::Key(_)) => continue,
             Upd::Term(TE::Mouse(event)) => {
-                let Some(interact) = ui.interpret_mouse_event(event, picker.font_size()) else {
+                let Some(crate::display_panel::PanelInteract {
+                    location,
+                    target: Some(target),
+                    kind,
+                }) = ui.interpret_mouse_event(event, picker.font_size())
+                else {
                     continue;
                 };
 
-                if let Err(err) = ctrl_tx.send(MenuEvent::Interact(interact)) {
+                if let Err(err) = ctrl_tx.send(MenuEvent::Interact(Interact {
+                    location,
+                    kind,
+                    target: MenuInteractTarget::deserialize_tag(&target),
+                })) {
                     log::warn!("Failed to send interaction: {err}");
                     break;
                 }
@@ -1003,21 +683,23 @@ pub async fn main(
             }
         }
 
-        if cur_menu.is_visible() {
-            new_geometry.size = calc_size(&picker, &cur_menu);
+        cur_tui = to_tui(&cur_menu);
+        if let Some(tui) = &mut cur_tui {
+            match tui.calc_size(siz_ctx()) {
+                Ok(size) => new_geometry.size = size,
+                Err(err) => {
+                    log::error!("Failed to calculate size of broken tui (skipping): {err}");
+                    cur_tui = None;
+                }
+            }
         }
-
-        if adjust_terminal(&new_geometry, &geometry, &socket, cur_menu.is_visible()).await? {
-            pending_resize = true;
+        if !adjust_terminal(&new_geometry, &geometry, &socket, cur_tui.is_some()).await?
+            && let Some(tui) = &mut cur_tui
+        {
+            do_render(tui, &mut ui)
         }
         geometry = new_geometry;
-
-        if !pending_resize
-            && let Err(err) = term.draw(|frame| ui = render_menu(&picker, &cur_menu, frame))
-        {
-            log::error!("Failed to draw: {err}")
-        }
     }
 
-    unreachable!()
+    Ok(())
 }

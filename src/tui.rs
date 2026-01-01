@@ -18,37 +18,68 @@ impl InteractTag {
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct Element {
-    pub tag: Option<InteractTag>,
-    pub kind: ElementKind,
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub enum ElementKind {
+pub enum Elem {
     Subdivide(Subdiv),
-    PlainText(Arc<str>),
+    Text(Text),
     Image(Image),
     Block(Block),
+    Tagged(Box<TagElem>),
     #[default]
     Empty,
 }
-impl From<Subdiv> for ElementKind {
+impl From<Subdiv> for Elem {
     fn from(value: Subdiv) -> Self {
         Self::Subdivide(value)
     }
 }
-impl From<Image> for ElementKind {
+impl From<Image> for Elem {
     fn from(value: Image) -> Self {
         Self::Image(value)
     }
 }
-impl From<Block> for ElementKind {
+impl From<Block> for Elem {
     fn from(value: Block) -> Self {
         Self::Block(value)
     }
 }
+impl From<TagElem> for Elem {
+    fn from(value: TagElem) -> Self {
+        Self::Tagged(Box::new(value))
+    }
+}
+impl From<Text> for Elem {
+    fn from(value: Text) -> Self {
+        Self::Text(value)
+    }
+}
 
-// FIXME: Write this as an enum instead, encode as png if needed on serialize
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Text {
+    pub body: Arc<str>,
+}
+impl Text {
+    pub fn plain(body: Arc<str>) -> Self {
+        if body.contains('\x1b') {
+            log::warn!("Call to `plain` with text containing <ESC>: {body:?}");
+        }
+        Self { body }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TagElem {
+    pub tag: InteractTag,
+    pub elem: Elem,
+}
+impl TagElem {
+    pub fn new(tag: InteractTag, elem: impl Into<Elem>) -> Self {
+        Self {
+            tag,
+            elem: elem.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {
     pub data: Vec<u8>,
@@ -71,7 +102,7 @@ pub struct Block {
     pub borders: Borders,
     pub border_style: Style,
     pub border_set: LineSet,
-    pub inner: Option<Box<Element>>,
+    pub inner: Option<Box<Elem>>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -98,49 +129,81 @@ pub enum Axis {
     Vertical,
 }
 #[derive(Default, Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum Constraint {
+pub enum Constr {
     Length(u16),
     Fill(u16),
     #[default]
     Auto,
-    //Percentage(u16),
-    //Min(u16),
-    //Max(u16),
-    //Ratio(u32, u32),
 }
 // TODO: Builder
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Subdiv {
     pub axis: Axis,
-    pub parts: Box<[SubPart]>,
+    pub parts: Box<[DivPart]>,
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SubPart {
-    pub constr: Constraint,
-    pub elem: Element,
-}
-impl SubPart {
-    pub fn spacing(constr: Constraint) -> Self {
+impl Subdiv {
+    pub fn horizontal(parts: impl IntoIterator<Item = DivPart>) -> Self {
         Self {
-            constr,
-            elem: Element {
-                kind: ElementKind::Empty,
-                tag: None,
-            },
+            axis: Axis::Horizontal,
+            parts: FromIterator::from_iter(parts),
+        }
+    }
+    pub fn vertical(parts: impl IntoIterator<Item = DivPart>) -> Self {
+        Self {
+            axis: Axis::Vertical,
+            parts: FromIterator::from_iter(parts),
         }
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DivPart {
+    pub constr: Constr,
+    pub elem: Elem,
+}
+impl DivPart {
+    pub fn spacing(len: u16) -> Self {
+        Self::length(len, Elem::Empty)
+    }
+    pub fn auto(elem: impl Into<Elem>) -> Self {
+        Self::new(Constr::Auto, elem)
+    }
+    pub fn length(len: u16, elem: impl Into<Elem>) -> Self {
+        Self::new(Constr::Length(len), elem)
+    }
+    pub fn new(constr: Constr, elem: impl Into<Elem>) -> Self {
+        Self {
+            constr,
+            elem: elem.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
-    w: u16,
-    h: u16,
+    pub w: u16,
+    pub h: u16,
+}
+impl Size {
+    pub fn get_mut(&mut self, axis: Axis) -> &mut u16 {
+        let Self { w, h } = self;
+        match axis {
+            Axis::Horizontal => w,
+            Axis::Vertical => h,
+        }
+    }
+    pub fn get(mut self, axis: Axis) -> u16 {
+        *self.get_mut(axis)
+    }
+    pub fn ratatui_picker_font_size(picker: &ratatui_image::picker::Picker) -> Self {
+        let (w, h) = picker.font_size();
+        Self { w, h }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tui {
-    pub root: Element,
+    pub root: Elem,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -313,155 +376,5 @@ impl LineSet {
         }
     }
 }
-
-#[derive(Clone, Copy)]
-pub struct SizingContext {
-    font_size: Size,
-    div_w: Option<u16>,
-    div_h: Option<u16>,
-}
-
-impl Tui {
-    fn calc_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        self.root.calc_auto_size(ctx)
-    }
-}
-impl Element {
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        self.kind.calc_auto_size(ctx)
-    }
-}
-impl ElementKind {
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || match self {
-            Self::Subdivide(subdiv) => subdiv.calc_auto_size(ctx),
-            Self::PlainText(text) => {
-                let mut size = Size::default();
-                for line in text.lines() {
-                    size.w = size
-                        .w
-                        .max(line.chars().count().try_into().unwrap_or(u16::MAX));
-                    size.h = size.h.saturating_add(1);
-                }
-                Ok(size)
-            }
-            Self::Image(image) => image.calc_auto_size(ctx),
-            Self::Block(block) => block.calc_auto_size(ctx),
-            Self::Empty => Ok(Size::default()),
-        })
-    }
-}
-impl Image {
-    fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
-            let mut fit = |axis, other_axis_size| {
-                let Size {
-                    w: font_w,
-                    h: font_h,
-                } = ctx.font_size;
-
-                let it = self.load()?;
-                let mut ratio = f64::from(it.width()) / f64::from(it.height());
-                ratio *= f64::from(font_h) / f64::from(font_w);
-                let cells = f64::from(other_axis_size)
-                    * match axis {
-                        Axis::Horizontal => ratio,
-                        Axis::Vertical => 1.0 / ratio,
-                    };
-
-                Ok::<_, anyhow::Error>(cells.ceil() as u16)
-            };
-            Ok(match (ctx.div_w, ctx.div_h) {
-                (Some(w), Some(h)) => Size { w, h },
-                (Some(w), None) => Size {
-                    w,
-                    h: fit(Axis::Vertical, w)?,
-                },
-                (None, Some(h)) => Size {
-                    h,
-                    w: fit(Axis::Horizontal, h)?,
-                },
-                (None, None) => anyhow::bail!("Cannot fit image without a fixed dimension"),
-            })
-        })
-    }
-}
-impl Subdiv {
-    fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
-            let mut size = Size::default();
-            for SubPart { constr, elem } in &mut self.parts {
-                let elem_size = match constr {
-                    Constraint::Length(l) => elem.calc_auto_size(match self.axis {
-                        Axis::Horizontal => SizingContext {
-                            div_w: Some(*l),
-                            ..ctx
-                        },
-                        Axis::Vertical => SizingContext {
-                            div_h: Some(*l),
-                            ..ctx
-                        },
-                    })?,
-                    Constraint::Fill(_) => {
-                        let mut it = elem.calc_auto_size(match self.axis {
-                            Axis::Horizontal => SizingContext { div_w: None, ..ctx },
-                            Axis::Vertical => SizingContext { div_h: None, ..ctx },
-                        })?;
-                        match self.axis {
-                            Axis::Horizontal => it.w = 0,
-                            Axis::Vertical => it.h = 0,
-                        }
-                        it
-                    }
-                    Constraint::Auto => elem.calc_auto_size(ctx)?,
-                };
-                let horiz = (&mut size.w, elem_size.w);
-                let vert = (&mut size.h, elem_size.h);
-                let ((adst, asrc), (mdst, msrc)) = match self.axis {
-                    Axis::Horizontal => (horiz, vert),
-                    Axis::Vertical => (vert, horiz),
-                };
-                *adst += asrc;
-                *mdst = msrc.max(*mdst);
-            }
-            Ok(size)
-        })
-    }
-}
-impl Block {
-    fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
-            let mut size = self
-                .inner
-                .as_mut()
-                .map(|it| it.calc_auto_size(ctx))
-                .transpose()?
-                .unwrap_or_default();
-            let Borders {
-                top,
-                bottom,
-                left,
-                right,
-            } = self.borders;
-            size.w = size.w.saturating_add(u16::from(left) + u16::from(right));
-            size.h = size.h.saturating_add(u16::from(top) + u16::from(bottom));
-            Ok(size)
-        })
-    }
-}
-fn auto_size_invariants(
-    ctx: SizingContext,
-    f: impl FnOnce() -> anyhow::Result<Size>,
-) -> anyhow::Result<Size> {
-    if let (Some(w), Some(h)) = (ctx.div_w, ctx.div_h) {
-        return Ok(Size { w, h });
-    }
-    let mut size = f()?;
-    if let Some(w) = ctx.div_w {
-        size.w = w;
-    }
-    if let Some(h) = ctx.div_h {
-        size.h = h;
-    }
-    Ok(size)
-}
+mod render;
+pub use render::*;

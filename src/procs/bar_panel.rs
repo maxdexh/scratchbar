@@ -161,23 +161,20 @@ impl BarState {
 fn to_tui(state: &BarState) -> tui::Tui {
     let mut subdiv = Vec::new();
 
-    subdiv.push(tui::SubPart::spacing(tui::Constraint::Length(1)));
+    subdiv.push(tui::DivPart::spacing(1));
 
     for ws in state.desktop.workspaces.iter() {
         // FIXME: Green active_ws
         subdiv.extend([
-            tui::SubPart {
-                constr: tui::Constraint::Length(ws.name.chars().count() as _),
-                elem: tui::Element {
-                    tag: Some(BarInteractTarget::HyprWorkspace(ws.id.clone()).serialize_tag()),
-                    kind: tui::ElementKind::PlainText(ws.name.clone()),
-                },
-            },
-            tui::SubPart::spacing(tui::Constraint::Length(1)),
+            tui::DivPart::auto(tui::TagElem::new(
+                BarInteractTarget::HyprWorkspace(ws.id.clone()).serialize_tag(),
+                tui::Text::plain(ws.name.clone()),
+            )),
+            tui::DivPart::spacing(1),
         ])
     }
 
-    subdiv.push(tui::SubPart::spacing(tui::Constraint::Fill(1)));
+    subdiv.push(tui::DivPart::new(tui::Constr::Fill(1), tui::Elem::Empty));
 
     const SPACING: u16 = 3;
 
@@ -213,18 +210,15 @@ fn to_tui(state: &BarState) -> tui::Tui {
             }
 
             subdiv.extend([
-                tui::SubPart {
-                    constr: tui::Constraint::Auto,
-                    elem: tui::Element {
-                        tag: Some(BarInteractTarget::Tray(addr.clone()).serialize_tag()),
-                        kind: tui::ElementKind::Image(tui::Image {
-                            data: png_data,
-                            format: image::ImageFormat::Png,
-                            cached: None,
-                        }),
+                tui::DivPart::auto(tui::TagElem::new(
+                    BarInteractTarget::Tray(addr.clone()).serialize_tag(),
+                    tui::Image {
+                        data: png_data,
+                        format: image::ImageFormat::Png,
+                        cached: None,
                     },
-                },
-                tui::SubPart::spacing(tui::Constraint::Length(1)),
+                )),
+                tui::DivPart::spacing(1),
             ])
         }
     }
@@ -250,22 +244,16 @@ fn to_tui(state: &BarState) -> tui::Tui {
         let source = fmt_audio_device(&state.pulse.source, " ", [" "]);
 
         subdiv.extend([
-            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
-            tui::SubPart {
-                constr: tui::Constraint::Length(source.chars().count() as _),
-                elem: tui::Element {
-                    tag: Some(BarInteractTarget::Audio(PulseDeviceKind::Source).serialize_tag()),
-                    kind: tui::ElementKind::PlainText(source.into()),
-                },
-            },
-            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
-            tui::SubPart {
-                constr: tui::Constraint::Length(sink.chars().count() as _),
-                elem: tui::Element {
-                    tag: Some(BarInteractTarget::Audio(PulseDeviceKind::Sink).serialize_tag()),
-                    kind: tui::ElementKind::PlainText(sink.into()),
-                },
-            },
+            tui::DivPart::spacing(SPACING),
+            tui::DivPart::auto(tui::TagElem::new(
+                BarInteractTarget::Audio(PulseDeviceKind::Source).serialize_tag(),
+                tui::Text::plain(source.into()),
+            )),
+            tui::DivPart::spacing(SPACING),
+            tui::DivPart::auto(tui::TagElem::new(
+                BarInteractTarget::Audio(PulseDeviceKind::Sink).serialize_tag(),
+                tui::Text::plain(sink.into()),
+            )),
         ]);
     }
 
@@ -287,46 +275,31 @@ fn to_tui(state: &BarState) -> tui::Tui {
         };
 
         subdiv.extend([
-            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
-            tui::SubPart {
-                constr: tui::Constraint::Length(ppd_symbol.chars().count() as _),
-                elem: tui::Element {
-                    tag: Some(BarInteractTarget::Ppd.serialize_tag()),
-                    kind: tui::ElementKind::PlainText(ppd_symbol.into()),
-                },
-            },
-            tui::SubPart {
-                constr: tui::Constraint::Length(energy.chars().count() as _),
-                elem: tui::Element {
-                    tag: Some(BarInteractTarget::Energy.serialize_tag()),
-                    kind: tui::ElementKind::PlainText(energy.into()),
-                },
-            },
+            tui::DivPart::spacing(SPACING),
+            tui::DivPart::auto(tui::TagElem::new(
+                BarInteractTarget::Ppd.serialize_tag(),
+                tui::Text::plain(ppd_symbol.into()),
+            )),
+            tui::DivPart::auto(tui::TagElem::new(
+                BarInteractTarget::Energy.serialize_tag(),
+                tui::Text::plain(energy.into()),
+            )),
         ]);
     }
 
     if !state.time.is_empty() {
         subdiv.extend([
-            tui::SubPart::spacing(tui::Constraint::Length(SPACING)),
-            tui::SubPart {
-                constr: tui::Constraint::Length(state.time.chars().count() as _),
-                elem: tui::Element {
-                    tag: Some(BarInteractTarget::Time.serialize_tag()),
-                    kind: tui::ElementKind::PlainText(state.time.as_str().into()),
-                },
-            },
+            tui::DivPart::spacing(SPACING),
+            tui::DivPart::auto(tui::TagElem::new(
+                BarInteractTarget::Time.serialize_tag(),
+                tui::Text::plain(state.time.as_str().into()),
+            )),
         ])
     }
 
-    subdiv.push(tui::SubPart::spacing(tui::Constraint::Length(1)));
+    subdiv.push(tui::DivPart::spacing(1));
 
     tui::Tui {
-        root: tui::Element {
-            tag: None,
-            kind: tui::ElementKind::Subdivide(tui::Subdiv {
-                axis: tui::Axis::Horizontal,
-                parts: subdiv.into(),
-            }),
-        },
+        root: tui::Subdiv::horizontal(subdiv).into(),
     }
 }
