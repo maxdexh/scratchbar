@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct InteractTag(Arc<[u8]>);
 impl InteractTag {
@@ -16,10 +16,18 @@ impl InteractTag {
         Self(bytes.into())
     }
 }
+impl std::fmt::Debug for InteractTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hasher::write(&mut hasher, &self.0);
+        let hash = std::hash::Hasher::finish(&hasher);
+        f.debug_tuple("InteractTag").field(&hash).finish()
+    }
+}
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub enum Elem {
-    Subdivide(Subdiv),
+    Subdivide(Stack),
     Text(Text),
     Image(Image),
     Block(Block),
@@ -27,8 +35,8 @@ pub enum Elem {
     #[default]
     Empty,
 }
-impl From<Subdiv> for Elem {
-    fn from(value: Subdiv) -> Self {
+impl From<Stack> for Elem {
+    fn from(value: Stack) -> Self {
         Self::Subdivide(value)
     }
 }
@@ -55,14 +63,14 @@ impl From<Text> for Elem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Text {
-    pub body: Arc<str>,
+    pub text: Arc<str>,
 }
 impl Text {
     pub fn plain(body: Arc<str>) -> Self {
         if body.contains('\x1b') {
             log::warn!("Call to `plain` with text containing <ESC>: {body:?}");
         }
-        Self { body }
+        Self { text: body }
     }
 }
 
@@ -80,21 +88,32 @@ impl TagElem {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Image {
     pub data: Vec<u8>,
     pub format: image::ImageFormat,
     #[serde(skip)]
-    pub cached: Option<image::DynamicImage>,
+    pub cached: Option<image::RgbaImage>,
+}
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hasher::write(&mut hasher, &self.data);
+        let hash = std::hash::Hasher::finish(&hasher);
+        f.debug_tuple("Image")
+            .field(&self.format)
+            .field(&hash)
+            .finish()
+    }
 }
 impl Image {
-    pub fn load(&mut self) -> anyhow::Result<&image::DynamicImage> {
+    pub fn load(&mut self) -> anyhow::Result<&image::RgbaImage> {
         if self.cached.is_some() {
             // HACK: Borrow checker limitation
             return Ok(self.cached.as_ref().unwrap());
         }
-        let img = image::load_from_memory(&self.data)?;
-        Ok(self.cached.insert(img))
+        let img = image::load_from_memory_with_format(&self.data, self.format)?;
+        Ok(self.cached.insert(img.into_rgba8()))
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -123,11 +142,6 @@ impl Borders {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Axis {
-    Horizontal,
-    Vertical,
-}
 #[derive(Default, Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Constr {
     Length(u16),
@@ -135,20 +149,19 @@ pub enum Constr {
     #[default]
     Auto,
 }
-// TODO: Builder
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Subdiv {
+pub struct Stack {
     pub axis: Axis,
-    pub parts: Box<[DivPart]>,
+    pub parts: Box<[StackItem]>,
 }
-impl Subdiv {
-    pub fn horizontal(parts: impl IntoIterator<Item = DivPart>) -> Self {
+impl Stack {
+    pub fn horizontal(parts: impl IntoIterator<Item = StackItem>) -> Self {
         Self {
             axis: Axis::Horizontal,
             parts: FromIterator::from_iter(parts),
         }
     }
-    pub fn vertical(parts: impl IntoIterator<Item = DivPart>) -> Self {
+    pub fn vertical(parts: impl IntoIterator<Item = StackItem>) -> Self {
         Self {
             axis: Axis::Vertical,
             parts: FromIterator::from_iter(parts),
@@ -157,11 +170,11 @@ impl Subdiv {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DivPart {
+pub struct StackItem {
     pub constr: Constr,
     pub elem: Elem,
 }
-impl DivPart {
+impl StackItem {
     pub fn spacing(len: u16) -> Self {
         Self::length(len, Elem::Empty)
     }
@@ -176,28 +189,6 @@ impl DivPart {
             constr,
             elem: elem.into(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Size {
-    pub w: u16,
-    pub h: u16,
-}
-impl Size {
-    pub fn get_mut(&mut self, axis: Axis) -> &mut u16 {
-        let Self { w, h } = self;
-        match axis {
-            Axis::Horizontal => w,
-            Axis::Vertical => h,
-        }
-    }
-    pub fn get(mut self, axis: Axis) -> u16 {
-        *self.get_mut(axis)
-    }
-    pub fn ratatui_picker_font_size(picker: &ratatui_image::picker::Picker) -> Self {
-        let (w, h) = picker.font_size();
-        Self { w, h }
     }
 }
 
@@ -378,3 +369,5 @@ impl LineSet {
 }
 mod render;
 pub use render::*;
+mod layout;
+pub use layout::*;

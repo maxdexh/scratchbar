@@ -15,7 +15,7 @@ use crate::{
         upower::{BatteryState, EnergyState},
     },
     data::{BasicDesktopState, WorkspaceId},
-    display_panel::{PanelEvent, PanelInteract, PanelUpdate},
+    display_panel::{PanelEvent, PanelUpdate},
     tui,
 };
 
@@ -82,7 +82,7 @@ pub fn control_panels(
         },
         futures::stream::poll_fn(move |cx| panel_ev_rx.poll_recv(cx)).map(|panel_event| {
             match panel_event {
-                PanelEvent::Interact(PanelInteract {
+                PanelEvent::Interact(tui::TuiInteract {
                     location,
                     target,
                     kind,
@@ -161,20 +161,20 @@ impl BarState {
 fn to_tui(state: &BarState) -> tui::Tui {
     let mut subdiv = Vec::new();
 
-    subdiv.push(tui::DivPart::spacing(1));
+    subdiv.push(tui::StackItem::spacing(1));
 
     for ws in state.desktop.workspaces.iter() {
         // FIXME: Green active_ws
         subdiv.extend([
-            tui::DivPart::auto(tui::TagElem::new(
+            tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::HyprWorkspace(ws.id.clone()).serialize_tag(),
                 tui::Text::plain(ws.name.clone()),
             )),
-            tui::DivPart::spacing(1),
+            tui::StackItem::spacing(1),
         ])
     }
 
-    subdiv.push(tui::DivPart::new(tui::Constr::Fill(1), tui::Elem::Empty));
+    subdiv.push(tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty));
 
     const SPACING: u16 = 3;
 
@@ -210,7 +210,7 @@ fn to_tui(state: &BarState) -> tui::Tui {
             }
 
             subdiv.extend([
-                tui::DivPart::auto(tui::TagElem::new(
+                tui::StackItem::auto(tui::TagElem::new(
                     BarInteractTarget::Tray(addr.clone()).serialize_tag(),
                     tui::Image {
                         data: png_data,
@@ -218,7 +218,7 @@ fn to_tui(state: &BarState) -> tui::Tui {
                         cached: None,
                     },
                 )),
-                tui::DivPart::spacing(1),
+                tui::StackItem::spacing(1),
             ])
         }
     }
@@ -244,13 +244,13 @@ fn to_tui(state: &BarState) -> tui::Tui {
         let source = fmt_audio_device(&state.pulse.source, " ", [" "]);
 
         subdiv.extend([
-            tui::DivPart::spacing(SPACING),
-            tui::DivPart::auto(tui::TagElem::new(
+            tui::StackItem::spacing(SPACING),
+            tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::Audio(PulseDeviceKind::Source).serialize_tag(),
                 tui::Text::plain(source.into()),
             )),
-            tui::DivPart::spacing(SPACING),
-            tui::DivPart::auto(tui::TagElem::new(
+            tui::StackItem::spacing(SPACING),
+            tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::Audio(PulseDeviceKind::Sink).serialize_tag(),
                 tui::Text::plain(sink.into()),
             )),
@@ -275,12 +275,12 @@ fn to_tui(state: &BarState) -> tui::Tui {
         };
 
         subdiv.extend([
-            tui::DivPart::spacing(SPACING),
-            tui::DivPart::auto(tui::TagElem::new(
+            tui::StackItem::spacing(SPACING),
+            tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::Ppd.serialize_tag(),
                 tui::Text::plain(ppd_symbol.into()),
             )),
-            tui::DivPart::auto(tui::TagElem::new(
+            tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::Energy.serialize_tag(),
                 tui::Text::plain(energy.into()),
             )),
@@ -289,17 +289,17 @@ fn to_tui(state: &BarState) -> tui::Tui {
 
     if !state.time.is_empty() {
         subdiv.extend([
-            tui::DivPart::spacing(SPACING),
-            tui::DivPart::auto(tui::TagElem::new(
+            tui::StackItem::spacing(SPACING),
+            tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::Time.serialize_tag(),
                 tui::Text::plain(state.time.as_str().into()),
             )),
         ])
     }
 
-    subdiv.push(tui::DivPart::spacing(1));
+    subdiv.push(tui::StackItem::spacing(1));
 
     tui::Tui {
-        root: tui::Subdiv::horizontal(subdiv).into(),
+        root: tui::Stack::horizontal(subdiv).into(),
     }
 }

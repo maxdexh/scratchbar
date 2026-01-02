@@ -1,8 +1,6 @@
 use std::{ffi::OsString, sync::Arc};
 
 use anyhow::anyhow;
-use ratatui::{Terminal, prelude::*};
-use ratatui_image::{FontSize, picker::Picker};
 use serde::{Deserialize, Serialize};
 use system_tray::item::Tooltip;
 use tokio::sync::mpsc;
@@ -10,7 +8,7 @@ use tokio_stream::StreamExt;
 
 use crate::{
     clients::tray::{TrayMenuExt, TrayMenuInteract},
-    data::{ActiveMonitorInfo, Location},
+    data::{ActiveMonitorInfo, Position32},
     tui,
 };
 
@@ -133,7 +131,7 @@ pub enum MenuUpdate {
     UnfocusMenu,
     SwitchSubject {
         new_menu: Menu,
-        location: Location,
+        location: Position32,
     },
     UpdateTrayMenu(Arc<str>, TrayMenuExt),
     UpdateTrayTooltip(Arc<str>, Option<Tooltip>),
@@ -181,8 +179,8 @@ type Interact = crate::data::InteractGeneric<MenuInteractTarget>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Geometry {
     size: tui::Size,
-    location: Location,
-    font_size: FontSize,
+    location: Position32,
+    font_size: tui::Size,
     monitor: Option<ActiveMonitorInfo>,
 }
 async fn adjust_terminal(
@@ -196,8 +194,8 @@ async fn adjust_terminal(
             w: width,
             h: height,
         },
-        location: Location { x, y: _ },
-        font_size: (font_w, _),
+        location: Position32 { x, y: _ },
+        font_size: tui::Size { w: font_w, .. },
         ref monitor,
     } = new_geo;
 
@@ -235,6 +233,7 @@ async fn adjust_terminal(
         // HACK: The margin calculation is always slightly too small, so add a few cells to the
         // calculation
         // TODO: Find out if this needs to increase with the width or if the error is constant
+        // TODO: Try checking against crossterm::terminal::size and caching offset
         let half_pix_w = (u32::from(width + 1) * u32::from(font_w)).div_ceil(2);
 
         // The left margin should be such that half the space is between
@@ -346,30 +345,30 @@ fn tray_menu_item_to_tui(
             disposition: _, // TODO: ???
             submenu: _,
         } => {
-            let elem = tui::Subdiv::horizontal([
-                tui::DivPart::spacing(depth + 1),
+            let elem = tui::Stack::horizontal([
+                tui::StackItem::spacing(depth + 1),
                 if let Some(icon) = icon_data {
                     let mut lines = label.lines();
                     let first_line = lines.next().unwrap_or_default();
-                    tui::DivPart::auto(tui::Subdiv::vertical([
-                        tui::DivPart::length(
+                    tui::StackItem::auto(tui::Stack::vertical([
+                        tui::StackItem::length(
                             1,
-                            tui::Subdiv::horizontal([
-                                tui::DivPart::auto(tui::Image {
+                            tui::Stack::horizontal([
+                                tui::StackItem::auto(tui::Image {
                                     data: icon.clone(),
                                     format: image::ImageFormat::Png,
                                     cached: None,
                                 }),
-                                tui::DivPart::spacing(1),
-                                tui::DivPart::auto(tui::Text::plain(first_line.into())),
+                                tui::StackItem::spacing(1),
+                                tui::StackItem::auto(tui::Text::plain(first_line.into())),
                             ]),
                         ),
-                        tui::DivPart::auto(tui::Text::plain(lines.collect::<String>().into())),
+                        tui::StackItem::auto(tui::Text::plain(lines.collect::<String>().into())),
                     ]))
                 } else {
-                    tui::DivPart::auto(tui::Text::plain(label.as_str().into()))
+                    tui::StackItem::auto(tui::Text::plain(label.as_str().into()))
                 },
-                tui::DivPart::spacing(1),
+                tui::StackItem::spacing(1),
             ])
             .into();
             match menu_path {
@@ -396,9 +395,9 @@ fn tray_menu_item_to_tui(
     Some(if item.submenu.is_empty() {
         main_elem
     } else {
-        tui::Subdiv::vertical([
-            tui::DivPart::auto(main_elem),
-            tui::DivPart::auto(tray_menu_to_tui(depth + 1, &item.submenu, addr, menu_path)),
+        tui::Stack::vertical([
+            tui::StackItem::auto(main_elem),
+            tui::StackItem::auto(tray_menu_to_tui(depth + 1, &item.submenu, addr, menu_path)),
         ])
         .into()
     })
@@ -410,8 +409,8 @@ fn tray_menu_to_tui(
     addr: &Arc<str>,
     menu_path: Option<&Arc<str>>,
 ) -> tui::Elem {
-    tui::Subdiv::vertical(items.iter().filter_map(|item| {
-        Some(tui::DivPart {
+    tui::Stack::vertical(items.iter().filter_map(|item| {
+        Some(tui::StackItem {
             constr: tui::Constr::Auto,
             elem: tray_menu_item_to_tui(depth, item, addr, menu_path)?,
         })
@@ -460,10 +459,10 @@ pub fn to_tui(menu: &Menu) -> Option<tui::Tui> {
                     description,
                 },
         } => tui::Tui {
-            root: tui::Subdiv::vertical([
+            root: tui::Stack::vertical([
                 // FIXME: Should be bold and centered
-                tui::DivPart::auto(tui::Text::plain(title.as_str().into())),
-                tui::DivPart::auto(tui::Text::plain(description.as_str().into())),
+                tui::StackItem::auto(tui::Text::plain(title.as_str().into())),
+                tui::StackItem::auto(tui::Text::plain(description.as_str().into())),
             ])
             .into(),
         },
@@ -493,34 +492,32 @@ pub async fn main(
     crossterm::terminal::enable_raw_mode()?;
 
     let mut cur_menu = Menu::None;
-    let picker = Picker::from_query_stdio()?;
+    let font_size = tui::Size::query_font_size()?;
 
-    let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout().lock()))?;
-    let mut ui = crate::display_panel::RenderedLayout::default();
+    let mut ui = tui::RenderedLayout::default();
     let siz_ctx = || tui::SizingContext {
-        font_size: tui::Size::ratatui_picker_font_size(&picker),
+        font_size,
         div_w: None,
         div_h: None,
     };
-    let mut do_render = |tui: &mut tui::Tui, ui: &mut _| {
-        let res = term.draw(|frame| {
-            let mut ctx = tui::RatatuiRenderContext {
-                picker: &picker,
-                frame,
-                layout: Default::default(),
-            };
-            tui.render_ratatui(&mut ctx, siz_ctx());
-            *ui = ctx.layout;
-        });
-        if let Err(err) = res {
-            log::error!("Failed to draw: {err}")
-        }
+    let do_render = |tui: &mut tui::Tui, ui: &mut _| match tui::draw(|ctx| {
+        tui.render(
+            ctx,
+            siz_ctx(),
+            tui::Area {
+                pos: Default::default(),
+                size: tui::Size::query_term_size()?,
+            },
+        )
+    }) {
+        Err(err) => log::error!("Failed to draw: {err}"),
+        Ok(layout) => *ui = layout,
     };
 
     let mut geometry = Geometry {
         size: Default::default(),
-        location: Location::ZERO,
-        font_size: picker.font_size(),
+        location: Position32::ZERO,
+        font_size,
         monitor: None,
     };
     let mut cur_tui = None;
@@ -580,25 +577,24 @@ pub async fn main(
 
                 continue;
             }
-            Upd::Term(TE::Paste(_)) => continue,
             Upd::Term(TE::FocusGained | crossterm::event::Event::Mouse(_))
                 if cur_menu.close_on_unfocus() == Some(true) =>
             {
                 // If we have a tooltip open and the cursor moves into it, that means
                 // we missed the cursor moving off the icon and outside the bar, so we
                 // hide it right away
-                switch_subject(&mut cur_menu, Menu::None, Location::ZERO);
+                switch_subject(&mut cur_menu, Menu::None, Position32::ZERO);
             }
             Upd::Term(TE::FocusLost | crossterm::event::Event::FocusGained) => {
                 continue;
             }
             Upd::Term(TE::Key(_)) => continue,
             Upd::Term(TE::Mouse(event)) => {
-                let Some(crate::display_panel::PanelInteract {
+                let Some(tui::TuiInteract {
                     location,
                     target: Some(target),
                     kind,
-                }) = ui.interpret_mouse_event(event, picker.font_size())
+                }) = ui.interpret_mouse_event(event, font_size)
                 else {
                     continue;
                 };
@@ -613,13 +609,13 @@ pub async fn main(
                 }
             }
             Upd::Ctrl(MenuUpdate::Watcher(MenuWatcherEvent::Hide)) => {
-                switch_subject(&mut cur_menu, Menu::None, Location::ZERO);
+                switch_subject(&mut cur_menu, Menu::None, Position32::ZERO);
             }
             Upd::Ctrl(MenuUpdate::UnfocusMenu) => {
                 if cur_menu.close_on_unfocus() != Some(true) {
                     continue;
                 }
-                if !switch_subject(&mut cur_menu, Menu::None, Location::ZERO) {
+                if !switch_subject(&mut cur_menu, Menu::None, Position32::ZERO) {
                     continue;
                 }
             }

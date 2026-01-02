@@ -20,18 +20,18 @@ pub enum Direction {
 // TODO: Remove in favor of concrete variant
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InteractGeneric<T> {
-    pub location: Location,
+    pub location: Position32,
     pub target: T,
     pub kind: InteractKind,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Location {
+pub struct Position32 {
     pub x: u32,
     pub y: u32,
 }
-impl Location {
-    pub const ZERO: Self = Location { x: 0, y: 0 };
+impl Position32 {
+    pub const ZERO: Self = Position32 { x: 0, y: 0 };
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

@@ -3,20 +3,6 @@ use std::{borrow::Borrow, collections::HashMap, sync::Arc};
 use futures::Stream;
 use tokio::sync::broadcast;
 
-use crate::data::Location;
-
-pub fn rect_center(
-    rect: ratatui::layout::Rect,
-    (font_w, font_h): ratatui_image::FontSize,
-) -> Location {
-    let font_w = u32::from(font_w);
-    let font_h = u32::from(font_h);
-    Location {
-        x: u32::from(rect.x) * font_w + u32::from(rect.width) * font_w / 2,
-        y: u32::from(rect.y) * font_h + u32::from(rect.height) * font_h / 2,
-    }
-}
-
 #[track_caller]
 pub fn fused_lossy_stream<T: Clone>(rx: broadcast::Receiver<T>) -> impl Stream<Item = T> {
     let on_lag = |n| {

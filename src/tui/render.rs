@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use crate::tui::*;
 
 #[derive(Clone, Copy)]
@@ -6,136 +8,202 @@ pub struct SizingContext {
     pub div_w: Option<u16>,
     pub div_h: Option<u16>,
 }
-pub struct RatatuiRenderContext<'a, 'b> {
-    pub picker: &'a ratatui_image::picker::Picker,
-    pub frame: &'a mut ratatui::Frame<'b>,
-    pub layout: crate::display_panel::RenderedLayout,
+pub struct RenderCtx<W> {
+    pub writer: W,
+    pub layout: RenderedLayout,
 }
-type RatatuiArea = ratatui::layout::Rect;
 
 impl Tui {
-    pub fn calc_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        self.root.calc_auto_size(ctx)
+    pub fn calc_size(&mut self, sizing: SizingContext) -> anyhow::Result<Size> {
+        self.root.calc_auto_size(sizing)
     }
-    pub fn render_ratatui(&mut self, ctx: &mut RatatuiRenderContext, sizing: SizingContext) {
-        self.root.render_ratatui(ctx, sizing, ctx.frame.area())
+    pub fn render(
+        &mut self,
+        ctx: &mut RenderCtx<impl Write>,
+        sizing: SizingContext,
+        area: Area,
+    ) -> std::io::Result<()> {
+        self.root.render(ctx, sizing, area)
     }
 }
 impl Elem {
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || match self {
-            Self::Subdivide(subdiv) => subdiv.calc_auto_size(ctx),
-            Self::Text(text) => text.calc_auto_size(ctx),
-            Self::Image(image) => image.calc_auto_size(ctx),
-            Self::Block(block) => block.calc_auto_size(ctx),
-            Self::Tagged(elem) => elem.elem.calc_auto_size(ctx),
+    // TODO: Pass constraint and axis to size calc method, generalize, split auto into Fit, Fill
+    pub fn calc_auto_size(&mut self, sizing: SizingContext) -> anyhow::Result<Size> {
+        auto_size_invariants(sizing, || match self {
+            Self::Subdivide(subdiv) => subdiv.calc_auto_size(sizing),
+            Self::Text(text) => text.calc_auto_size(sizing),
+            Self::Image(image) => image.calc_auto_size(sizing),
+            Self::Block(block) => block.calc_auto_size(sizing),
+            Self::Tagged(elem) => elem.elem.calc_auto_size(sizing),
             Self::Empty => Ok(Size::default()),
         })
     }
-    pub fn render_ratatui(
+    fn render(
         &mut self,
-        ctx: &mut RatatuiRenderContext,
+        ctx: &mut RenderCtx<impl Write>,
         sizing: SizingContext,
-        area: RatatuiArea,
-    ) {
+        area: Area,
+    ) -> std::io::Result<()> {
         match self {
-            Self::Subdivide(subdiv) => subdiv.render_ratatui(ctx, sizing, area),
-            Self::Image(image) => image.render_ratatui(ctx, sizing, area),
-            Self::Block(block) => block.render_ratatui(ctx, sizing, area),
-            Self::Text(text) => text.render_ratatui(ctx, sizing, area),
+            Self::Subdivide(subdiv) => subdiv.render(ctx, sizing, area),
+            Self::Image(image) => image.render(ctx, sizing, area),
+            Self::Block(block) => block.render(ctx, sizing, area),
+            Self::Text(text) => text.render(ctx, sizing, area),
             Self::Tagged(elem) => {
                 ctx.layout.insert(area, elem.tag.clone());
-                elem.elem.render_ratatui(ctx, sizing, area)
+                elem.elem.render(ctx, sizing, area)
             }
-            Self::Empty => (),
+            Self::Empty => Ok(()),
         }
     }
 }
 impl Image {
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
-            let mut fit = |axis, other_axis_size| {
-                let Size {
-                    w: font_w,
-                    h: font_h,
-                } = ctx.font_size;
+    // Computes the maximal dimensions with correct aspect ratio that do not exceed
+    // (div_w, div_h), if specified. Errors if neither is specified.
+    //
+    // Also returns the axis that is being filled.
+    fn calc_fill_size(&mut self, sizing: SizingContext) -> anyhow::Result<(Axis, Size)> {
+        let Size {
+            w: font_w,
+            h: font_h,
+        } = sizing.font_size;
 
-                let it = self.load()?;
-                let mut ratio = f64::from(it.width()) / f64::from(it.height());
-                ratio *= f64::from(font_h) / f64::from(font_w);
-                let cells = f64::from(other_axis_size)
-                    * match axis {
-                        Axis::Horizontal => ratio,
-                        Axis::Vertical => 1.0 / ratio,
-                    };
+        let img = self.load()?;
+        // Aspect ratio of the image in cells
+        let cell_ratio = std::ops::Mul::mul(
+            f64::from(img.width()) / f64::from(img.height()),
+            f64::from(font_h) / f64::from(font_w),
+        );
 
-                Ok::<_, anyhow::Error>(cells.ceil() as u16)
-            };
-            Ok(match (ctx.div_w, ctx.div_h) {
+        let (fill_axis, fill_axis_len) = match (sizing.div_w, sizing.div_h) {
+            // larger aspect ratio means wider.
+            // if the aspect ratio of the bounding box is wider than that of the image,
+            // it is effectively unconstrained along the horizontal axis. That makes
+            // it the flex axis, the other the fill axis.
+            (Some(w), Some(h)) => match f64::from(w) / f64::from(h) > cell_ratio {
+                true => (Axis::Vertical, h),
+                false => (Axis::Horizontal, w),
+            },
+            (None, Some(h)) => (Axis::Vertical, h),
+            (Some(w), None) => (Axis::Horizontal, w),
+            (None, None) => anyhow::bail!("sizing context must include some dimension to fill"),
+        };
+
+        Ok((
+            fill_axis,
+            match fill_axis {
+                Axis::Vertical => Size {
+                    h: fill_axis_len,
+                    // cell ratio is width over height, so we get the flex dimension by multiplying
+                    w: (cell_ratio * f64::from(fill_axis_len)).ceil() as _,
+                },
+                Axis::Horizontal => Size {
+                    w: fill_axis_len,
+                    // likewise, but by division
+                    h: (cell_ratio / f64::from(fill_axis_len)).ceil() as _,
+                },
+            },
+        ))
+    }
+    pub fn calc_auto_size(&mut self, sizing: SizingContext) -> anyhow::Result<Size> {
+        auto_size_invariants(sizing, || {
+            Ok(match (sizing.div_w, sizing.div_h) {
                 (Some(w), Some(h)) => Size { w, h },
-                (Some(w), None) => Size {
-                    w,
-                    h: fit(Axis::Vertical, w)?,
-                },
-                (None, Some(h)) => Size {
-                    h,
-                    w: fit(Axis::Horizontal, h)?,
-                },
-                (None, None) => anyhow::bail!("Cannot fit image without a fixed dimension"),
+                _ => self.calc_fill_size(sizing)?.1,
             })
         })
     }
-    pub fn render_ratatui(
+    fn render(
         &mut self,
-        ctx: &mut RatatuiRenderContext,
-        _: SizingContext,
-        area: RatatuiArea,
-    ) {
-        let Ok(img) = self
-            .load()
-            .map_err(|err| log::error!("Failed to load image: {err}"))
+        ctx: &mut RenderCtx<impl Write>,
+        sizing: SizingContext,
+        area: Area,
+    ) -> std::io::Result<()> {
+        let Ok((fill_axis, fill_size)) = self
+            .calc_fill_size(sizing)
+            .map_err(|err| log::error!("{err}"))
         else {
-            return;
+            return Ok(());
         };
-        let Ok(img) = ctx
-            .picker
-            .new_protocol(img.clone(), area, ratatui_image::Resize::Fit(None))
-            .map_err(|err| log::error!("Failed to create protocol: {err}"))
-        else {
-            return;
+        let Ok(img) = self.load().map_err(|err| log::error!("{err}")) else {
+            return Ok(());
         };
-        ctx.frame
-            .render_widget(ratatui_image::Image::new(&img), area);
+
+        crossterm::queue!(
+            ctx.writer,
+            crossterm::cursor::MoveTo(area.pos.x, area.pos.y),
+        )?;
+
+        // https://sw.kovidgoyal.net/kitty/graphics-protocol/#control-data-reference
+        // Explanation:
+        // - \x1b_G...\x1b\\: kitty graphics apc
+        // - a=T: Transfer and display
+        // - f=32: 32-bit RGBA
+        // - C=1: Do not move the cursor behind the image after drawing. If the image is on the
+        //   last line, the first line would move to scrollback (effectively a clear if there is
+        //   only one line, like in the bar).
+        // - s and v specify the image's dimensions
+        write!(
+            ctx.writer,
+            "\x1b_Ga=T,f=32,C=1,s={},v={},{}={};",
+            img.width(),
+            img.height(),
+            match fill_axis {
+                Axis::Horizontal => "c",
+                Axis::Vertical => "r",
+            },
+            fill_size.get(fill_axis),
+        )?;
+        {
+            let mut encoder_writer = base64::write::EncoderWriter::new(
+                &mut ctx.writer,
+                &base64::engine::general_purpose::STANDARD,
+            );
+            encoder_writer.write_all(img.as_raw())?;
+        }
+        write!(ctx.writer, "\x1b\\")?;
+
+        Ok(())
     }
 }
-impl Subdiv {
-    fn calc_elem_size(part: &mut DivPart, ctx: SizingContext, axis: Axis) -> anyhow::Result<Size> {
+impl Stack {
+    fn calc_elem_auto_size(
+        part: &mut StackItem,
+        sizing: SizingContext,
+        axis: Axis,
+    ) -> anyhow::Result<Size> {
         part.elem
-            .calc_auto_size(Self::inner_sizing_arg(&part.constr, ctx, axis))
+            .calc_auto_size(Self::inner_sizing_arg(&part.constr, sizing, axis))
     }
-    fn inner_sizing_arg(constr: &Constr, ctx: SizingContext, axis: Axis) -> SizingContext {
+    fn inner_sizing_arg(constr: &Constr, sizing: SizingContext, axis: Axis) -> SizingContext {
         match *constr {
             Constr::Length(l) => match axis {
                 Axis::Horizontal => SizingContext {
                     div_w: Some(l),
-                    ..ctx
+                    ..sizing
                 },
                 Axis::Vertical => SizingContext {
                     div_h: Some(l),
-                    ..ctx
+                    ..sizing
                 },
             },
             Constr::Fill(_) | Constr::Auto => match axis {
-                Axis::Horizontal => SizingContext { div_w: None, ..ctx },
-                Axis::Vertical => SizingContext { div_h: None, ..ctx },
+                Axis::Horizontal => SizingContext {
+                    div_w: None,
+                    ..sizing
+                },
+                Axis::Vertical => SizingContext {
+                    div_h: None,
+                    ..sizing
+                },
             },
         }
     }
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
+    pub fn calc_auto_size(&mut self, sizing: SizingContext) -> anyhow::Result<Size> {
+        auto_size_invariants(sizing, || {
             let mut size = Size::default();
             for part in &mut self.parts {
-                let elem_size = Self::calc_elem_size(part, ctx, self.axis)?;
+                let elem_size = Self::calc_elem_auto_size(part, sizing, self.axis)?;
                 let horiz = (&mut size.w, elem_size.w);
                 let vert = (&mut size.h, elem_size.h);
                 let ((adst, asrc), (mdst, msrc)) = match self.axis {
@@ -148,47 +216,93 @@ impl Subdiv {
             Ok(size)
         })
     }
-    pub fn render_ratatui(
+    fn render(
         &mut self,
-        ctx: &mut RatatuiRenderContext,
+        ctx: &mut RenderCtx<impl Write>,
         sizing: SizingContext,
-        area: RatatuiArea,
-    ) {
-        let areas = ratatui::layout::Layout::default()
-            .direction(match self.axis {
-                Axis::Horizontal => ratatui::layout::Direction::Horizontal,
-                Axis::Vertical => ratatui::layout::Direction::Vertical,
-            })
-            .constraints(self.parts.iter_mut().map(|part| match part.constr {
-                Constr::Length(l) => ratatui::layout::Constraint::Length(l),
-                Constr::Fill(n) => ratatui::layout::Constraint::Fill(n),
-                Constr::Auto => ratatui::layout::Constraint::Length(
-                    match Self::calc_elem_size(part, sizing, self.axis) {
-                        Ok(elem_size) => elem_size.get(self.axis),
-                        Err(err) => {
-                            log::error!("Skipping element {part:?} with broken size: {err}");
-                            0
-                        }
-                    },
-                ),
-            }))
-            .split(area);
+        area: Area,
+    ) -> std::io::Result<()> {
+        let mut lens = Vec::with_capacity(self.parts.len());
+        let mut total_weight = 0u64;
+        let mut rem_len = Some(area.size.get(self.axis));
+        for part in &mut self.parts {
+            let len = match part.constr {
+                Constr::Length(len) => len,
+                Constr::Auto => Self::calc_elem_auto_size(part, sizing, self.axis)
+                    .unwrap_or_else(|err| {
+                        log::error!("Skipping element {part:?} with broken size: {err}");
+                        Default::default()
+                    })
+                    .get(self.axis),
+                Constr::Fill(weight) => {
+                    total_weight += u64::from(weight);
+                    0
+                }
+            };
+            if let Some(rlen) = rem_len {
+                rem_len = rlen.checked_sub(len);
+            }
+            lens.push(len)
+        }
+        assert_eq!(lens.len(), self.parts.len());
 
-        assert_eq!(areas.len(), self.parts.len());
-        for (area, part) in areas.iter().zip(&mut self.parts) {
-            part.elem.render_ratatui(
+        let fill_len = rem_len.unwrap_or_else(|| {
+            log::warn!("Content of does not fit into {area:?}: {self:#?}");
+            0
+        });
+
+        if total_weight > 0 {
+            let mut rem_fill_len = fill_len;
+
+            for (part, len) in self.parts.iter_mut().zip(&mut lens) {
+                if let Constr::Fill(weight) = part.constr {
+                    // weight does not exceed total weight, so this should always succeed
+                    *len = u16::try_from(u64::from(fill_len) * u64::from(weight) / total_weight)
+                        .unwrap();
+                    rem_fill_len = rem_fill_len.checked_sub(*len).unwrap();
+                }
+            }
+            if rem_fill_len > 0 {
+                let mut fills: Vec<_> = self
+                    .parts
+                    .iter_mut()
+                    .zip(&mut lens)
+                    .filter_map(|(part, len)| match part.constr {
+                        Constr::Fill(weight) if weight > 0 => Some((weight, len)),
+                        _ => None,
+                    })
+                    .collect();
+                fills.sort();
+                for (_, len) in fills.into_iter().take(rem_fill_len.into()) {
+                    *len += 1;
+                }
+            }
+        }
+
+        let mut offset = 0;
+        for (part, len) in self.parts.iter_mut().zip(lens) {
+            let mut subarea = area;
+            *subarea.size.get_mut(self.axis) = len;
+            *subarea.pos.get_mut(self.axis) += offset;
+
+            part.elem.render(
                 ctx,
                 Self::inner_sizing_arg(&part.constr, sizing, self.axis),
-                *area,
-            );
+                subarea,
+            )?;
+
+            offset += len;
         }
+
+        Ok(())
     }
 }
+// TODO: Styling (using crossterm)
 impl Text {
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
+    pub fn calc_auto_size(&mut self, sizing: SizingContext) -> anyhow::Result<Size> {
+        auto_size_invariants(sizing, || {
             let mut size = Size::default();
-            for line in self.body.lines() {
+            for line in self.text.lines() {
                 size.w = size
                     .w
                     .max(line.chars().count().try_into().unwrap_or(u16::MAX));
@@ -197,14 +311,25 @@ impl Text {
             Ok(size)
         })
     }
-    pub fn render_ratatui(
+    fn render(
         &mut self,
-        ctx: &mut RatatuiRenderContext,
+        ctx: &mut RenderCtx<impl Write>,
         _: SizingContext,
-        area: RatatuiArea,
-    ) {
-        ctx.frame
-            .render_widget(ratatui::widgets::Paragraph::new(&self.body as &str), area)
+        area: Area,
+    ) -> std::io::Result<()> {
+        for (y_off, line) in self.text.lines().enumerate() {
+            let Ok(y) = u16::try_from(usize::from(area.pos.y) + y_off) else {
+                log::error!("Vertical position overflow");
+                break;
+            };
+            crossterm::queue!(
+                ctx.writer,
+                crossterm::cursor::MoveTo(area.pos.x, y),
+                crossterm::style::Print(line),
+            )?;
+        }
+
+        Ok(())
     }
 }
 impl Block {
@@ -220,19 +345,19 @@ impl Block {
             h: u16::from(top) + u16::from(bottom),
         }
     }
-    fn inner_sizing_arg(&self, mut ctx: SizingContext) -> SizingContext {
+    fn inner_sizing_arg(&self, mut sizing: SizingContext) -> SizingContext {
         let Size { w, h } = self.extra_dim();
-        if let Some(div_w) = &mut ctx.div_w {
+        if let Some(div_w) = &mut sizing.div_w {
             *div_w -= w;
         }
-        if let Some(div_h) = &mut ctx.div_h {
+        if let Some(div_h) = &mut sizing.div_h {
             *div_h -= h;
         }
-        ctx
+        sizing
     }
-    pub fn calc_auto_size(&mut self, ctx: SizingContext) -> anyhow::Result<Size> {
-        auto_size_invariants(ctx, || {
-            let inner_ctx = self.inner_sizing_arg(ctx);
+    pub fn calc_auto_size(&mut self, sizing: SizingContext) -> anyhow::Result<Size> {
+        auto_size_invariants(sizing, || {
+            let inner_ctx = self.inner_sizing_arg(sizing);
             let mut size = self
                 .inner
                 .as_mut()
@@ -245,133 +370,132 @@ impl Block {
             Ok(size)
         })
     }
-    pub fn render_ratatui(
+    // FIXME: Implement styling (crossterm)
+    fn render(
         &mut self,
-        ctx: &mut RatatuiRenderContext,
+        ctx: &mut RenderCtx<impl Write>,
         sizing: SizingContext,
-        area: RatatuiArea,
-    ) {
+        area: Area,
+    ) -> std::io::Result<()> {
+        let Borders {
+            top,
+            bottom,
+            left,
+            right,
+        } = self.borders;
+
         let inner_sizing_arg = self.inner_sizing_arg(sizing);
-        let Self {
-            borders,
-            border_style,
-            border_set,
-            inner,
-        } = self;
-        let block = ratatui::widgets::Block::new()
-            .borders({
-                let Borders {
-                    top,
-                    bottom,
-                    left,
-                    right,
-                } = *borders;
-                let mut borders = ratatui::widgets::Borders::default();
-                borders.set(ratatui::widgets::Borders::TOP, top);
-                borders.set(ratatui::widgets::Borders::BOTTOM, bottom);
-                borders.set(ratatui::widgets::Borders::LEFT, left);
-                borders.set(ratatui::widgets::Borders::RIGHT, right);
-                borders
-            })
-            .border_style(convert_style(border_style))
-            .border_set({
-                let LineSet {
-                    vertical,
-                    horizontal,
-                    top_right,
-                    top_left,
-                    bottom_right,
-                    bottom_left,
-                    ..
-                } = border_set;
-                ratatui::symbols::border::Set {
-                    top_left,
-                    top_right,
-                    bottom_left,
-                    bottom_right,
-                    vertical_left: vertical,
-                    vertical_right: vertical,
-                    horizontal_top: horizontal,
-                    horizontal_bottom: horizontal,
-                }
-            });
-        if let Some(inner) = inner {
-            inner.render_ratatui(ctx, inner_sizing_arg, block.inner(area));
+        if let Some(inner) = &mut self.inner {
+            let Area {
+                pos: Position { x, y },
+                size: Size { w, h },
+            } = area;
+            inner.render(
+                ctx,
+                inner_sizing_arg,
+                Area {
+                    pos: Position {
+                        x: x.saturating_add(left.into()),
+                        y: y.saturating_add(top.into()),
+                    },
+                    size: Size {
+                        w: w.saturating_sub(right.into()),
+                        h: h.saturating_sub(bottom.into()),
+                    },
+                },
+            )?;
         }
-        ctx.frame.render_widget(block, area);
+
+        let mut horiz_border = |l: &str, r: &str, y: u16| {
+            let l = if left { l } else { "" };
+            let r = if right { r } else { "" };
+            let m = self.border_set.horizontal.repeat(
+                area.size
+                    .w
+                    .saturating_sub(left.into())
+                    .saturating_sub(right.into())
+                    .into(),
+            );
+            crossterm::queue!(
+                ctx.writer,
+                crossterm::cursor::MoveTo(area.pos.x, y),
+                crossterm::style::Print(l),
+                crossterm::style::Print(m),
+                crossterm::style::Print(r),
+            )
+        };
+        if top {
+            horiz_border(
+                &self.border_set.top_left,
+                &self.border_set.top_right,
+                area.pos.y,
+            )?;
+        }
+        if bottom {
+            horiz_border(
+                &self.border_set.bottom_left,
+                &self.border_set.bottom_right,
+                area.y_bottom(),
+            )?;
+        }
+        let mut vert_border = |x: u16| -> std::io::Result<()> {
+            let lo = area.pos.y.saturating_add(top.into());
+            let hi = area
+                .pos
+                .y
+                .saturating_add(area.size.h)
+                .saturating_sub(bottom.into());
+            for y in lo..hi {
+                crossterm::queue!(
+                    ctx.writer,
+                    crossterm::cursor::MoveTo(x, y),
+                    crossterm::style::Print(&self.border_set.vertical),
+                )?;
+            }
+            Ok(())
+        };
+        if left {
+            vert_border(area.pos.x)?;
+        }
+        if right {
+            vert_border(area.x_right())?;
+        }
+
+        Ok(())
     }
 }
 fn auto_size_invariants(
-    ctx: SizingContext,
+    sizing: SizingContext,
     f: impl FnOnce() -> anyhow::Result<Size>,
 ) -> anyhow::Result<Size> {
-    if let (Some(w), Some(h)) = (ctx.div_w, ctx.div_h) {
+    if let (Some(w), Some(h)) = (sizing.div_w, sizing.div_h) {
         return Ok(Size { w, h });
     }
     let mut size = f()?;
-    if let Some(w) = ctx.div_w {
+    if let Some(w) = sizing.div_w {
         size.w = w;
     }
-    if let Some(h) = ctx.div_h {
+    if let Some(h) = sizing.div_h {
         size.h = h;
     }
     Ok(size)
 }
-fn convert_color(color: &Color) -> ratatui::style::Color {
-    use crate::tui::Color as IC;
-    use ratatui::style::Color as OC;
-    match *color {
-        IC::Reset => OC::Reset,
-        IC::Black => OC::Black,
-        IC::Red => OC::Red,
-        IC::Green => OC::Green,
-        IC::Yellow => OC::Yellow,
-        IC::Blue => OC::Blue,
-        IC::Magenta => OC::Magenta,
-        IC::Cyan => OC::Cyan,
-        IC::Gray => OC::Gray,
-        IC::DarkGray => OC::DarkGray,
-        IC::LightRed => OC::LightRed,
-        IC::LightGreen => OC::LightGreen,
-        IC::LightYellow => OC::LightYellow,
-        IC::LightBlue => OC::LightBlue,
-        IC::LightMagenta => OC::LightMagenta,
-        IC::LightCyan => OC::LightCyan,
-        IC::White => OC::White,
-        IC::Rgb(r, g, b) => OC::Rgb(r, g, b),
-        IC::Indexed(i) => OC::Indexed(i),
-    }
-}
-fn convert_style(style: &Style) -> ratatui::style::Style {
-    let Style {
-        fg,
-        bg,
-        modifier,
-        underline_color,
-    } = style;
-    ratatui::style::Style {
-        fg: fg.as_ref().map(convert_color),
-        bg: bg.as_ref().map(convert_color),
-        underline_color: underline_color.as_ref().map(convert_color),
-        add_modifier: {
-            let Modifier {
-                bold,
-                dim,
-                italic,
-                underline,
-                hidden,
-                strike,
-            } = *modifier;
-            use ratatui::style::Modifier as OM;
-            let mut m = OM::default();
-            m.set(OM::BOLD, bold);
-            m.set(OM::ITALIC, italic);
-            m.set(OM::DIM, dim);
-            m.set(OM::UNDERLINED, underline);
-            m.set(OM::HIDDEN, hidden);
-            m.set(OM::CROSSED_OUT, strike);
-            m
-        },
-        sub_modifier: Default::default(),
-    }
+
+pub fn draw(
+    doit: impl FnOnce(
+        &mut RenderCtx<std::io::BufWriter<std::io::StdoutLock<'static>>>,
+    ) -> std::io::Result<()>,
+) -> std::io::Result<RenderedLayout> {
+    let mut ctx = RenderCtx {
+        layout: Default::default(),
+        writer: std::io::BufWriter::new(std::io::stdout().lock()),
+    };
+    crossterm::queue!(
+        ctx.writer,
+        crossterm::terminal::BeginSynchronizedUpdate,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+    )?;
+    doit(&mut ctx)?;
+    crossterm::execute!(ctx.writer, crossterm::terminal::EndSynchronizedUpdate)?;
+    Ok(ctx.layout)
 }

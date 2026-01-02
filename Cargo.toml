@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# TODO: Consider using the reexported dependency of ratatui for compile times
 crossterm = { version = "0.29.0", default-features = false, features = [
     "event-stream",
     "serde",
@@ -12,7 +11,6 @@ crossterm = { version = "0.29.0", default-features = false, features = [
 
 anyhow = "1.0.100"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
-debounce = "0.2.2"
 flexi_logger = "0.31.7"
 futures = "0.3.31"
 
@@ -21,16 +19,11 @@ hyprland = { version = "0.4.0-beta.3", features = [
     "async-lite",
     "listener",
 ], default-features = false }
-image = { version = "0.25.9", default-features = false, features = ["serde"] }
-kitty_image = "0.1.0"
-log = "0.4.29"
-# NOTE: Since 9.0.0, ratatui-image links libchafa by default for some reason?
-ratatui-image = { version = "10.0.0", default-features = false, features = [
-    "image-defaults",
-    "crossterm",
+image = { version = "0.25.9", default-features = false, features = [
+    "png",
+    "serde",
 ] }
-# NOTE: This needs to be the dependency version of ratatui-image.
-ratatui = { version = "0.30.0" }
+log = "0.4.29"
 serde = { version = "1.0.228", features = ["rc"] }
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread"] }
 tokio-stream = { version = "0.1.17", features = ["full"] }
@@ -42,3 +35,4 @@ postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
 tempfile = "3.24.0"
 system-tray = { git = "https://github.com/maxdexh/system-tray", rev = "b044405df25afab772b2771e64303864d648fceb" }
 serde_json = "1.0.148"
+base64 = "0.22.1"
