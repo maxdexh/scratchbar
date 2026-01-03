@@ -1,5 +1,5 @@
 use crate::data::{ActiveMonitorInfo, BasicDesktopState, BasicMonitor, BasicWorkspace};
-use crate::utils::{ReloadRx, fused_lossy_stream};
+use crate::utils::{ReloadRx, broadcast_stream};
 use futures::Stream;
 use hyprland::data::*;
 use hyprland::shared::HyprData;
@@ -18,7 +18,7 @@ pub fn connect(
     type HyprEvent = hyprland::event_listener::Event;
     let ev_tx = broadcast::Sender::new(100);
 
-    let events = fused_lossy_stream(ev_tx.subscribe());
+    let events = broadcast_stream(ev_tx.subscribe());
     let (ws_tx, ws_rx) = broadcast::channel(10);
     let (am_tx, am_rx) = broadcast::channel(10);
     tokio::spawn(async move {
@@ -153,5 +153,5 @@ pub fn connect(
         log::warn!("Hyprland event stream closed");
     });
 
-    (fused_lossy_stream(ws_rx), fused_lossy_stream(am_rx))
+    (broadcast_stream(ws_rx), broadcast_stream(am_rx))
 }

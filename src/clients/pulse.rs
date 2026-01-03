@@ -23,7 +23,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use crate::utils::{ReloadRx, fused_lossy_stream};
+use crate::utils::{ReloadRx, broadcast_stream};
 
 pub fn connect(
     reload_rx: ReloadRx,
@@ -39,13 +39,13 @@ pub fn connect(
     let (up_tx, up_rx) = broadcast::channel(100);
 
     tokio::task::spawn(async move {
-        match run_updater(fused_lossy_stream(up_rx)).await {
+        match run_updater(broadcast_stream(up_rx)).await {
             Ok(()) => log::warn!("PulseAudio updater has quit"),
             Err(err) => log::error!("PulseAudio updater has failed: {err}"),
         }
     });
 
-    (up_tx, fused_lossy_stream(ev_rx))
+    (up_tx, broadcast_stream(ev_rx))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]

@@ -8,7 +8,7 @@ use crate::{
         bar_panel::{BarEvent, BarUpdate},
         menu_panel::{Menu, MenuEvent, MenuUpdate},
     },
-    utils::{BasicTaskMap, ReloadRx, fused_lossy_stream},
+    utils::{BasicTaskMap, ReloadRx, broadcast_stream},
 };
 use anyhow::Result;
 use crossterm::event::MouseButton;
@@ -94,14 +94,14 @@ pub async fn main() -> Result<()> {
                             "bar-panel.sock",
                             display.clone(),
                             bar_ev_tx,
-                            fused_lossy_stream(bar_ui_rx),
+                            broadcast_stream(bar_ui_rx),
                             super::bar_panel::controller_spawn_panel,
                         ));
                         panels.spawn(super::run_panel_controller_side::<_, MenuUpdate>(
                             "menu-panel.sock",
                             display.clone(),
                             menu_ev_tx,
-                            fused_lossy_stream(menu_upd_rx),
+                            broadcast_stream(menu_upd_rx),
                             super::menu_panel::controller_spawn_panel,
                         ));
                         if let Some(Err(err)) = panels.join_next().await {

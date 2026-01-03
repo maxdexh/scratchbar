@@ -4,7 +4,7 @@ use chrono::Timelike;
 use futures::Stream;
 use tokio::sync::broadcast;
 
-use crate::utils::{ReloadRx, fused_lossy_stream};
+use crate::utils::{ReloadRx, broadcast_stream};
 
 const MIN_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(250);
 
@@ -31,7 +31,7 @@ pub fn connect(mut reload_rx: ReloadRx) -> impl Stream<Item = String> {
             }
         }
     });
-    fused_lossy_stream(rx)
+    broadcast_stream(rx)
 }
 
 async fn run(tx: broadcast::Sender<String>) {

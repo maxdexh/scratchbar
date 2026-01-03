@@ -5,20 +5,20 @@ use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt as _;
 
-use crate::utils::{ReloadRx, fused_lossy_stream};
+use crate::utils::{ReloadRx, broadcast_stream};
 
 pub fn connect(reload_rx: ReloadRx) -> (broadcast::Sender<()>, impl Stream<Item = Arc<str>>) {
     let (switch_tx, switch_rx) = broadcast::channel(50);
     let (profile_tx, profile_rx) = broadcast::channel(50);
 
     tokio::spawn(async move {
-        match run(profile_tx, fused_lossy_stream(switch_rx), reload_rx).await {
+        match run(profile_tx, broadcast_stream(switch_rx), reload_rx).await {
             Err(err) => log::error!("Failed to connect to ppd: {err}"),
             Ok(()) => log::warn!("Ppd client exited"),
         }
     });
 
-    (switch_tx, fused_lossy_stream(profile_rx))
+    (switch_tx, broadcast_stream(profile_rx))
 }
 
 async fn run(

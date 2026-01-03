@@ -4,25 +4,37 @@ use futures::Stream;
 use tokio::sync::broadcast;
 
 #[track_caller]
-pub fn fused_lossy_stream<T: Clone>(rx: broadcast::Receiver<T>) -> impl Stream<Item = T> {
-    let on_lag = |n| {
+pub fn broadcast_stream<T: Clone>(rx: broadcast::Receiver<T>) -> impl Stream<Item = T> {
+    broadcast_stream_base(rx, |n| {
         log::warn!(
             "Lagged {n} items on lossy stream ({})",
             std::any::type_name::<T>()
-        )
-    };
-    let base = futures::stream::unfold(rx, move |mut rx| async move {
-        let t = rx.recv().await;
-        match t {
-            Ok(value) => Some((Some(value), rx)),
-            Err(broadcast::error::RecvError::Closed) => None,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                on_lag(n);
-                Some((None, rx))
+        );
+        None
+    })
+}
+pub fn broadcast_stream_base<T: Clone>(
+    mut rx: broadcast::Receiver<T>,
+    mut on_lag: impl FnMut(u64) -> Option<T>,
+) -> impl Stream<Item = T> {
+    stream_from_fn(async move || {
+        loop {
+            match rx.recv().await {
+                Ok(value) => break Some(value),
+                Err(broadcast::error::RecvError::Closed) => break None,
+                Err(broadcast::error::RecvError::Lagged(n)) => match on_lag(n) {
+                    Some(item) => break Some(item),
+                    None => continue,
+                },
             }
         }
-    });
-    tokio_stream::StreamExt::filter_map(base, |it| it)
+    })
+}
+pub fn stream_from_fn<T>(f: impl AsyncFnMut() -> Option<T>) -> impl Stream<Item = T> {
+    tokio_stream::StreamExt::filter_map(
+        futures::stream::unfold(f, |mut f| async move { Some((f().await, f)) }),
+        |it| it,
+    )
 }
 
 struct BasicTaskMapInner<K, T> {
@@ -103,17 +115,15 @@ pub struct ReloadRx {
     rx: broadcast::Receiver<()>,
 }
 impl ReloadRx {
-    pub async fn wait(&mut self) {
+    pub async fn wait(&mut self) -> Option<()> {
         // if we get Err(Lagged) or Ok, it means a reload request was issued.
-        while let Err(broadcast::error::RecvError::Closed) = self.rx.recv().await {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        match self.rx.recv().await {
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Some(()),
+            _ => None,
         }
     }
     pub fn into_stream(self) -> impl Stream<Item = ()> {
-        futures::stream::unfold(self, |mut this| async move {
-            this.wait().await;
-            Some(((), this))
-        })
+        broadcast_stream_base(self.rx, |_| Some(()))
     }
 
     // TODO: debounce/rate limit this heavily: after accepting a reload request, merge all

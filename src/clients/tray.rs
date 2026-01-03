@@ -5,7 +5,7 @@ use system_tray::item::StatusNotifierItem;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt as _;
 
-use crate::utils::{ReloadRx, fused_lossy_stream};
+use crate::utils::{ReloadRx, broadcast_stream};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrayMenuInteract {
@@ -57,7 +57,7 @@ async fn run_interaction(
     client: system_tray::client::Client,
     interact_rx: broadcast::Receiver<TrayMenuInteract>,
 ) {
-    let interacts = fused_lossy_stream(interact_rx);
+    let interacts = broadcast_stream(interact_rx);
     tokio::pin!(interacts);
     while let Some(interact) = interacts.next().await {
         let TrayMenuInteract {
@@ -132,7 +132,7 @@ fn mk_stream(
         })
     };
 
-    fused_lossy_stream(client_rx)
+    broadcast_stream(client_rx)
         .map(Some)
         .merge(reload_rx.into_stream().map(|()| None))
         .then(handle_event)
