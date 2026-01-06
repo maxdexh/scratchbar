@@ -77,26 +77,16 @@ pub async fn run_term_manager(updates: impl Stream<Item = TermMgrUpdate> + Send 
 
     let mut terminals = HashMap::new();
 
-    let mut tasks = JoinSet::<()>::new();
-
-    loop {
-        let update = tokio::select! {
-            Some(upd) = updates.next() => upd,
-            Some(res) = tasks.join_next() => {
-                if let Err(err) = res {
-                    log::error!("Error with task: {err}");
-                }
-                continue
-            },
-            else => break,
-        };
+    while let Some(update) = updates.next().await {
         match update {
             TermMgrUpdate::TermUpdate(tid, tupd) => {
-                let Some(TermInst { upd_tx, cancel }) = terminals.get_mut(&tid) else {
-                    log::error!(
-                        "Cannot send update {tupd:?} to unknown terminal id {:?}",
-                        tid
-                    );
+                let Some(TermInst { upd_tx, cancel }) = terminals
+                    .get_mut(&tid)
+                    .with_context(|| {
+                        format!("Cannot send update {tupd:?} to unknown terminal id {tid:?}")
+                    })
+                    .ok_or_log()
+                else {
                     continue;
                 };
                 let is_shutdown = matches!(&tupd, TermUpdate::Shutdown);
@@ -208,11 +198,11 @@ async fn run_term_inst_mgr(
     let (read_half, write_half) = socket.into_split();
 
     tasks.spawn(
-        read_cobs_sock::<TermEvent>(read_half, ev_tx, inst_cancel.clone())
+        read_cobs_sock::<TermEvent>(read_half, ev_tx, inst_cancel.clone().drop_guard())
             .with_cancellation_token_owned(inst_cancel.clone()),
     );
     tasks.spawn(
-        write_cobs_sock::<TermUpdate>(write_half, updates, inst_cancel.clone())
+        write_cobs_sock::<TermUpdate>(write_half, updates, inst_cancel.clone().drop_guard())
             .with_cancellation_token_owned(inst_cancel.clone()),
     );
 
@@ -243,8 +233,8 @@ async fn term_proc_main_inner(term_id: TermId) -> anyhow::Result<()> {
         (ev_tx, ev_rx) = unb_chan::<TermEvent>();
         (upd_tx, upd_rx) = std::sync::mpsc::channel::<TermUpdate>();
 
-        tokio::spawn(read_cobs_sock(read, upd_tx, proc_tok.clone()));
-        tokio::spawn(write_cobs_sock(write, ev_rx, proc_tok.clone()));
+        tokio::spawn(read_cobs_sock(read, upd_tx, proc_tok.clone().drop_guard()));
+        tokio::spawn(write_cobs_sock(write, ev_rx, proc_tok.clone().drop_guard()));
     }
 
     crossterm::execute!(
@@ -261,7 +251,9 @@ async fn term_proc_main_inner(term_id: TermId) -> anyhow::Result<()> {
         anyhow::bail!("Failed to send initial font size while starting {term_id:?}. Exiting.");
     }
 
+    let proc_tok_clone = proc_tok.clone();
     tokio::spawn(async move {
+        let _important_task = proc_tok_clone.drop_guard();
         let mut events = crossterm::event::EventStream::new();
         while let Some(ev) = events.next().await {
             match ev {
@@ -301,25 +293,30 @@ async fn term_proc_main_inner(term_id: TermId) -> anyhow::Result<()> {
             log::error!("Failed to run command {cmd:?}: {err}")
         }
     }
+
+    let proc_tok_clone = proc_tok.clone();
     std::thread::spawn(move || {
+        let _important_task = proc_tok_clone.drop_guard();
+
         use std::io::Write as _;
         let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
         while let Ok(upd) = upd_rx.recv() {
             match upd {
                 TermUpdate::Shutdown => break,
                 TermUpdate::Print(bytes) => {
-                    if let Err(err) = stdout.write_all(&bytes) {
-                        log::error!("Failed to write: {err}");
-                    }
+                    stdout
+                        .write_all(&bytes)
+                        .context("Failed to print")
+                        .ok_or_log();
                 }
                 TermUpdate::Flush => {
-                    if let Err(err) = stdout.flush() {
-                        log::error!("Failed to flush: {err}");
-                    }
+                    stdout.flush().context("Failed to flush").ok_or_log();
                 }
                 TermUpdate::RemoteControl(args) => {
-                    let Some(listen_on) = std::env::var_os("KITTY_LISTEN_ON") else {
-                        log::error!("Missing KITTY_LISTEN_ON");
+                    let Some(listen_on) = std::env::var_os("KITTY_LISTEN_ON")
+                        .context("Missing KITTY_LISTEN_ON")
+                        .ok_or_log()
+                    else {
                         continue;
                     };
                     run_cmd(
@@ -345,10 +342,8 @@ async fn term_proc_main_inner(term_id: TermId) -> anyhow::Result<()> {
 async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
     read: tokio::net::unix::OwnedReadHalf,
     mut tx: impl SharedEmit<T>,
-    on_disonnect: CancellationToken,
+    _auto_cancel: tokio_util::sync::DropGuard,
 ) {
-    let _auto_cancel = on_disonnect.drop_guard();
-
     use tokio::io::AsyncBufReadExt as _;
     let mut read = tokio::io::BufReader::new(read);
     loop {
@@ -383,10 +378,8 @@ async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
 async fn write_cobs_sock<T: Serialize>(
     mut write: tokio::net::unix::OwnedWriteHalf,
     stream: impl Stream<Item = T>,
-    on_disonnect: CancellationToken,
+    _auto_cancel: tokio_util::sync::DropGuard,
 ) {
-    let _auto_cancel = on_disonnect.drop_guard();
-
     use tokio::io::AsyncWriteExt as _;
     tokio::pin!(stream);
     while let Some(item) = stream.next().await {

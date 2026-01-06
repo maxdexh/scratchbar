@@ -58,30 +58,26 @@ impl From<Text> for Elem {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TextLine {
     pub text: String,
     /// The height of the line. Relevant for the text sizing and graphics protocols.
     /// Only used for layout calculations, including determining where the next line is printed in
     /// a [`Text`] element.
     pub height: u16,
-    pub style: Style,
 }
 impl TextLine {
     pub fn plain(text: String) -> Self {
         if text.contains(['\n', '\x1b']) {
             log::warn!("Plain text line {text:?} should not contain <ESC> or newlines.");
         }
-        Self {
-            text,
-            height: 1,
-            style: Default::default(),
-        }
+        Self { text, height: 1 }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Text {
+    pub style: Style,
     pub lines: Vec<TextLine>,
     /// The width of the longest line in cells. Only used for layout calculations.
     /// Each line is printed as-is, regardless of this value.
@@ -99,12 +95,14 @@ impl Text {
             width = std::cmp::max(width, line.chars().count().try_into().unwrap_or(u16::MAX));
             lines.push(TextLine::plain(line.into()));
         }
-        Self { lines, width }
-    }
-    pub fn style(mut self, style: Style) -> Self {
-        for line in &mut self.lines {
-            line.style = style;
+        Self {
+            lines,
+            width,
+            style: Default::default(),
         }
+    }
+    pub fn styled(mut self, style: Style) -> Self {
+        self.style = style;
         self
     }
 }

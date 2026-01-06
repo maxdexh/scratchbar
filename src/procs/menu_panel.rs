@@ -233,7 +233,7 @@ pub fn to_tui(menu: &Menu) -> tui::Tui {
                 tui::Stack::vertical([
                     tui::StackItem::auto(tui::Stack::horizontal([
                         tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
-                        tui::StackItem::auto(tui::Text::plain(title.as_str()).style(tui::Style {
+                        tui::StackItem::auto(tui::Text::plain(title.as_str()).styled(tui::Style {
                             modifier: tui::Modifier {
                                 bold: true,
                                 ..Default::default()
@@ -358,18 +358,6 @@ pub async fn run_menu_panel_manager(
                     // Never replace a context menu with a tooltip
                     if new_menu.close_on_unfocus()
                         && cur.as_ref().is_some_and(|it| !it.menu.close_on_unfocus())
-                    {
-                        continue;
-                    }
-
-                    // ignore updates that try to open a tooltip that is already opened.
-                    // FIXME: Improve hovering logic so that this becomes unnecessary.
-                    if let Menu::TrayTooltip { addr: new_addr, .. } = &new_menu
-                        && let Some(Current {
-                            menu: Menu::TrayTooltip { addr, .. },
-                            ..
-                        }) = &cur
-                        && addr == new_addr
                     {
                         continue;
                     }
@@ -687,8 +675,10 @@ async fn run_instance_mgr(
                 ..
             }) = show
             {
+                let scale = (monitor.scale * 1000.0).ceil() / 1000.0;
+
                 // No need to wait before rendering if we have enough space
-                if tui_size_cache.w >= sizes.cell_size.w && tui_size_cache.h >= sizes.cell_size.h {
+                if tui_size_cache.w <= sizes.cell_size.w && tui_size_cache.h <= sizes.cell_size.h {
                     render_ready = true;
                 }
                 if tui_size_cache != sizes.cell_size {
@@ -700,13 +690,8 @@ async fn run_instance_mgr(
                     let x = std::cmp::min(pos.x, monitor.width);
 
                     // Find the distance between window edge and center
-                    // HACK: The margin calculation is always slightly too small, so add a few cells to the
-                    // calculation
-                    // TODO: Find out if this needs to increase with the width or if the error is constant
-                    // TODO: Try checking against window size (include delta from current cells * font)
-                    let half_pix_w = (u32::from(tui_size_cache.w + 1)
-                        * u32::from(sizes.font_size().w))
-                    .div_ceil(2);
+                    let half_pix_w =
+                        (u32::from(tui_size_cache.w) * u32::from(sizes.font_size().w)).div_ceil(2);
 
                     // The left margin should be such that half the space is between
                     // left margin and x. Use saturating_sub so that the left
@@ -732,8 +717,8 @@ async fn run_instance_mgr(
                     // (this is not x11 after all).
                     // However, panels are bound to a monitor and the margins are in scaled pixels,
                     // so we have to make this correction.
-                    let margin_left = (f64::from(mleft) / monitor.scale) as u32;
-                    let margin_right = (f64::from(mright) / monitor.scale) as u32;
+                    let margin_left = (f64::from(mleft) / scale) as u32;
+                    let margin_right = (f64::from(mright) / scale) as u32;
 
                     if term_upd_tx
                         .emit(TermUpdate::RemoteControl(vec![
@@ -771,8 +756,11 @@ async fn run_instance_mgr(
                 ..
             }) = show
         {
-            if tui_size_cache.w < sizes.cell_size.w || tui_size_cache.h < sizes.cell_size.h {
-                log::error!("Tui will not fit into panel");
+            if tui_size_cache.w > sizes.cell_size.w || tui_size_cache.h > sizes.cell_size.h {
+                log::warn!(
+                    "Tui size {tui_size_cache:?} is too big for panel size {:?}",
+                    sizes.cell_size
+                );
             }
 
             let mut buf = Vec::new();

@@ -360,7 +360,7 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
         subdiv.extend([
             tui::StackItem::auto(tui::TagElem::new(
                 BarInteractTarget::HyprWorkspace(ws.id.clone()).serialize_tag(),
-                tui::Text::plain(&ws.name).style(tui::Style {
+                tui::Text::plain(&ws.name).styled(tui::Style {
                     fg: ws.is_active.then_some(tui::Color::Green),
                     ..Default::default()
                 }),
@@ -419,36 +419,53 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
     }
 
     {
-        fn fmt_audio_device<const N: usize>(
-            &PulseDeviceState { muted, volume, .. }: &PulseDeviceState,
-            muted_symbol: &str,
-            normal_symbols: [&str; N],
-        ) -> String {
-            format!(
-                "{}{:>3}%",
-                if muted {
-                    muted_symbol
-                } else {
-                    normal_symbols[((N as f64 * volume) as usize).clamp(0, N - 1)]
-                },
-                (volume * 100.0).round() as u32
-            )
+        fn audio_item(
+            kind: PulseDeviceKind,
+            &PulseDeviceState { volume, muted, .. }: &PulseDeviceState,
+            unmuted_sym: impl FnOnce() -> tui::StackItem,
+            muted_sym: impl FnOnce() -> tui::StackItem,
+        ) -> tui::StackItem {
+            tui::StackItem::auto(tui::TagElem::new(
+                BarInteractTarget::Audio(kind).serialize_tag(),
+                tui::Stack::horizontal([
+                    if muted { muted_sym() } else { unmuted_sym() },
+                    tui::StackItem::auto(tui::Text::plain(format!(
+                        "{:>3}%",
+                        (volume * 100.0).round() as u32
+                    ))),
+                ]),
+            ))
         }
-        let sink = fmt_audio_device(&state.pulse.sink, " ", [" "]); // " ", " ", 
-        // FIXME: The muted symbol is double-width, the regular symbol is not
-        let source = fmt_audio_device(&state.pulse.source, " ", [" "]);
-
         subdiv.extend([
             tui::StackItem::spacing(SPACING),
-            tui::StackItem::auto(tui::TagElem::new(
-                BarInteractTarget::Audio(PulseDeviceKind::Source).serialize_tag(),
-                tui::Text::plain(source),
-            )),
+            audio_item(
+                PulseDeviceKind::Source,
+                &state.pulse.source,
+                || {
+                    // There is no double-width microphone character, so we have to build or own.
+                    tui::StackItem::auto(tui::Text {
+                        width: 2,
+                        style: Default::default(),
+                        lines: [tui::TextLine {
+                            height: 1,
+                            // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
+                            // - w=2      set width to 2
+                            // - h=2      ceter the text horizontally
+                            // - n=1/d=1  use fractional scale of 1:1. kitty ignores w without this
+                            text: "\x1b]66;w=2:h=2:n=1:d=1;\x07".into(),
+                        }]
+                        .into(),
+                    })
+                },
+                || tui::StackItem::auto(tui::Text::plain(" ")),
+            ),
             tui::StackItem::spacing(SPACING),
-            tui::StackItem::auto(tui::TagElem::new(
-                BarInteractTarget::Audio(PulseDeviceKind::Sink).serialize_tag(),
-                tui::Text::plain(sink),
-            )),
+            audio_item(
+                PulseDeviceKind::Sink,
+                &state.pulse.sink,
+                || tui::StackItem::auto(tui::Text::plain(" ")),
+                || tui::StackItem::auto(tui::Text::plain(" ")),
+            ),
         ]);
     }
 

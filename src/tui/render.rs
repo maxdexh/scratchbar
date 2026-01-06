@@ -324,7 +324,7 @@ impl Text {
             crossterm::queue!(
                 ctx.writer,
                 crossterm::cursor::MoveTo(area.pos.x, y),
-                crossterm::style::Print(stylize(line.text.as_str(), line.style)),
+                crossterm::style::Print(stylize(line.text.as_str(), self.style)),
             )?;
             let Some(new_y_off) = y_off.checked_add(line.height) else {
                 log::error!("Vertical position overflow");
