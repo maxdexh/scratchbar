@@ -14,15 +14,15 @@ use tokio_stream::StreamExt as _;
 use tokio_util::{sync::CancellationToken, time::FutureExt};
 
 use crate::{
-    clients::{
+    data::{BasicDesktopState, WorkspaceId},
+    modules::{
         pulse::{PulseDeviceKind, PulseDeviceState, PulseState},
         upower::{BatteryState, EnergyState},
     },
-    data::{BasicDesktopState, WorkspaceId},
     monitors::MonitorEvent,
     terminals::{SpawnTerm, TermEvent, TermId, TermMgrUpdate, TermUpdate},
     tui,
-    utils::{Emit, ResultExt as _, SharedEmit, unb_chan, unb_rx_stream},
+    utils::{Emit, ResultExt as _, SharedEmit, UnbTx, unb_chan},
 };
 
 pub async fn run_bar_panel_manager(
@@ -43,7 +43,7 @@ pub async fn run_bar_panel_manager(
         struct Instance {
             monitor_name: Arc<str>,
             inst_task: tokio::task::AbortHandle,
-            upd_tx: tokio::sync::mpsc::UnboundedSender<Arc<BarState>>,
+            upd_tx: UnbTx<Arc<BarState>>,
         }
         let mut instances = HashMap::<TermId, Instance>::new();
         let mut subtasks = JoinSet::<()>::new();
@@ -126,17 +126,16 @@ pub async fn run_bar_panel_manager(
                         let bar_info = BarEventInfo {
                             monitor: monitor.name.clone(),
                         };
-                        let term_id =
-                            TermId::from_bytes(format!("BAR-{}", monitor.name).as_bytes());
-                        let (bar_upd_tx, bar_upd_rx) = tokio::sync::mpsc::unbounded_channel();
-                        let (term_ev_tx, term_ev_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let term_id = TermId::from_str(&format!("BAR-{}", monitor.name));
+                        let (bar_upd_tx, bar_upd_rx) = unb_chan();
+                        let (term_ev_tx, term_ev_rx) = unb_chan();
                         let listener = subtasks.spawn(run_instance_controller(
                             monitor.name.clone(),
                             {
                                 let mut bar_ev_tx = bar_ev_tx.clone();
                                 move |ev| bar_ev_tx.emit((bar_info.clone(), ev))
                             },
-                            unb_rx_stream(bar_upd_rx),
+                            bar_upd_rx,
                             {
                                 let mut term_upd_tx = term_upd_tx.clone();
                                 let term_id = term_id.clone();
@@ -145,7 +144,7 @@ pub async fn run_bar_panel_manager(
                                         .emit(TermMgrUpdate::TermUpdate(term_id.clone(), upd))
                                 }
                             },
-                            unb_rx_stream(term_ev_rx),
+                            term_ev_rx.map(|(_, a)| a),
                         ));
                         if term_upd_tx
                             .emit(TermMgrUpdate::SpawnPanel(SpawnTerm {
@@ -221,7 +220,6 @@ async fn run_instance_controller(
     let incoming = upd_rx.map(Inc::Bar).merge(term_ev_rx.map(Inc::Term));
     tokio::pin!(incoming);
 
-    // TODO: pass monitor name
     let mut tui = to_tui(&BarState::default(), &monitor_name);
     let mut layout = tui::RenderedLayout::default();
     while let Some(inc) = incoming.next().await {
@@ -235,15 +233,15 @@ async fn run_instance_controller(
                 if let crossterm::event::Event::Mouse(ev) = ev
                     && let Some(tui::TuiInteract {
                         location,
-                        target,
+                        payload: target,
                         kind,
                     }) = layout.interpret_mouse_event(ev, sizes.font_size())
                 {
                     let interact = Interact {
                         location,
                         kind,
-                        target: match target {
-                            Some(tag) => BarInteractTarget::deserialize_tag(&tag),
+                        payload: match target {
+                            Some(tag) => BarInteractTarget::from_tag(&tag),
                             None => BarInteractTarget::None,
                         },
                     };
@@ -286,7 +284,7 @@ async fn run_instance_controller(
     }
 }
 
-type Interact = crate::data::InteractGeneric<BarInteractTarget>;
+type Interact = tui::InteractGeneric<BarInteractTarget>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum BarEvent {
@@ -318,11 +316,12 @@ pub enum BarInteractTarget {
     Tray(Arc<str>),
 }
 impl BarInteractTarget {
-    fn serialize_tag(&self) -> tui::InteractTag {
-        tui::InteractTag::from_bytes(&postcard::to_stdvec(self).unwrap())
+    fn into_tag(self) -> tui::InteractTag {
+        Arc::new(self)
     }
-    fn deserialize_tag(tag: &tui::InteractTag) -> Self {
-        postcard::from_bytes(tag.as_bytes()).unwrap()
+    fn from_tag(tag: &tui::InteractTag) -> Self {
+        let tag: &dyn std::any::Any = tag;
+        tag.downcast_ref::<Self>().unwrap().clone()
     }
 }
 
@@ -360,7 +359,7 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
         }
         subdiv.extend([
             tui::StackItem::auto(tui::InteractElem::new(
-                BarInteractTarget::HyprWorkspace(ws.id.clone()).serialize_tag(),
+                BarInteractTarget::HyprWorkspace(ws.id.clone()).into_tag(),
                 tui::Text::plain(&ws.name).styled(tui::Style {
                     fg: ws.is_active.then_some(tui::Color::Green),
                     ..Default::default()
@@ -407,12 +406,8 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
 
             subdiv.extend([
                 tui::StackItem::auto(tui::InteractElem::new(
-                    BarInteractTarget::Tray(addr.clone()).serialize_tag(),
-                    tui::Image {
-                        data: png_data,
-                        format: image::ImageFormat::Png,
-                        cached: None,
-                    },
+                    BarInteractTarget::Tray(addr.clone()).into_tag(),
+                    tui::Image::load_or_empty(png_data, image::ImageFormat::Png),
                 )),
                 tui::StackItem::spacing(1),
             ])
@@ -427,7 +422,7 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
             muted_sym: impl FnOnce() -> tui::StackItem,
         ) -> tui::StackItem {
             tui::StackItem::auto(tui::InteractElem::new(
-                BarInteractTarget::Audio(kind).serialize_tag(),
+                BarInteractTarget::Audio(kind).into_tag(),
                 tui::Stack::horizontal([
                     if muted { muted_sym() } else { unmuted_sym() },
                     tui::StackItem::auto(tui::Text::plain(format!(
@@ -490,11 +485,11 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
         subdiv.extend([
             tui::StackItem::spacing(SPACING),
             tui::StackItem::auto(tui::InteractElem::new(
-                BarInteractTarget::Ppd.serialize_tag(),
+                BarInteractTarget::Ppd.into_tag(),
                 tui::Text::plain(ppd_symbol),
             )),
             tui::StackItem::auto(tui::InteractElem::new(
-                BarInteractTarget::Energy.serialize_tag(),
+                BarInteractTarget::Energy.into_tag(),
                 tui::Text::plain(energy),
             )),
         ]);
@@ -504,7 +499,7 @@ fn to_tui(state: &BarState, monitor_name: &str) -> tui::Tui {
         subdiv.extend([
             tui::StackItem::spacing(SPACING),
             tui::StackItem::auto(tui::InteractElem::new(
-                BarInteractTarget::Time.serialize_tag(),
+                BarInteractTarget::Time.into_tag(),
                 tui::Text::plain(&state.time),
             )),
         ])

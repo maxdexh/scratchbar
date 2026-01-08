@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    ffi::{OsStr, OsString},
-    os::unix::ffi::OsStrExt,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures::Stream;
@@ -15,26 +9,18 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle, time::FutureE
 
 use crate::{
     tui,
-    utils::{Emit, ResultExt, SharedEmit, unb_chan},
+    utils::{CancelDropGuard, Emit, ResultExt, SharedEmit, UnbTx, unb_chan},
 };
 
 // TODO: Consider using uuids
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TermId(Arc<[u8]>);
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct TermId(Arc<str>);
 impl TermId {
-    pub fn as_bytes(&self) -> &[u8] {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
-    pub fn from_bytes(s: &[u8]) -> Self {
+    pub fn from_str(s: &str) -> Self {
         Self(s.into())
-    }
-}
-impl std::fmt::Debug for TermId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut hasher = std::hash::DefaultHasher::new();
-        std::hash::Hasher::write(&mut hasher, &self.0);
-        let hash = std::hash::Hasher::finish(&hasher);
-        f.debug_tuple("TermId").field(&hash).finish()
     }
 }
 
@@ -59,10 +45,11 @@ pub enum TermMgrUpdate {
 }
 #[derive(Debug)]
 pub struct SpawnTerm {
+    // FIXME: Consider removing TermId and just using SpawnTerm fields
     pub term_id: TermId,
     pub extra_args: Vec<OsString>,
     pub extra_envs: Vec<(OsString, OsString)>,
-    pub term_ev_tx: tokio::sync::mpsc::UnboundedSender<TermEvent>,
+    pub term_ev_tx: UnbTx<(TermId, TermEvent)>,
     pub cancel: CancellationToken,
 }
 
@@ -74,7 +61,7 @@ pub async fn run_term_manager(updates: impl Stream<Item = TermMgrUpdate> + Send 
     struct TermInst<E> {
         upd_tx: E,
         internal_id: u64,
-        cancel: CancellationToken,
+        _auto_cancel: CancelDropGuard,
     }
 
     let mut next_internal_id = 0u64;
@@ -90,15 +77,18 @@ pub async fn run_term_manager(updates: impl Stream<Item = TermMgrUpdate> + Send 
         let update = tokio::select! {
             Some(update) = updates.next() => update,
             Some((term_id, iid)) = cancelled_rx.next() => {
-                if let Some(&TermInst { internal_id, .. }) = terminals.get(&term_id) && iid == internal_id {
-                    _ = terminals.remove(&term_id);
+                if terminals
+                    .get(&term_id)
+                    .is_some_and(|&TermInst { internal_id, .. }| iid == internal_id)
+                {
+                    terminals.remove(&term_id);
                 }
                 continue;
             }
         };
         match update {
             TermMgrUpdate::TermUpdate(tid, tupd) => {
-                let Some(TermInst { upd_tx, cancel, .. }) = terminals
+                let Some(TermInst { upd_tx, .. }) = terminals
                     .get_mut(&tid)
                     .with_context(|| {
                         format!("Cannot send update {tupd:?} to unknown terminal id {tid:?}")
@@ -109,7 +99,7 @@ pub async fn run_term_manager(updates: impl Stream<Item = TermMgrUpdate> + Send 
                 };
                 let is_shutdown = matches!(&tupd, TermUpdate::Shutdown);
                 if Emit::emit(upd_tx, tupd).is_break() || is_shutdown {
-                    cancel.cancel();
+                    terminals.remove(&tid);
                 }
             }
             TermMgrUpdate::SpawnPanel(spawn) => {
@@ -118,24 +108,21 @@ pub async fn run_term_manager(updates: impl Stream<Item = TermMgrUpdate> + Send 
 
                 let cancel = spawn.cancel.clone();
                 let (upd_tx, upd_rx) = unb_chan();
-                if let Some(()) = spawn_inst(spawn, upd_rx, {
+
+                let res = spawn_inst(spawn, upd_rx, {
                     let mut cancelled_tx = cancelled_tx.clone();
                     let term_id = term_id.clone();
                     move |()| cancelled_tx.emit((term_id.clone(), internal_id))
-                })
-                .ok_or_log()
-                {
-                    let old = terminals.insert(
+                });
+                if res.ok_or_log().is_some() {
+                    terminals.insert(
                         term_id,
                         TermInst {
                             upd_tx,
-                            cancel,
+                            _auto_cancel: cancel.into(),
                             internal_id,
                         },
                     );
-                    if let Some(old) = old {
-                        old.cancel.cancel();
-                    }
                 }
             }
         }
@@ -146,7 +133,7 @@ fn spawn_inst(
         term_id,
         extra_args,
         extra_envs,
-        term_ev_tx,
+        mut term_ev_tx,
         cancel: inst_tok,
     }: SpawnTerm,
     upd_rx: impl Stream<Item = TermUpdate> + 'static + Send,
@@ -162,7 +149,7 @@ fn spawn_inst(
         .arg(INTERNAL_ARG)
         .envs(extra_envs)
         .env(SOCK_PATH_VAR, sock_path)
-        .env(TERM_ID_VAR, OsStr::from_bytes(term_id.as_bytes()))
+        .env(TERM_ID_VAR, term_id.as_str())
         .kill_on_drop(true)
         .stdout(std::io::stderr())
         .spawn()?;
@@ -170,7 +157,7 @@ fn spawn_inst(
     tokio::spawn(async move {
         let mut mgr = AbortOnDropHandle::new(tokio::spawn(run_term_inst_mgr(
             socket,
-            term_ev_tx,
+            move |ev| term_ev_tx.emit((term_id.clone(), ev)),
             upd_rx,
             inst_tok.clone(),
         )));

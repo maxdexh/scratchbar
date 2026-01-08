@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 pub use udbus::*;
 
-use crate::utils::{ReloadRx, lossy_broadcast};
+use crate::tui;
+use crate::utils::{Emit, ReloadRx, lossy_broadcast};
 
 // https://upower.freedesktop.org/docs/UPower.html
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -296,5 +299,53 @@ mod udbus {
         /// OnBattery property
         #[zbus(property)]
         fn on_battery(&self) -> zbus::Result<bool>;
+    }
+}
+
+// FIXME: refactor
+use crate::modules::prelude::*;
+#[derive(Debug)]
+pub struct Energy;
+impl Module for Energy {
+    async fn run_instance(
+        &self,
+        ModuleArgs {
+            mut act_tx,
+            upd_rx: _upd_rx,
+            reload_rx,
+            ..
+        }: ModuleArgs,
+        _cancel: crate::utils::CancelDropGuard,
+    ) {
+        let rx = connect(reload_rx);
+        tokio::pin!(rx);
+        while let Some(energy) = rx.next().await {
+            if !energy.should_show {
+                if act_tx.emit(ModuleAct::HideModule).is_break() {
+                    break;
+                }
+                continue;
+            }
+
+            // TODO: Time estimate tooltip
+            let percentage = energy.percentage.round() as i64;
+            let sign = match energy.bstate {
+                BatteryState::Discharging | BatteryState::PendingDischarge => '-',
+                _ => '+',
+            };
+            let rate = format!("{sign}{:.1}W", energy.rate);
+            let energy = format!("{percentage:>3}% {rate:<6}");
+
+            let tui = tui::Stack::horizontal([
+                tui::StackItem::auto(tui::InteractElem::new(
+                    Arc::new(Energy),
+                    tui::Text::plain(energy),
+                )),
+                tui::StackItem::spacing(3),
+            ]);
+            if act_tx.emit(ModuleAct::RenderAll(tui.into())).is_break() {
+                break;
+            }
+        }
     }
 }

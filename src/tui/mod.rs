@@ -2,32 +2,27 @@ use std::sync::Arc;
 
 // FIXME: Split mod by elem kind
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InteractTag(Arc<[u8]>);
-impl InteractTag {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+pub trait InteractPayload: std::any::Any + std::fmt::Debug + Send + Sync {}
+impl<T> InteractPayload for T where T: std::any::Any + std::fmt::Debug + Send + Sync {}
+impl dyn InteractPayload {
+    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        (self as &dyn std::any::Any).downcast_ref()
     }
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(bytes.into())
-    }
-}
-impl std::fmt::Debug for InteractTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut hasher = std::hash::DefaultHasher::new();
-        std::hash::Hasher::write(&mut hasher, &self.0);
-        let hash = std::hash::Hasher::finish(&hasher);
-        f.debug_tuple("InteractTag").field(&hash).finish()
+    pub fn downcast_arc<T: std::any::Any + Send + Sync>(self: Arc<Self>) -> Option<Arc<T>> {
+        Arc::downcast(self).ok()
     }
 }
 
-#[derive(Default, Debug)]
+pub type InteractTag = Arc<dyn InteractPayload>;
+
+#[derive(Default, Debug, Clone)]
 pub enum Elem {
     Stack(Stack),
     Text(Text),
     Image(Image),
     Block(Block),
     Tagged(Box<InteractElem>),
+    Shared(Arc<Self>),
     #[default]
     Empty,
 }
@@ -57,7 +52,7 @@ impl From<Text> for Elem {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TextLine {
     pub text: String,
     /// The height of the line. Relevant for the text sizing and graphics protocols.
@@ -74,7 +69,7 @@ impl TextLine {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Text {
     pub style: Style,
     pub lines: Vec<TextLine>,
@@ -91,6 +86,7 @@ impl Text {
         let mut lines = Vec::with_capacity(text.lines().count());
         let mut width = 0u16;
         for line in text.lines() {
+            // FIXME: Use unicode-segmentation
             width = std::cmp::max(width, line.chars().count().try_into().unwrap_or(u16::MAX));
             lines.push(TextLine::plain(line.into()));
         }
@@ -106,7 +102,7 @@ impl Text {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InteractElem {
     pub tag: InteractTag,
     pub elem: Elem,
@@ -120,33 +116,32 @@ impl InteractElem {
     }
 }
 
+#[derive(Clone)]
 pub struct Image {
-    pub data: Vec<u8>,
-    pub format: image::ImageFormat,
-    pub cached: Option<image::RgbaImage>,
+    pub img: image::RgbaImage,
+}
+impl Image {
+    pub fn load_or_empty(data: impl AsRef<[u8]>, format: image::ImageFormat) -> Elem {
+        image::load_from_memory_with_format(data.as_ref(), format)
+            .context("Systray icon has invalid png data")
+            .ok_or_log()
+            .map_or(Elem::Empty, |img| {
+                Image {
+                    img: img.into_rgba8(),
+                }
+                .into()
+            })
+    }
 }
 impl std::fmt::Debug for Image {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut hasher = std::hash::DefaultHasher::new();
-        std::hash::Hasher::write(&mut hasher, &self.data);
+        std::hash::Hasher::write(&mut hasher, &self.img);
         let hash = std::hash::Hasher::finish(&hasher);
-        f.debug_tuple("Image")
-            .field(&self.format)
-            .field(&hash)
-            .finish()
+        f.debug_tuple("Image").field(&hash).finish()
     }
 }
-impl Image {
-    pub fn load(&mut self) -> anyhow::Result<&image::RgbaImage> {
-        if self.cached.is_some() {
-            // HACK: Borrow checker limitation
-            return Ok(self.cached.as_ref().unwrap());
-        }
-        let img = image::load_from_memory_with_format(&self.data, self.format)?;
-        Ok(self.cached.insert(img.into_rgba8()))
-    }
-}
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block {
     pub borders: Borders,
     pub border_style: Style,
@@ -179,10 +174,10 @@ pub enum Constr {
     #[default]
     Auto,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stack {
     pub axis: Axis,
-    pub parts: Box<[StackItem]>,
+    pub parts: Vec<StackItem>,
 }
 impl Stack {
     pub fn horizontal(parts: impl IntoIterator<Item = StackItem>) -> Self {
@@ -199,7 +194,7 @@ impl Stack {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StackItem {
     pub constr: Constr,
     pub elem: Elem,
@@ -247,14 +242,14 @@ pub struct Modifier {
     pub strike: bool,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct LineSet {
-    pub vertical: Box<str>,
-    pub horizontal: Box<str>,
-    pub top_right: Box<str>,
-    pub top_left: Box<str>,
-    pub bottom_right: Box<str>,
-    pub bottom_left: Box<str>,
+    pub vertical: Arc<str>,
+    pub horizontal: Arc<str>,
+    pub top_right: Arc<str>,
+    pub top_left: Arc<str>,
+    pub bottom_right: Arc<str>,
+    pub bottom_left: Arc<str>,
 }
 
 impl LineSet {
@@ -358,6 +353,9 @@ impl LineSet {
     }
 }
 mod render;
+use anyhow::Context;
 pub use render::*;
 mod layout;
 pub use layout::*;
+
+use crate::utils::ResultExt as _;

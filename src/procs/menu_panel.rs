@@ -9,12 +9,11 @@ use tokio_stream::StreamExt;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
-    clients::tray::{TrayMenuExt, TrayMenuInteract},
-    data::Position32,
+    modules::tray::{TrayMenuExt, TrayMenuInteract},
     monitors::{MonitorEvent, MonitorInfo},
     terminals::{SpawnTerm, TermEvent, TermId, TermMgrUpdate, TermUpdate},
-    tui,
-    utils::{Emit, ResultExt as _, SharedEmit, unb_chan, unb_rx_stream},
+    tui::{self, Vec2},
+    utils::{Emit, ResultExt as _, SharedEmit, UnbTx, unb_chan},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,20 +32,21 @@ pub enum MenuUpdate {
     Hide,
     SwitchSubject {
         new_menu: Menu,
-        location: Position32,
+        location: Vec2<u32>,
         monitor: Arc<str>,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MenuInteractTarget {
-    TrayMenu(crate::clients::tray::TrayMenuInteract),
+    TrayMenu(crate::modules::tray::TrayMenuInteract),
 }
 impl MenuInteractTarget {
-    fn serialize_tag(&self) -> tui::InteractTag {
-        tui::InteractTag::from_bytes(&postcard::to_stdvec(self).unwrap())
+    fn into_tag(self) -> tui::InteractTag {
+        Arc::new(self)
     }
-    fn deserialize_tag(tag: &tui::InteractTag) -> Self {
-        postcard::from_bytes(tag.as_bytes()).unwrap()
+    fn from_tag(tag: &tui::InteractTag) -> Self {
+        let tag: &dyn std::any::Any = tag;
+        tag.downcast_ref::<Self>().unwrap().clone()
     }
 }
 
@@ -66,7 +66,7 @@ impl Menu {
     }
 }
 
-type Interact = crate::data::InteractGeneric<MenuInteractTarget>;
+type Interact = tui::InteractGeneric<MenuInteractTarget>;
 
 fn tray_menu_item_to_tui(
     depth: u16,
@@ -119,11 +119,10 @@ fn tray_menu_item_to_tui(
                         tui::StackItem::length(
                             1,
                             tui::Stack::horizontal([
-                                tui::StackItem::auto(tui::Image {
-                                    data: icon.clone(),
-                                    format: image::ImageFormat::Png,
-                                    cached: None,
-                                }),
+                                tui::StackItem::auto(tui::Image::load_or_empty(
+                                    icon,
+                                    image::ImageFormat::Png,
+                                )),
                                 tui::StackItem::spacing(1),
                                 tui::StackItem::auto(tui::Text::plain(first_line)),
                             ]),
@@ -146,7 +145,7 @@ fn tray_menu_item_to_tui(
                         menu_path: it.clone(),
                         id: *id,
                     })
-                    .serialize_tag(),
+                    .into_tag(),
                 }
                 .into(),
                 None => elem,
@@ -268,10 +267,10 @@ pub async fn run_menu_panel_manager(
         struct Instance {
             _tmpdir_guard: tempfile::TempDir,
             inst_task: tokio::task::AbortHandle,
-            bar_upd_tx: tokio::sync::mpsc::UnboundedSender<Option<PanelShow>>,
+            bar_upd_tx: UnbTx<Option<PanelShow>>,
         }
         let mut instances = HashMap::<TermId, Instance>::new();
-        let monitor_to_term_id = |name: &str| TermId::from_bytes(name.as_bytes());
+        let monitor_to_term_id = |name: &str| TermId::from_str(name);
         let mut global_inst_tasks = JoinSet::<()>::new();
 
         #[derive(Debug)]
@@ -404,9 +403,9 @@ pub async fn run_menu_panel_manager(
                     };
 
                     for monitor in ev.added_or_changed().cloned() {
-                        let term_id = TermId::from_bytes(monitor.name.as_bytes());
-                        let (bar_upd_tx, bar_upd_rx) = tokio::sync::mpsc::unbounded_channel();
-                        let (term_ev_tx, term_ev_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let term_id = TermId::from_str(&monitor.name);
+                        let (bar_upd_tx, bar_upd_rx) = unb_chan();
+                        let (term_ev_tx, term_ev_rx) = unb_chan();
 
                         let (tmpdir, watcher_py, watcher_sock_path, watcher_sock) = {
                             let res = tokio::task::spawn_blocking(|| {
@@ -433,7 +432,7 @@ pub async fn run_menu_panel_manager(
                         let mut inst_subtasks = JoinSet::<()>::new();
                         inst_subtasks.spawn(run_instance_mgr(
                             menu_ev_tx.clone(),
-                            unb_rx_stream(bar_upd_rx),
+                            bar_upd_rx,
                             {
                                 let mut term_upd_tx = term_upd_tx.clone();
                                 let term_id = term_id.clone();
@@ -442,7 +441,7 @@ pub async fn run_menu_panel_manager(
                                         .emit(TermMgrUpdate::TermUpdate(term_id.clone(), upd))
                                 }
                             },
-                            unb_rx_stream(term_ev_rx),
+                            term_ev_rx.map(|(_, a)| a), // FIXME: No.
                             monitor.clone(),
                         ));
 
@@ -570,7 +569,7 @@ pub async fn run_menu_panel_manager(
 
 struct PanelShow {
     tui: tui::Tui,
-    pos: Position32,
+    pos: Vec2<u32>,
 }
 async fn run_instance_mgr(
     mut ev_tx: impl SharedEmit<MenuEvent>,
@@ -607,7 +606,7 @@ async fn run_instance_mgr(
 
     struct Show {
         tui: tui::Tui,
-        pos: Position32,
+        pos: Vec2<u32>,
         tui_size_cache: tui::Vec2<u16>,
         rendered: bool,
     }
@@ -650,14 +649,14 @@ async fn run_instance_mgr(
                 if let crossterm::event::Event::Mouse(ev) = ev
                     && let Some(tui::TuiInteract {
                         location,
-                        target: Some(tag),
+                        payload: Some(tag),
                         kind,
                     }) = layout.interpret_mouse_event(ev, sizes.font_size())
                 {
                     let interact = Interact {
                         location,
                         kind,
-                        target: MenuInteractTarget::deserialize_tag(&tag),
+                        payload: MenuInteractTarget::from_tag(&tag),
                     };
                     if ev_tx.emit(MenuEvent::Interact(interact)).is_break() {
                         break;

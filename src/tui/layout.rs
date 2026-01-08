@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{data::Position32, tui::*};
+use crate::tui::*;
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Area {
@@ -54,14 +54,13 @@ pub enum Axis {
 
 #[derive(Debug, Default)]
 pub struct RenderedLayout {
-    pub widgets: Vec<(Area, InteractTag)>,
+    widgets: Vec<(Area, InteractTag)>,
 }
 impl RenderedLayout {
     pub fn insert(&mut self, rect: Area, widget: InteractTag) {
         self.widgets.push((rect, widget));
     }
 
-    // TODO: Delay until hover
     pub fn interpret_mouse_event(
         &mut self,
         event: crossterm::event::MouseEvent,
@@ -94,11 +93,11 @@ impl RenderedLayout {
                 |(r, w)| (*r, Some(w)),
             );
 
-        type DR = crate::data::Direction;
-        type IK = crate::data::InteractKind;
+        type DR = Direction;
+        type IK = InteractKind;
         type MK = crossterm::event::MouseEventKind;
         let kind = match kind {
-            MK::Down(button) => IK::Click(button),
+            MK::Down(button) => IK::Click(button.into()),
             MK::Moved => IK::Hover,
             MK::ScrollDown => IK::Scroll(DR::Down),
             MK::ScrollUp => IK::Scroll(DR::Up),
@@ -113,17 +112,54 @@ impl RenderedLayout {
             location: {
                 let font_w = u32::from(font_size.x);
                 let font_h = u32::from(font_size.y);
-                Position32 {
+                Vec2 {
                     x: u32::from(area.pos.x) * font_w + u32::from(area.size.x) * font_w / 2,
                     y: u32::from(area.pos.y) * font_h + u32::from(area.size.y) * font_h / 2,
                 }
             },
-            target: tag.cloned(),
+            payload: tag.cloned(),
             kind,
         })
     }
 }
-pub type TuiInteract = crate::data::InteractGeneric<Option<InteractTag>>;
+pub type TuiInteract = InteractGeneric<Option<InteractTag>>;
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InteractGeneric<T> {
+    pub location: Vec2<u32>,
+    pub payload: T,
+    pub kind: InteractKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+impl From<crossterm::event::MouseButton> for MouseButton {
+    fn from(value: crossterm::event::MouseButton) -> Self {
+        type MB = crossterm::event::MouseButton;
+        match value {
+            MB::Left => Self::Left,
+            MB::Right => Self::Right,
+            MB::Middle => Self::Middle,
+        }
+    }
+}
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum InteractKind {
+    Hover,
+    Click(MouseButton),
+    Scroll(Direction),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sizes {

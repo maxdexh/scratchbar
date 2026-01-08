@@ -2,6 +2,7 @@ use std::ops::ControlFlow;
 
 use futures::Stream;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 #[track_caller]
 pub fn lossy_broadcast<T: Clone>(rx: broadcast::Receiver<T>) -> impl Stream<Item = T> {
@@ -38,10 +39,13 @@ pub fn stream_from_fn<T>(f: impl AsyncFnMut() -> Option<T>) -> impl Stream<Item 
 }
 
 pub struct ReloadRx {
+    // FIXME: tokio::sync::Notify
     rx: broadcast::Receiver<()>,
+    //last_reload: Option<std::time::Instant>,
+    //min_delay: std::time::Duration,
 }
 impl ReloadRx {
-    // TODO: Return ControlFlow
+    // FIXME: Return Result
     pub fn blocking_wait(&mut self) -> Option<()> {
         match self.rx.blocking_recv() {
             Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Some(()),
@@ -55,21 +59,8 @@ impl ReloadRx {
             _ => None,
         }
     }
-    pub fn into_stream(self) -> impl Stream<Item = ()> {
-        broadcast_stream(self.rx, |_| Some(()))
-    }
-
-    // TODO: debounce/rate limit this heavily: after accepting a reload request, merge all
-    // requests from the next few seconds into one.
-    // TODO: Cause extra reloads from time to time.
-    pub fn new() -> (impl Clone + Fn(), Self) {
-        let (tx, rx) = broadcast::channel(1);
-        (
-            move || {
-                _ = tx.send(());
-            },
-            Self { rx },
-        )
+    pub fn into_stream(mut self) -> impl Stream<Item = ()> {
+        stream_from_fn(async move || self.wait().await)
     }
 
     pub fn resubscribe(&self) -> Self {
@@ -78,15 +69,32 @@ impl ReloadRx {
         }
     }
 }
-
-pub fn unb_rx_stream<T>(mut rx: tokio::sync::mpsc::UnboundedReceiver<T>) -> impl Stream<Item = T> {
-    futures::stream::poll_fn(move |cx| rx.poll_recv(cx))
+#[derive(Clone)]
+pub struct ReloadTx {
+    tx: broadcast::Sender<()>,
 }
-pub fn unb_chan<T>() -> (impl Emit<T> + Clone, impl Stream<Item = T>) {
+impl ReloadTx {
+    pub fn new() -> Self {
+        Self {
+            tx: broadcast::Sender::new(1),
+        }
+    }
+    pub fn reload(&mut self) {
+        _ = self.tx.send(());
+    }
+    pub fn subscribe(&self) -> ReloadRx {
+        ReloadRx {
+            rx: self.tx.subscribe(),
+        }
+    }
+}
+
+pub fn unb_chan<T>() -> (UnbTx<T>, UnbRx<T>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    (tx, unb_rx_stream(rx))
+    (tx, UnbRx::new(rx))
 }
 
+// FIXME: Return Result
 pub trait Emit<T> {
     #[track_caller]
     fn emit(&mut self, val: T) -> ControlFlow<()>;
@@ -127,39 +135,8 @@ impl<T> Emit<T> for std::sync::mpsc::Sender<T> {
         handle_sender_res(self.send(val))
     }
 }
-impl<T> Emit<T> for tokio::sync::broadcast::Sender<T> {
-    #[track_caller]
-    fn emit(&mut self, val: T) -> ControlFlow<()> {
-        handle_sender_res(self.send(val).map(|_| ()))
-    }
-}
 pub trait SharedEmit<T>: Emit<T> + Clone + 'static + Send {}
 impl<S: Emit<T> + Clone + 'static + Send, T> SharedEmit<T> for S {}
-
-mod dyn_shared_emit {
-    use super::*;
-
-    pub trait IDynSharedEmit<T>: Emit<T> + 'static + Send {
-        fn clone_dyn(&self) -> Box<dyn IDynSharedEmit<T>>;
-    }
-    impl<T, E: SharedEmit<T>> IDynSharedEmit<T> for E {
-        fn clone_dyn(&self) -> Box<dyn IDynSharedEmit<T>> {
-            Box::new(self.clone())
-        }
-    }
-    pub struct DynSharedEmit<T>(Box<dyn IDynSharedEmit<T>>);
-    impl<T: 'static> Clone for DynSharedEmit<T> {
-        fn clone(&self) -> Self {
-            Self(self.0.clone_dyn())
-        }
-    }
-    impl<T> Emit<T> for DynSharedEmit<T> {
-        fn emit(&mut self, val: T) -> ControlFlow<()> {
-            self.0.emit(val)
-        }
-    }
-}
-pub use dyn_shared_emit::DynSharedEmit;
 
 pub trait ResultExt {
     type Ok;
@@ -177,5 +154,46 @@ impl<T, E: Into<anyhow::Error>> ResultExt for Result<T, E> {
                 None
             }
         }
+    }
+}
+
+pub type WatchTx<T> = tokio::sync::watch::Sender<T>;
+pub type WatchRx<T> = tokio::sync::watch::Receiver<T>;
+pub type UnbTx<T> = tokio::sync::mpsc::UnboundedSender<T>;
+pub type UnbRx<T> = tokio_stream::wrappers::UnboundedReceiverStream<T>;
+pub fn watch_chan<T>(init: T) -> (WatchTx<T>, WatchRx<T>) {
+    tokio::sync::watch::channel(init)
+}
+// FIXME: after changing to return result, use impl Emit
+pub fn fused_watch_tx<T>(tx: WatchTx<T>) -> impl Emit<T> + Clone {
+    move |x| handle_sender_res(tx.send(x))
+}
+
+pub struct CancelDropGuard {
+    pub inner: CancellationToken,
+}
+impl Drop for CancelDropGuard {
+    fn drop(&mut self) {
+        self.inner.cancel();
+    }
+}
+impl CancelDropGuard {
+    pub fn new() -> Self {
+        Self {
+            inner: CancellationToken::new(),
+        }
+    }
+    pub fn disarm(self) -> CancellationToken {
+        let disarm = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `disarm` is not used after this, including by drop impls,
+        // so this copy is effectively a move out of the field.
+        unsafe { std::ptr::read(&disarm.inner) }
+    }
+}
+impl From<CancellationToken> for CancelDropGuard {
+    fn from(inner: CancellationToken) -> Self {
+        //tokio::sync::watch::Receiver::changed;
+        //tokio::sync::watch::Sender::send;
+        Self { inner }
     }
 }

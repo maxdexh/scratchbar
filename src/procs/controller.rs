@@ -1,15 +1,15 @@
 use std::ops::ControlFlow;
 
+use crate::tui::MouseButton;
 use crate::{
-    clients::{self, tray::TrayState},
-    data::InteractGeneric,
+    modules::{self, tray::TrayState},
     procs::{
         bar_panel::{BarEvent, BarEventInfo, BarUpdate},
         menu_panel::{Menu, MenuEvent, MenuUpdate},
     },
-    utils::{Emit, ReloadRx, dump_stream, unb_chan},
+    tui,
+    utils::{Emit, ReloadTx, dump_stream, unb_chan},
 };
-use crossterm::event::MouseButton;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt as _;
 
@@ -22,7 +22,8 @@ pub async fn main() {
     let mut client_tasks = JoinSet::<()>::new();
     let mut important_tasks = JoinSet::<()>::new(); // FIXME: Exit on mgr exit
 
-    let (reload_tx, reload_rx) = ReloadRx::new();
+    let mut reload_tx = ReloadTx::new();
+    let reload_rx = reload_tx.subscribe();
 
     let (mut bar_upd_tx, bar_ev_rx);
     let (mut menu_upd_tx, menu_ev_rx);
@@ -41,7 +42,7 @@ pub async fn main() {
         crate::monitors::connect(move |ev: crate::monitors::MonitorEvent| {
             let f1 = bar_monitor_tx.emit(ev.clone());
             let f2 = menu_monitor_tx.emit(ev);
-            reload_tx();
+            reload_tx.reload();
             if f1.is_break() || f2.is_break() {
                 ControlFlow::Break(())
             } else {
@@ -62,15 +63,16 @@ pub async fn main() {
 
     client_tasks.spawn(dump_stream(
         bar_upd_tx.clone(),
-        clients::hypr::connect(reload_rx.resubscribe()).map(BarUpdate::Desktop),
+        tokio_stream::wrappers::WatchStream::new(modules::hypr::connect(reload_rx.resubscribe()))
+            .map(BarUpdate::Desktop),
     ));
     client_tasks.spawn(dump_stream(
         bar_upd_tx.clone(),
-        clients::upower::connect(reload_rx.resubscribe()).map(BarUpdate::Energy),
+        modules::upower::connect(reload_rx.resubscribe()).map(BarUpdate::Energy),
     ));
     client_tasks.spawn(dump_stream(
         bar_upd_tx.clone(),
-        clients::clock::connect(reload_rx.resubscribe()).map(BarUpdate::Time),
+        modules::time::connect(reload_rx.resubscribe()).map(BarUpdate::Time),
     ));
 
     enum Upd {
@@ -79,11 +81,11 @@ pub async fn main() {
         Menu(MenuEvent),
     }
     let (tray_tx, tray_rx) = {
-        let (tx, stream) = clients::tray::connect(reload_rx.resubscribe());
+        let (tx, stream) = modules::tray::connect(reload_rx.resubscribe());
         (tx, stream.map(Upd::Tray))
     };
-    let ppd_switch_tx = {
-        let (tx, profiles) = clients::ppd::connect(reload_rx.resubscribe());
+    let mut ppd_switch_tx = {
+        let (tx, profiles) = modules::ppd::connect(reload_rx.resubscribe());
         client_tasks.spawn(dump_stream(
             bar_upd_tx.clone(),
             profiles.map(BarUpdate::Ppd),
@@ -91,7 +93,7 @@ pub async fn main() {
         tx
     };
     let mut audio_upd_tx = {
-        let (tx, events) = clients::pulse::connect(reload_rx.resubscribe());
+        let (tx, events) = modules::pulse::connect(reload_rx.resubscribe());
         client_tasks.spawn(dump_stream(
             bar_upd_tx.clone(),
             events.map(BarUpdate::Pulse),
@@ -125,14 +127,14 @@ pub async fn main() {
 
             Upd::Bar(
                 BarEventInfo { monitor },
-                BarEvent::Interact(InteractGeneric {
+                BarEvent::Interact(tui::InteractGeneric {
                     location,
-                    target,
+                    payload: target,
                     kind,
                 }),
             ) => {
-                use crate::data::InteractKind as IK;
                 use crate::procs::bar_panel::BarInteractTarget as IT;
+                use crate::tui::InteractKind as IK;
 
                 let mkswitch = |new_menu| MenuUpdate::SwitchSubject {
                     new_menu,
@@ -165,16 +167,14 @@ pub async fn main() {
                     }
 
                     (IK::Click(MouseButton::Left), IT::Ppd) => {
-                        if let Err(err) = ppd_switch_tx.send(()) {
-                            log::error!("Failed to send profile switch: {err}")
-                        }
+                        _ = ppd_switch_tx.emit(modules::ppd::CycleProfile);
                         ControlFlow::Continue(())
                     }
                     (IK::Click(MouseButton::Left), IT::Audio(target)) => {
                         if audio_upd_tx
-                            .emit(clients::pulse::PulseUpdate {
+                            .emit(modules::pulse::PulseUpdate {
                                 target,
-                                kind: clients::pulse::PulseUpdateKind::ToggleMute,
+                                kind: modules::pulse::PulseUpdateKind::ToggleMute,
                             })
                             .is_break()
                         {
@@ -184,9 +184,9 @@ pub async fn main() {
                     }
                     (IK::Click(MouseButton::Right), IT::Audio(target)) => {
                         if audio_upd_tx
-                            .emit(clients::pulse::PulseUpdate {
+                            .emit(modules::pulse::PulseUpdate {
                                 target,
-                                kind: clients::pulse::PulseUpdateKind::ResetVolume,
+                                kind: modules::pulse::PulseUpdateKind::ResetVolume,
                             })
                             .is_break()
                         {
@@ -196,14 +196,14 @@ pub async fn main() {
                     }
                     (IK::Scroll(direction), IT::Audio(target)) => {
                         if audio_upd_tx
-                            .emit(clients::pulse::PulseUpdate {
+                            .emit(modules::pulse::PulseUpdate {
                                 target,
-                                kind: clients::pulse::PulseUpdateKind::VolumeDelta(
+                                kind: modules::pulse::PulseUpdateKind::VolumeDelta(
                                     2 * match direction {
-                                        crate::data::Direction::Up => 1,
-                                        crate::data::Direction::Down => -1,
-                                        crate::data::Direction::Left => -1,
-                                        crate::data::Direction::Right => 1,
+                                        tui::Direction::Up => 1,
+                                        tui::Direction::Down => -1,
+                                        tui::Direction::Left => -1,
+                                        tui::Direction::Right => 1,
                                     },
                                 ),
                             })
@@ -223,15 +223,15 @@ pub async fn main() {
                 }
             }
             Upd::Menu(menu) => match menu {
-                MenuEvent::Interact(InteractGeneric {
+                MenuEvent::Interact(tui::InteractGeneric {
                     location: _,
-                    target,
+                    payload: target,
                     kind,
                 }) => match target {
                     #[expect(clippy::single_match)]
                     crate::procs::menu_panel::MenuInteractTarget::TrayMenu(interact) => {
                         match kind {
-                            crate::data::InteractKind::Click(_) => {
+                            tui::InteractKind::Click(_) => {
                                 if let Err(err) = tray_tx.send(interact) {
                                     log::error!("Failed to send interaction: {err}");
                                 }

@@ -2,34 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum InteractKind {
-    Hover,
-    Click(crossterm::event::MouseButton),
-    Scroll(Direction),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-// TODO: Remove in favor of concrete variant
-#[derive(Serialize, Deserialize, Debug)]
-pub struct InteractGeneric<T> {
-    pub location: Position32,
-    pub target: T,
-    pub kind: InteractKind,
-}
-
-#[derive(Default, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Position32 {
-    pub x: u32,
-    pub y: u32,
-}
+use crate::tui::Vec2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WorkspaceId(Arc<str>);

@@ -1,29 +1,36 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::Stream;
-use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt as _;
 
-use crate::utils::{ReloadRx, SharedEmit, lossy_broadcast};
+use crate::{
+    modules::prelude::*,
+    tui,
+    utils::{Emit, ReloadRx, ResultExt, SharedEmit, WatchRx, fused_watch_tx, unb_chan, watch_chan},
+};
 
-pub fn connect(reload_rx: ReloadRx) -> (broadcast::Sender<()>, impl Stream<Item = Arc<str>>) {
-    let (switch_tx, switch_rx) = broadcast::channel(50);
-    let (profile_tx, profile_rx) = broadcast::channel(50);
+pub struct CycleProfile;
+pub fn connect(
+    reload_rx: ReloadRx,
+) -> (impl SharedEmit<CycleProfile>, impl Stream<Item = Arc<str>>) {
+    let (switch_tx, switch_rx) = unb_chan();
+    let (profile_tx, profile_rx) = unb_chan();
 
     tokio::spawn(async move {
-        match run(profile_tx, lossy_broadcast(switch_rx), reload_rx).await {
+        match run(profile_tx, switch_rx, reload_rx).await {
             Err(err) => log::error!("Failed to connect to ppd: {err}"),
             Ok(()) => log::warn!("Ppd client exited"),
         }
     });
 
-    (switch_tx, lossy_broadcast(profile_rx))
+    (switch_tx, profile_rx)
 }
 
 async fn run(
     mut profile_tx: impl SharedEmit<Arc<str>>,
-    switch_rx: impl Stream<Item = ()>,
+    switch_rx: impl Stream<Item = CycleProfile>,
     reload_rx: ReloadRx,
 ) -> Result<()> {
     let connection = zbus::Connection::system().await?;
@@ -31,7 +38,7 @@ async fn run(
 
     enum Upd {
         ProfileChanged(Arc<str>),
-        CycleProfile(()),
+        CycleProfile(CycleProfile),
         Reload(()),
     }
     let active_profiles = futures::StreamExt::filter_map(
@@ -64,7 +71,7 @@ async fn run(
                     break;
                 }
             }
-            Upd::CycleProfile(()) => {
+            Upd::CycleProfile(CycleProfile) => {
                 let Ok(profiles) = proxy
                     .profiles()
                     .await
@@ -125,5 +132,82 @@ mod dbus {
         pub driver: String,
         pub platform_driver: Option<String>,
         pub cpu_driver: Option<String>,
+    }
+}
+fn connect2(reload_rx: ReloadRx) -> (impl SharedEmit<CycleProfile>, WatchRx<Arc<str>>) {
+    let (switch_tx, switch_rx) = unb_chan();
+    let (profile_tx, profile_rx) = watch_chan(Default::default());
+
+    tokio::spawn(async move {
+        match run(fused_watch_tx(profile_tx), switch_rx, reload_rx).await {
+            Err(err) => log::error!("Failed to connect to ppd: {err}"),
+            Ok(()) => log::warn!("Ppd client exited"),
+        }
+    });
+
+    (switch_tx, profile_rx)
+}
+
+// FIXME: Refactor
+#[derive(Debug)]
+pub struct PowerProfiles;
+impl Module for PowerProfiles {
+    async fn run_instance(
+        &self,
+        ModuleArgs {
+            mut act_tx,
+            mut upd_rx,
+            reload_rx,
+            ..
+        }: ModuleArgs,
+        _cancel: crate::utils::CancelDropGuard,
+    ) -> () {
+        let (mut cycle_tx, mut profile_rx) = connect2(reload_rx);
+
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            while profile_rx.changed().await.is_ok() {
+                let ppd_symbol = match &profile_rx.borrow_and_update() as &str {
+                    "balanced" => " ",
+                    "performance" => " ",
+                    "power-saver" => " ",
+                    _ => "",
+                };
+
+                let tui =
+                    tui::InteractElem::new(Arc::new(PowerProfiles), tui::Text::plain(ppd_symbol))
+                        .into();
+                if act_tx.emit(ModuleAct::RenderAll(tui)).is_break() {
+                    break;
+                }
+            }
+        });
+
+        tasks.spawn(async move {
+            while let Some(upd) = upd_rx.next().await {
+                match upd {
+                    ModuleUpd::Interact(ModuleInteract { payload, kind, .. }) => {
+                        let Some(PowerProfiles) = payload.tag.downcast_ref() else {
+                            continue;
+                        };
+
+                        match kind {
+                            tui::InteractKind::Click(tui::MouseButton::Left) => {
+                                if cycle_tx.emit(CycleProfile).is_break() {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                // TODO
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        if let Some(res) = tasks.join_next().await {
+            res.context("Ppd module failed").ok_or_log();
+        }
     }
 }

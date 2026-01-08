@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail};
+use anyhow::{Context as _, anyhow, bail};
 use futures::Stream;
 use libpulse_binding::{
     self as pulse, context::introspect::ServerInfo, mainloop::standard::IterateResult,
@@ -14,7 +14,7 @@ use pulse::{
     proplist::Proplist,
     volume::ChannelVolumes,
 };
-use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt as _;
 
 use std::{
@@ -23,26 +23,30 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use crate::utils::{ReloadRx, SharedEmit, lossy_broadcast};
+use crate::{
+    modules::prelude::*,
+    tui,
+    utils::{Emit, ReloadRx, ResultExt, SharedEmit, unb_chan},
+};
 
 pub fn connect(
     reload_rx: ReloadRx,
 ) -> (impl SharedEmit<PulseUpdate>, impl Stream<Item = PulseState>) {
-    let (ev_tx, ev_rx) = broadcast::channel(50);
+    let (ev_tx, ev_rx) = unb_chan();
     std::thread::spawn(|| match run_blocking(ev_tx, reload_rx) {
         Ok(()) => log::warn!("PulseAudio client has quit"),
         Err(err) => log::error!("PulseAudio client has failed: {err}"),
     });
-    let (up_tx, up_rx) = broadcast::channel(100);
+    let (up_tx, up_rx) = unb_chan();
 
     tokio::task::spawn(async move {
-        match run_updater(lossy_broadcast(up_rx)).await {
+        match run_updater(up_rx).await {
             Ok(()) => log::warn!("PulseAudio updater has quit"),
             Err(err) => log::error!("PulseAudio updater has failed: {err}"),
         }
     });
 
-    (up_tx, lossy_broadcast(ev_rx))
+    (up_tx, ev_rx)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
@@ -84,7 +88,7 @@ fn handle_iterate_result(res: IterateResult) -> anyhow::Result<()> {
     }
 }
 
-fn run_blocking(tx: broadcast::Sender<PulseState>, mut reload_rx: ReloadRx) -> anyhow::Result<()> {
+fn run_blocking(tx: impl SharedEmit<PulseState>, mut reload_rx: ReloadRx) -> anyhow::Result<()> {
     log::info!("Connecting to PulseAudio");
 
     let awaiting_reload = Arc::new(AtomicBool::new(false));
@@ -302,4 +306,122 @@ async fn run_updater(updates: impl Stream<Item = PulseUpdate>) -> anyhow::Result
 
     log::warn!("Pulse updater exited");
     Ok(())
+}
+
+// FIXME: Refactor
+pub struct Pulse;
+impl Module for Pulse {
+    async fn run_instance(
+        &self,
+        ModuleArgs {
+            mut act_tx,
+            mut upd_rx,
+            reload_rx,
+            ..
+        }: ModuleArgs,
+        _cancel: crate::utils::CancelDropGuard,
+    ) {
+        fn audio_item(
+            kind: PulseDeviceKind,
+            &PulseDeviceState { volume, muted, .. }: &PulseDeviceState,
+            unmuted_sym: impl FnOnce() -> tui::StackItem,
+            muted_sym: impl FnOnce() -> tui::StackItem,
+        ) -> tui::StackItem {
+            tui::StackItem::auto(tui::InteractElem::new(
+                Arc::new(kind),
+                tui::Stack::horizontal([
+                    if muted { muted_sym() } else { unmuted_sym() },
+                    tui::StackItem::auto(tui::Text::plain(format!(
+                        "{:>3}%",
+                        (volume * 100.0).round() as u32
+                    ))),
+                ]),
+            ))
+        }
+        let (mut tx, rx) = connect(reload_rx);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            tokio::pin!(rx);
+            while let Some(pulse) = rx.next().await {
+                let tui = tui::Stack::horizontal([
+                    audio_item(
+                        PulseDeviceKind::Source,
+                        &pulse.source,
+                        || {
+                            // There is no double-width microphone character, so we have to build or own.
+                            tui::StackItem::auto(tui::Text {
+                                width: 2,
+                                style: Default::default(),
+                                lines: [tui::TextLine {
+                                    height: 1,
+                                    // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
+                                    // - w=2      set width to 2
+                                    // - h=2      ceter the text horizontally
+                                    // - n=1/d=1  use fractional scale of 1:1. kitty ignores w without this
+                                    text: "\x1b]66;w=2:h=2:n=1:d=1;\x07".into(),
+                                }]
+                                .into(),
+                            })
+                        },
+                        || tui::StackItem::auto(tui::Text::plain(" ")),
+                    ),
+                    tui::StackItem::spacing(3),
+                    audio_item(
+                        PulseDeviceKind::Sink,
+                        &pulse.sink,
+                        || tui::StackItem::auto(tui::Text::plain(" ")),
+                        || tui::StackItem::auto(tui::Text::plain(" ")),
+                    ),
+                    tui::StackItem::spacing(3),
+                ]);
+                if act_tx.emit(ModuleAct::RenderAll(tui.into())).is_break() {
+                    break;
+                }
+            }
+        });
+        tasks.spawn(async move {
+            while let Some(upd) = upd_rx.next().await {
+                match upd {
+                    ModuleUpd::Interact(ModuleInteract {
+                        location: _,
+                        payload,
+                        kind,
+                    }) => {
+                        let Some(&target) = payload.tag.downcast_ref::<PulseDeviceKind>() else {
+                            continue;
+                        };
+                        let cf = tx.emit(PulseUpdate {
+                            target,
+                            kind: match kind {
+                                tui::InteractKind::Click(tui::MouseButton::Left) => {
+                                    PulseUpdateKind::ToggleMute
+                                }
+                                tui::InteractKind::Click(tui::MouseButton::Right) => {
+                                    PulseUpdateKind::ResetVolume
+                                }
+                                tui::InteractKind::Scroll(direction) => {
+                                    PulseUpdateKind::VolumeDelta(
+                                        2 * match direction {
+                                            tui::Direction::Up => 1,
+                                            tui::Direction::Down => -1,
+                                            tui::Direction::Left => -1,
+                                            tui::Direction::Right => 1,
+                                        },
+                                    )
+                                }
+                                _ => continue,
+                            },
+                        });
+                        if cf.is_break() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        if let Some(res) = tasks.join_next().await {
+            res.context("Pulse module failed").ok_or_log();
+        }
+    }
 }
