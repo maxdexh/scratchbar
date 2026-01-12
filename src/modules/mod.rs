@@ -48,9 +48,9 @@ pub mod prelude {
         pub tag: tui::InteractTag,
         pub monitor: Arc<str>,
     }
-    pub type ModuleArgs = crate::controller2::ModuleArgs;
-    pub type ModuleActTx = crate::panels::bar::ModuleActTxImpl;
-    pub type ModuleUpdRx = crate::panels::bar::ModuleUpdRxImpl;
+    pub type ModuleArgs = crate::simple_bar::ModuleArgs;
+    pub type ModuleActTx = crate::panels::ModuleActTxImpl;
+    pub type ModuleUpdRx = crate::panels::ModuleUpdRxImpl;
     pub trait Module: 'static + Send + Sync {
         fn run_instance(
             &self,

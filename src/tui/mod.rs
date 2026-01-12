@@ -8,9 +8,6 @@ impl dyn InteractPayload {
     pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
         (self as &dyn std::any::Any).downcast_ref()
     }
-    pub fn downcast_arc<T: std::any::Any + Send + Sync>(self: Arc<Self>) -> Option<Arc<T>> {
-        Arc::downcast(self).ok()
-    }
 }
 
 pub type InteractTag = Arc<dyn InteractPayload>;

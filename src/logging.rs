@@ -8,7 +8,7 @@ pub fn should_color() -> bool {
 #[derive(Debug)]
 pub enum ProcKindForLogger {
     Controller,
-    Panel(crate::terminals::TermId),
+    Panel(String),
 }
 impl std::fmt::Display for ProcKindForLogger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

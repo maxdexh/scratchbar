@@ -7,7 +7,7 @@ use crate::{
         self,
         prelude::{Module, ModuleId},
     },
-    panels::bar::{BarMgrModuleArgs, BarMgrModuleParams, BarMgrUpd},
+    panels::{BarMgrModuleArgs, BarMgrModuleParams, BarMgrUpd},
     utils::{Emit, ResultExt, unb_chan},
 };
 
@@ -57,7 +57,7 @@ pub async fn main() {
     {
         let bar_upd_rx;
         (bar_upd_tx, bar_upd_rx) = unb_chan();
-        tasks.spawn(crate::panels::bar::run_manager(bar_upd_rx));
+        tasks.spawn(crate::panels::run_manager(bar_upd_rx));
     }
 
     let hypr = ModuleId::new("hypr");
@@ -67,7 +67,7 @@ pub async fn main() {
     let energy = ModuleId::new("energy");
     let tray = ModuleId::new("tray");
 
-    bar_upd_tx.emit(BarMgrUpd::LoadModules(crate::panels::bar::LoadModules {
+    bar_upd_tx.emit(BarMgrUpd::LoadModules(crate::panels::LoadModules {
         start: [
             botch_module(&hypr, modules::hypr::Hypr),
             botch_module(&clock, modules::time::Time),

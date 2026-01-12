@@ -39,13 +39,11 @@ pub fn stream_from_fn<T>(f: impl AsyncFnMut() -> Option<T>) -> impl Stream<Item 
 }
 
 pub struct ReloadRx {
-    // FIXME: tokio::sync::Notify
     rx: broadcast::Receiver<()>,
     //last_reload: Option<std::time::Instant>,
     //min_delay: std::time::Duration,
 }
 impl ReloadRx {
-    // FIXME: Return Result
     pub fn blocking_wait(&mut self) -> Option<()> {
         match self.rx.blocking_recv() {
             Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Some(()),
@@ -61,12 +59,6 @@ impl ReloadRx {
     }
     pub fn into_stream(mut self) -> impl Stream<Item = ()> {
         stream_from_fn(async move || self.wait().await)
-    }
-
-    pub fn resubscribe(&self) -> Self {
-        Self {
-            rx: self.rx.resubscribe(),
-        }
     }
 }
 #[derive(Clone)]

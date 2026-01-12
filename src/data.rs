@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::tui::Vec2;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WorkspaceId(Arc<str>);
 impl From<&str> for WorkspaceId {
