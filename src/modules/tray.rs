@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TrayMenuInteract {
     pub addr: Arc<str>,
     pub menu_path: Arc<str>,
@@ -43,14 +43,14 @@ struct TrayInteractTag {
 
 pub struct TrayModule {
     state_rx: WatchRx<TrayState>,
-    menu_interact_tx: UnbTx<Arc<TrayMenuInteract>>,
+    menu_interact_tx: UnbTx<TrayMenuInteract>,
     reload_tx: ReloadTx,
     _background: AbortOnDropHandle<()>,
 }
 impl TrayModule {
     async fn run_bg(
         state_tx: impl SharedEmit<TrayState>,
-        menu_interact_rx: impl Stream<Item = Arc<TrayMenuInteract>> + 'static + Send,
+        menu_interact_rx: impl Stream<Item = TrayMenuInteract> + 'static + Send,
         mut reload_rx: ReloadRx,
     ) {
         let client = loop {
@@ -170,7 +170,7 @@ impl TrayModule {
     }
     async fn run_menu_interaction(
         client: system_tray::client::Client,
-        interact_rx: impl Stream<Item = Arc<TrayMenuInteract>>,
+        interact_rx: impl Stream<Item = TrayMenuInteract>,
     ) {
         tokio::pin!(interact_rx);
         while let Some(interact) = interact_rx.next().await {
@@ -178,13 +178,13 @@ impl TrayModule {
                 addr,
                 menu_path,
                 id,
-            } = &*interact;
+            } = interact;
 
             if let Err(err) = client
                 .activate(system_tray::client::ActivateRequest::MenuItem {
-                    address: str::to_owned(addr),
-                    menu_path: str::to_owned(menu_path),
-                    submenu_id: *id,
+                    address: str::to_owned(&addr),
+                    menu_path: str::to_owned(&menu_path),
+                    submenu_id: id,
                 })
                 .await
             {
@@ -221,6 +221,7 @@ impl Module for TrayModule {
             act_tx,
             mut upd_rx,
             mut reload_rx,
+            inst_id,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
@@ -268,10 +269,16 @@ impl Module for TrayModule {
                         }
 
                         parts.extend([
-                            tui::StackItem::auto(tui::InteractElem::new(
-                                Arc::new(TrayInteractTag { addr: addr.clone() }),
-                                tui::Image::load_or_empty(png_data, image::ImageFormat::Png),
-                            )),
+                            tui::StackItem::auto(tui::InteractElem {
+                                payload: tui::InteractPayload {
+                                    mod_inst: inst_id.clone(),
+                                    tag: tui::InteractTag::new(TrayInteractTag {
+                                        addr: addr.clone(),
+                                    }),
+                                },
+                                elem: tui::Image::load_or_empty(png_data, image::ImageFormat::Png)
+                                    .into(),
+                            }),
                             tui::StackItem::spacing(1),
                         ])
                     }
@@ -291,8 +298,8 @@ impl Module for TrayModule {
                         payload: ModuleInteractPayload { tag, monitor },
                         kind,
                     }) => {
-                        if let Ok(menu_interact) = Arc::downcast(tag.clone()) {
-                            interact_tx.emit(menu_interact);
+                        if let Some(menu_interact) = tag.downcast_ref() {
+                            interact_tx.emit(Clone::clone(&menu_interact));
                             continue;
                         }
                         let Some(TrayInteractTag { addr }) = tag.downcast_ref() else {
@@ -355,6 +362,7 @@ impl Module for TrayModule {
                                     },
                                     border_set: tui::LineSet::thick(),
                                     inner: Some(Box::new(tray_menu_to_tui(
+                                        &inst_id,
                                         0,
                                         submenus,
                                         addr,
@@ -384,6 +392,7 @@ impl Module for TrayModule {
     }
 }
 fn tray_menu_item_to_tui(
+    inst_id: &ModInstId,
     depth: u16,
     item: &system_tray::menu::MenuItem,
     addr: &Arc<str>,
@@ -455,11 +464,14 @@ fn tray_menu_item_to_tui(
             match menu_path {
                 Some(it) => tui::InteractElem {
                     elem,
-                    tag: Arc::new(TrayMenuInteract {
-                        addr: addr.clone(),
-                        menu_path: it.clone(),
-                        id: *id,
-                    }),
+                    payload: tui::InteractPayload {
+                        mod_inst: inst_id.clone(),
+                        tag: tui::InteractTag::new(TrayMenuInteract {
+                            addr: addr.clone(),
+                            menu_path: it.clone(),
+                            id: *id,
+                        }),
+                    },
                 }
                 .into(),
                 None => elem,
@@ -477,13 +489,20 @@ fn tray_menu_item_to_tui(
     } else {
         tui::Stack::vertical([
             tui::StackItem::auto(main_elem),
-            tui::StackItem::auto(tray_menu_to_tui(depth + 1, &item.submenu, addr, menu_path)),
+            tui::StackItem::auto(tray_menu_to_tui(
+                inst_id,
+                depth + 1,
+                &item.submenu,
+                addr,
+                menu_path,
+            )),
         ])
         .into()
     })
 }
 
 fn tray_menu_to_tui(
+    inst_id: &ModInstId,
     depth: u16,
     items: &[system_tray::menu::MenuItem],
     addr: &Arc<str>,
@@ -492,7 +511,7 @@ fn tray_menu_to_tui(
     tui::Stack::vertical(items.iter().filter_map(|item| {
         Some(tui::StackItem {
             constr: tui::Constr::Auto,
-            elem: tray_menu_item_to_tui(depth, item, addr, menu_path)?,
+            elem: tray_menu_item_to_tui(inst_id, depth, item, addr, menu_path)?,
         })
     }))
     .into()

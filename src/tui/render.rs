@@ -51,7 +51,7 @@ impl Elem {
             Self::Block(block) => block.render(ctx, sizing, area),
             Self::Text(text) => text.render(ctx, sizing, area),
             Self::Tagged(elem) => {
-                ctx.layout.insert(area, elem.tag.clone());
+                ctx.layout.insert(area, elem.payload.clone());
                 elem.elem.render(ctx, sizing, area)
             }
             Self::Shared(elem) => elem.render(ctx, sizing, area),

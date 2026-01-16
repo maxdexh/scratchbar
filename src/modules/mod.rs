@@ -18,6 +18,7 @@ pub mod prelude {
         RenderByMonitor(std::collections::HashMap<Arc<str>, tui::StackItem>),
         RenderAll(tui::StackItem),
         HideModule,
+        // FIXME: Add means to update the content of a menu.
         OpenMenu(OpenMenu),
     }
     pub struct OpenMenu {
@@ -46,9 +47,11 @@ pub mod prelude {
         pub act_tx: ModuleActTx,
         pub upd_rx: ModuleUpdRx,
         pub reload_rx: crate::utils::ReloadRx,
+        pub inst_id: ModInstId,
     }
     pub type ModuleActTx = crate::panels::ModuleActTxImpl;
     pub type ModuleUpdRx = crate::panels::ModuleUpdRxImpl;
+    pub type ModInstId = crate::panels::ModInstIdImpl;
 
     pub trait Module: 'static + Send + Sync {
         type Config: 'static + Send; //+ serde::de::DeserializeOwned + Default;

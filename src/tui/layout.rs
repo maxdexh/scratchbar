@@ -54,10 +54,10 @@ pub enum Axis {
 
 #[derive(Debug, Default)]
 pub struct RenderedLayout {
-    widgets: Vec<(Area, InteractTag)>,
+    widgets: Vec<(Area, InteractPayload)>,
 }
 impl RenderedLayout {
-    pub fn insert(&mut self, rect: Area, widget: InteractTag) {
+    pub fn insert(&mut self, rect: Area, widget: InteractPayload) {
         self.widgets.push((rect, widget));
     }
 
@@ -122,7 +122,13 @@ impl RenderedLayout {
         })
     }
 }
-pub type TuiInteract = InteractGeneric<Option<InteractTag>>;
+pub type TuiInteract = InteractGeneric<Option<InteractPayload>>;
+#[derive(Debug, Clone)]
+pub struct InteractPayload {
+    pub mod_inst: crate::modules::prelude::ModInstId,
+    pub tag: InteractTag,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InteractGeneric<T> {
     pub location: Vec2<u32>,

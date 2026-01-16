@@ -246,7 +246,6 @@ impl EnergyModule {
 
             break trip;
         };
-        log::debug!("{device:?}");
 
         enum Upd {
             Reload(()),
@@ -294,7 +293,6 @@ impl EnergyModule {
             ));
         tokio::pin!(updates);
 
-        log::debug!("Listening to upower");
         while let Some(update) = updates.next().await {
             state_tx.send_modify(|state| match update {
                 Upd::Reload(()) => (),

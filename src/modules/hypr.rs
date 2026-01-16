@@ -137,6 +137,7 @@ impl Module for HyprModule {
             mut act_tx,
             mut upd_rx,
             mut reload_rx,
+            inst_id,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
@@ -170,13 +171,18 @@ impl Module for HyprModule {
                                 continue;
                             };
                             let wss = by_monitor.entry(monitor).or_insert_with(Vec::new);
-                            wss.push(tui::StackItem::auto(tui::InteractElem::new(
-                                Arc::new(ws.id.clone()),
-                                tui::Text::plain(&ws.name).styled(tui::Style {
-                                    fg: ws.is_active.then_some(tui::Color::Green),
-                                    ..Default::default()
-                                }),
-                            )));
+                            wss.push(tui::StackItem::auto(tui::InteractElem {
+                                elem: tui::Text::plain(&ws.name)
+                                    .styled(tui::Style {
+                                        fg: ws.is_active.then_some(tui::Color::Green),
+                                        ..Default::default()
+                                    })
+                                    .into(),
+                                payload: tui::InteractPayload {
+                                    mod_inst: inst_id.clone(),
+                                    tag: tui::InteractTag::new(ws.id.clone()),
+                                },
+                            }));
                             wss.push(tui::StackItem::spacing(1));
                         }
                     }

@@ -24,17 +24,18 @@ use crate::{
 
 const EDGE: &str = "top";
 
-type ModuleId = u64;
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct ModInstIdImpl(u64);
 
 #[derive(Clone, Debug)]
 pub struct ModuleActTxImpl {
-    id: ModuleId,
+    id: ModInstIdImpl,
     tx: UnbTx<Upd>,
 }
 impl Emit<ModuleAct> for ModuleActTxImpl {
     fn try_emit(&mut self, val: ModuleAct) -> EmitResult<ModuleAct> {
         self.tx
-            .try_emit(Upd::Act(self.id, val))
+            .try_emit(Upd::Act(self.id.clone(), val))
             .map_err(|err| err.retype())
     }
 }
@@ -48,6 +49,7 @@ pub struct BarMgrModuleArgs {
     pub upd_rx: ModuleUpdRxImpl,
     pub reload_rx: crate::utils::ReloadRx,
     pub cancel: tokio_util::sync::CancellationToken,
+    pub inst_id: ModInstIdImpl,
     // TODO: Config
 }
 pub struct BarMgrModuleStartArgs {
@@ -63,7 +65,11 @@ struct ModuleInst {
     tui: BarTuiElem,
     upd_tx: UnbTx<ModuleUpd>,
 }
-fn mod_inst(reload_rx: ReloadRx, act_tx: ModuleActTxImpl) -> (ModuleInst, BarMgrModuleArgs) {
+fn mod_inst(
+    inst_id: ModInstIdImpl,
+    reload_rx: ReloadRx,
+    act_tx: ModuleActTxImpl,
+) -> (ModuleInst, BarMgrModuleArgs) {
     let (upd_tx, upd_rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -78,6 +84,7 @@ fn mod_inst(reload_rx: ReloadRx, act_tx: ModuleActTxImpl) -> (ModuleInst, BarMgr
             act_tx,
             upd_rx: upd_rx.into(),
             reload_rx,
+            inst_id,
         },
     )
 }
@@ -85,8 +92,8 @@ fn mod_inst(reload_rx: ReloadRx, act_tx: ModuleActTxImpl) -> (ModuleInst, BarMgr
 enum Upd {
     Bar(BarMgrUpd),
     Monitor(MonitorEvent),
-    Act(ModuleId, ModuleAct),
-    Mod(ModuleUpd), // FIXME: (ModuleId, ModuleUpd)
+    Act(ModInstIdImpl, ModuleAct),
+    Mod(ModInstIdImpl, ModuleUpd),
 }
 
 #[derive(Debug, Clone)]
@@ -118,8 +125,8 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
 
     #[derive(Default)]
     struct State {
-        modules: HashMap<ModuleId, ModuleInst>,
-        module_order: Vec<ModuleId>,
+        modules: HashMap<ModInstIdImpl, ModuleInst>,
+        module_order: Vec<ModInstIdImpl>,
         monitors: HashMap<Arc<str>, Monitor>,
     }
     struct Monitor {
@@ -132,9 +139,9 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
     let (mgr_upd_tx, mut mgr_upd_rx) = unb_chan();
 
     let mut next_mod_id = 0;
-    let mut next_mod_id = move || -> ModuleId {
+    let mut next_mod_id = move || -> ModInstIdImpl {
         next_mod_id += 1;
-        next_mod_id
+        ModInstIdImpl(next_mod_id)
     };
 
     crate::monitors::connect(mgr_upd_tx.clone().with(Upd::Monitor));
@@ -146,26 +153,28 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
             Some(upd) = mgr_upd_rx.next() => upd,
         };
         match upd {
-            Upd::Mod(ev) => {
-                // FIXME: Targeted
-                state
-                    .modules
-                    .retain(|_, module| module.upd_tx.try_emit(ev.clone()).is_ok());
+            Upd::Mod(id, ev) => {
+                if let Some(module) = state.modules.get_mut(&id) {
+                    module.upd_tx.emit(ev);
+                } else {
+                    log::error!("Unknown module id {id:?}");
+                }
             }
             Upd::Bar(BarMgrUpd::LoadModules(LoadModules { modules })) => {
                 for m in modules {
                     let id = next_mod_id();
                     let (inst, args) = mod_inst(
+                        id.clone(),
                         reload_tx.subscribe(),
                         ModuleActTxImpl {
-                            id,
+                            id: id.clone(),
                             tx: mgr_upd_tx.clone(),
                         },
                     );
                     if (m.start)(args).ok_or_log().is_none() {
                         continue;
                     }
-                    state.modules.insert(id, inst);
+                    state.modules.insert(id.clone(), inst);
                     state.module_order.push(id);
                 }
                 reload_tx.reload();
@@ -183,7 +192,7 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
                         bar_tui_tx.subscribe(),
                         menu_rx,
                         reload_tx.clone(),
-                        mgr_upd_tx.clone().with(Upd::Mod),
+                        mgr_upd_tx.clone().with(|(id, ev)| Upd::Mod(id, ev)),
                     ));
                     state.monitors.insert(
                         monitor.name.clone(),
@@ -245,7 +254,7 @@ async fn run_monitor(
     mut bar_tui_rx: WatchRx<Vec<BarTuiElem>>,
     menu_rx: impl Stream<Item = OpenMenu>,
     mut reload_tx: ReloadTx,
-    mut mod_upd_tx: impl SharedEmit<ModuleUpd>, // FIXME: (ModuleId, ModuleUpd)
+    mut mod_upd_tx: impl SharedEmit<(ModInstIdImpl, ModuleUpd)>,
 ) {
     tokio::pin!(menu_rx);
 
@@ -486,17 +495,20 @@ async fn run_monitor(
                             match bar.layout.interpret_mouse_event(ev, bar.sizes.font_size()) {
                                 Some(tui::TuiInteract {
                                     location,
-                                    payload: Some(target),
+                                    payload: Some(tui::InteractPayload { mod_inst, tag }),
                                     kind,
                                 }) => {
-                                    mod_upd_tx.emit(ModuleUpd::Interact(ModuleInteract {
-                                        location,
-                                        payload: ModuleInteractPayload {
-                                            tag: target.clone(),
-                                            monitor: monitor.name.clone(),
-                                        },
-                                        kind: kind.clone(),
-                                    }));
+                                    mod_upd_tx.emit((
+                                        mod_inst,
+                                        ModuleUpd::Interact(ModuleInteract {
+                                            location,
+                                            payload: ModuleInteractPayload {
+                                                tag,
+                                                monitor: monitor.name.clone(),
+                                            },
+                                            kind: kind.clone(),
+                                        }),
+                                    ));
                                 }
                                 Some(tui::TuiInteract {
                                     location: _,

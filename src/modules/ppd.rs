@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use tokio::sync::Semaphore;
@@ -126,8 +126,15 @@ impl PpdModule {
         }
     }
 }
+
+#[derive(Default)]
+pub struct PpdConfig {
+    pub icons: HashMap<String, tui::Elem>,
+    pub fallback_icon: Option<tui::Elem>,
+}
+
 impl Module for PpdModule {
-    type Config = ();
+    type Config = PpdConfig;
 
     fn connect() -> Self {
         let cycle = Arc::new(Semaphore::new(0));
@@ -147,11 +154,15 @@ impl Module for PpdModule {
 
     async fn run_module_instance(
         self: Arc<Self>,
-        cfg: Self::Config,
+        PpdConfig {
+            icons,
+            fallback_icon,
+        }: Self::Config,
         ModuleArgs {
             act_tx,
             mut upd_rx,
             mut reload_rx,
+            inst_id,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
@@ -161,18 +172,22 @@ impl Module for PpdModule {
             let mut act_tx = act_tx.clone();
             while profile_rx.changed().await.is_ok() {
                 let profile = profile_rx.borrow_and_update();
-                act_tx.emit(if let Some(profile) = &*profile {
-                    ModuleAct::RenderAll(tui::StackItem::auto(tui::InteractElem::new(
-                        Arc::new(PpdInteractTag),
-                        tui::Text::plain(match profile as &str {
-                            "balanced" => " ",
-                            "performance" => " ", // FIXME: Center
-                            "power-saver" => " ",
-                            _ => "?",
-                        }),
-                    )))
-                } else {
-                    ModuleAct::HideModule
+
+                let icon = profile
+                    .as_deref()
+                    .and_then(|it| icons.get(it))
+                    .or(fallback_icon.as_ref())
+                    .cloned();
+
+                act_tx.emit(match icon {
+                    Some(elem) => ModuleAct::RenderAll(tui::StackItem::auto(tui::InteractElem {
+                        elem,
+                        payload: tui::InteractPayload {
+                            mod_inst: inst_id.clone(),
+                            tag: tui::InteractTag::new(PpdInteractTag {}),
+                        },
+                    })),
+                    None => ModuleAct::HideModule,
                 })
             }
         };
@@ -189,7 +204,7 @@ impl Module for PpdModule {
                         kind,
                         location,
                     }) => {
-                        let Some(PpdInteractTag {}) = tag.downcast_ref() else {
+                        let Some(&PpdInteractTag {}) = tag.downcast_ref() else {
                             continue;
                         };
 

@@ -17,17 +17,24 @@ use crate::{
 fn mkstart<M: Module>(module: Arc<M>, cfg: M::Config) -> BarMgrModuleStartArgs {
     let start = move |args| {
         let BarMgrModuleArgs {
+            inst_id,
             act_tx,
             upd_rx,
             reload_rx,
             cancel,
         } = args;
 
+        log::trace!(
+            "Starting instance {inst_id:?} of {}",
+            std::any::type_name::<M>()
+        );
+
         tokio::spawn(async move {
             module
                 .run_module_instance(
                     cfg,
                     ModuleArgs {
+                        inst_id,
                         act_tx,
                         upd_rx,
                         reload_rx,
@@ -74,7 +81,7 @@ struct Modules {
     fixed: WeakModule<modules::fixed::FixedTuiModule>,
 }
 
-#[allow(clippy::unit_arg)]
+#[expect(clippy::unit_arg)]
 pub async fn main() {
     let mut tasks = JoinSet::new();
     let mut bar_upd_tx;
@@ -84,25 +91,54 @@ pub async fn main() {
         tasks.spawn(crate::panels::run_manager(bar_upd_rx));
     }
 
-    let mut modules = Modules::default();
+    let mut ms = Modules::default();
 
     bar_upd_tx.emit(BarMgrUpd::LoadModules(crate::panels::LoadModules {
         modules: [
-            mkstart(modules.fixed.get(), tui::StackItem::spacing(1)),
-            mkstart(modules.hypr.get(), Default::default()),
+            mkstart(ms.fixed.get(), tui::StackItem::spacing(1)),
+            mkstart(ms.hypr.get(), Default::default()),
             mkstart(
-                modules.fixed.get(),
+                ms.fixed.get(),
                 tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
             ),
-            mkstart(modules.tray.get(), Default::default()),
-            mkstart(modules.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(modules.pulse.get(), Default::default()),
-            mkstart(modules.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(modules.ppd.get(), Default::default()),
-            mkstart(modules.energy.get(), Default::default()),
-            mkstart(modules.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(modules.time.get(), Default::default()),
-            mkstart(modules.fixed.get(), tui::StackItem::spacing(1)),
+            mkstart(ms.tray.get(), Default::default()),
+            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(
+                ms.pulse.get(),
+                modules::pulse::PulseConfig {
+                    device_kind: modules::pulse::PulseDeviceKind::Source,
+                    muted_sym: tui::Text::plain(" ").into(),
+                    unmuted_sym: tui::Text::plain(" ").into(),
+                },
+            ),
+            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(
+                ms.pulse.get(),
+                modules::pulse::PulseConfig {
+                    device_kind: modules::pulse::PulseDeviceKind::Sink,
+                    muted_sym: tui::Text::plain(" ").into(),
+                    unmuted_sym: tui::Text::centered_symbol("", 2).into(),
+                },
+            ),
+            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(
+                ms.ppd.get(),
+                modules::ppd::PpdConfig {
+                    icons: FromIterator::<(String, tui::Elem)>::from_iter([
+                        ("balanced".into(), tui::Text::plain(" ").into()),
+                        (
+                            "performance".into(),
+                            tui::Text::centered_symbol(" ", 2).into(),
+                        ),
+                        ("power-saver".into(), tui::Text::plain(" ").into()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+            mkstart(ms.energy.get(), Default::default()),
+            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(ms.time.get(), Default::default()),
+            mkstart(ms.fixed.get(), tui::StackItem::spacing(1)),
         ]
         .into(),
     }));

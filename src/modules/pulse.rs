@@ -46,9 +46,10 @@ pub struct PulseDeviceState {
     pub muted: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PulseDeviceKind {
     Sink,
+    #[default]
     Source,
 }
 
@@ -329,8 +330,16 @@ impl PulseModule {
         }
     }
 }
+
+// TODO: Implement more
+#[derive(Default)]
+pub struct PulseConfig {
+    pub device_kind: PulseDeviceKind,
+    pub muted_sym: tui::Elem,
+    pub unmuted_sym: tui::Elem,
+}
 impl Module for PulseModule {
-    type Config = ();
+    type Config = PulseConfig;
 
     fn connect() -> Self {
         let (state_tx, state_rx) = watch_chan(Default::default());
@@ -350,33 +359,20 @@ impl Module for PulseModule {
 
     async fn run_module_instance(
         self: Arc<Self>,
-        cfg: Self::Config,
+        PulseConfig {
+            device_kind,
+            muted_sym,
+            unmuted_sym,
+        }: Self::Config,
         ModuleArgs {
             mut act_tx,
             mut upd_rx,
             mut reload_rx,
+            inst_id,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
     ) {
-        fn audio_item(
-            kind: PulseDeviceKind,
-            &PulseDeviceState { volume, muted, .. }: &PulseDeviceState,
-            unmuted_sym: impl FnOnce() -> tui::StackItem,
-            muted_sym: impl FnOnce() -> tui::StackItem,
-        ) -> tui::StackItem {
-            tui::StackItem::auto(tui::InteractElem::new(
-                Arc::new(kind),
-                tui::Stack::horizontal([
-                    if muted { muted_sym() } else { unmuted_sym() },
-                    tui::StackItem::auto(tui::Text::plain(format!(
-                        "{:>3}%",
-                        (volume * 100.0).round() as u32
-                    ))),
-                ]),
-            ))
-        }
-
         let mut tasks = JoinSet::new();
 
         let mut reload_tx = self.reload_tx.clone();
@@ -386,37 +382,30 @@ impl Module for PulseModule {
         tasks.spawn(async move {
             while let Ok(()) = state_rx.changed().await {
                 let pulse = state_rx.borrow_and_update();
-                let tui = tui::Stack::horizontal([
-                    audio_item(
-                        PulseDeviceKind::Source,
-                        &pulse.source,
-                        || {
-                            // There is no double-width microphone character, so we have to build or own.
-                            tui::StackItem::auto(tui::Text {
-                                width: 2,
-                                style: Default::default(),
-                                lines: [tui::TextLine {
-                                    height: 1,
-                                    // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
-                                    // - w=2      set width to 2
-                                    // - h=2      ceter the text horizontally
-                                    // - n=1/d=1  use fractional scale of 1:1. kitty ignores w without this
-                                    text: "\x1b]66;w=2:h=2:n=1:d=1;\x07".into(),
-                                }]
-                                .into(),
-                            })
+                let &PulseDeviceState { volume, muted, .. } = match device_kind {
+                    PulseDeviceKind::Sink => &pulse.sink,
+                    PulseDeviceKind::Source => &pulse.source,
+                };
+                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(
+                    tui::InteractElem {
+                        payload: tui::InteractPayload {
+                            mod_inst: inst_id.clone(),
+                            tag: tui::InteractTag::new(device_kind),
                         },
-                        || tui::StackItem::auto(tui::Text::plain(" ")),
-                    ),
-                    tui::StackItem::spacing(3), // FIXME: No
-                    audio_item(
-                        PulseDeviceKind::Sink,
-                        &pulse.sink,
-                        || tui::StackItem::auto(tui::Text::plain(" ")),
-                        || tui::StackItem::auto(tui::Text::plain(" ")),
-                    ),
-                ]);
-                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(tui)));
+                        elem: tui::Stack::horizontal([
+                            tui::StackItem::auto(if muted {
+                                muted_sym.clone()
+                            } else {
+                                unmuted_sym.clone()
+                            }),
+                            tui::StackItem::auto(tui::Text::plain(format!(
+                                "{:>3}%",
+                                (volume * 100.0).round() as u32
+                            ))),
+                        ])
+                        .into(),
+                    },
+                )));
             }
         });
 

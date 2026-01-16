@@ -2,15 +2,30 @@ use std::sync::Arc;
 
 // FIXME: Split mod by elem kind
 
-pub trait InteractPayload: std::any::Any + std::fmt::Debug + Send + Sync {}
-impl<T> InteractPayload for T where T: std::any::Any + std::fmt::Debug + Send + Sync {}
-impl dyn InteractPayload {
+trait InteractTagBounds: std::any::Any + std::fmt::Debug + Send + Sync {}
+impl<T> InteractTagBounds for T where T: std::any::Any + std::fmt::Debug + Send + Sync {}
+
+#[derive(Debug, Clone)]
+pub struct InteractTag {
+    inner: Arc<dyn InteractTagBounds>,
+}
+impl InteractTag {
     pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
-        <dyn std::any::Any>::downcast_ref(self)
+        log::trace!(
+            "T={:?}, D={:?}",
+            std::any::TypeId::of::<T>(),
+            self.inner.type_id(),
+        );
+        // WARN: Arc<dyn InteractTagBounds> implements InteractTagBounds too,
+        // so make sure this is actually a deref!
+        <dyn std::any::Any>::downcast_ref(&*self.inner as &dyn std::any::Any)
+    }
+    pub fn new(inner: impl std::any::Any + std::fmt::Debug + Send + Sync) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 }
-
-pub type InteractTag = Arc<dyn InteractPayload>;
 
 #[derive(Default, Debug, Clone)]
 pub enum Elem {
@@ -71,8 +86,10 @@ impl TextLine {
     }
 }
 
+// FIXME: Remove in favor of TextLine
 #[derive(Debug, Default, Clone)]
 pub struct Text {
+    // FIXME: Consider removing this in favor of utility functions for styling and size calculations
     pub style: Style,
     pub lines: Vec<TextLine>,
     /// The width of the longest line in cells. Only used for layout calculations.
@@ -102,22 +119,29 @@ impl Text {
         self.style = style;
         self
     }
+    pub fn centered_symbol(sym: impl std::fmt::Display, width: u16) -> Self {
+        Self {
+            width,
+            style: Default::default(),
+            lines: [TextLine {
+                height: 1,
+                // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
+                // - w      set width to 2
+                // - h      ceter the text horizontally
+                // - n,d    use fractional scale of 1:1. kitty ignores w without this
+                text: format!("\x1b]66;w={width}:h=2:n=1:d=1;{sym}\x07"),
+            }]
+            .into(),
+        }
+    }
 }
 
 // FIXME: InteractTag should uniquely identify a module instance.
 // E.g. store sender/on_interact here directly?
 #[derive(Debug, Clone)]
 pub struct InteractElem {
-    pub tag: InteractTag,
+    pub payload: InteractPayload,
     pub elem: Elem,
-}
-impl InteractElem {
-    pub fn new(tag: InteractTag, elem: impl Into<Elem>) -> Self {
-        Self {
-            tag,
-            elem: elem.into(),
-        }
-    }
 }
 
 #[derive(Clone)]
