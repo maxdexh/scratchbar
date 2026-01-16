@@ -1,3 +1,4 @@
+pub mod fixed;
 pub mod hypr;
 pub mod ppd;
 pub mod pulse;
@@ -14,8 +15,8 @@ pub mod prelude {
 
     #[non_exhaustive]
     pub enum ModuleAct {
-        RenderByMonitor(std::collections::HashMap<Arc<str>, tui::Elem>),
-        RenderAll(tui::Elem),
+        RenderByMonitor(std::collections::HashMap<Arc<str>, tui::StackItem>),
+        RenderAll(tui::StackItem),
         HideModule,
         OpenMenu(OpenMenu),
     }
@@ -34,13 +35,6 @@ pub mod prelude {
     pub enum ModuleUpd {
         Interact(ModuleInteract),
     }
-    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-    pub struct ModuleId(Arc<str>);
-    impl ModuleId {
-        pub fn new(s: &str) -> Self {
-            Self(s.into())
-        }
-    }
 
     pub type ModuleInteract = InteractGeneric<ModuleInteractPayload>;
     #[derive(Debug, Clone)]
@@ -48,15 +42,24 @@ pub mod prelude {
         pub tag: tui::InteractTag,
         pub monitor: Arc<str>,
     }
-    pub type ModuleArgs = crate::simple_bar::ModuleArgs;
+    pub struct ModuleArgs {
+        pub act_tx: ModuleActTx,
+        pub upd_rx: ModuleUpdRx,
+        pub reload_rx: crate::utils::ReloadRx,
+    }
     pub type ModuleActTx = crate::panels::ModuleActTxImpl;
     pub type ModuleUpdRx = crate::panels::ModuleUpdRxImpl;
+
     pub trait Module: 'static + Send + Sync {
+        type Config: 'static + Send; //+ serde::de::DeserializeOwned + Default;
+
+        fn connect() -> Self;
+
         fn run_module_instance(
             self: Arc<Self>,
+            cfg: Self::Config,
             _: ModuleArgs,
             _cancel: CancelDropGuard,
         ) -> impl Future<Output = ()> + Send;
     }
-    pub struct ModuleConfig {}
 }

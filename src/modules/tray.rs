@@ -5,13 +5,14 @@ use futures::{FutureExt, Stream};
 use system_tray::item::StatusNotifierItem;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt as _;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     modules::prelude::*,
     tui,
     utils::{
-        Emit, LazyTask, LazyTaskHandle, ReloadRx, ReloadTx, ResultExt, SharedEmit, UnbTx, WatchRx,
-        await_first, lossy_broadcast, unb_chan, watch_chan,
+        Emit, ReloadRx, ReloadTx, ResultExt, SharedEmit, UnbTx, WatchRx, lossy_broadcast, unb_chan,
+        watch_chan,
     },
 };
 
@@ -40,40 +41,14 @@ struct TrayInteractTag {
     addr: Arc<str>,
 }
 
-// FIXME: Refactor
-#[derive(Clone)]
-struct TrayBackend {
+pub struct TrayModule {
     state_rx: WatchRx<TrayState>,
     menu_interact_tx: UnbTx<Arc<TrayMenuInteract>>,
     reload_tx: ReloadTx,
-}
-pub struct TrayModule {
-    background: LazyTask<TrayBackend>,
+    _background: AbortOnDropHandle<()>,
 }
 impl TrayModule {
-    pub fn new() -> Self {
-        Self {
-            background: LazyTask::new(),
-        }
-    }
-    async fn enter_backend(&self) -> LazyTaskHandle<TrayBackend> {
-        self.background
-            .enter(|| async {
-                let (state_tx, state_rx) = watch_chan(Default::default());
-                let (menu_interact_tx, menu_interact_rx) = unb_chan();
-                let reload_tx = ReloadTx::new();
-                (
-                    Self::run_backend(state_tx, menu_interact_rx, reload_tx.subscribe()),
-                    TrayBackend {
-                        state_rx,
-                        menu_interact_tx,
-                        reload_tx,
-                    },
-                )
-            })
-            .await
-    }
-    async fn run_backend(
+    async fn run_bg(
         state_tx: impl SharedEmit<TrayState>,
         menu_interact_rx: impl Stream<Item = Arc<TrayMenuInteract>> + 'static + Send,
         mut reload_rx: ReloadRx,
@@ -84,9 +59,10 @@ impl TrayModule {
                 res @ Err(_) => {
                     res.context("Failed to connect to system tray").ok_or_log();
 
-                    let sleep = tokio::time::sleep(Duration::from_secs(90));
-                    let reload = reload_rx.wait();
-                    await_first!(sleep, reload);
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_secs(90)) => (),
+                        Some(()) = reload_rx.wait() => (),
+                    }
                 }
             }
         };
@@ -164,7 +140,7 @@ impl TrayModule {
                     }
                     ev
                 }
-                () = reload_rx.wait() => None,
+                Some(()) = reload_rx.wait() => None,
             };
             while let Some(ev) = ev_opt {
                 if let system_tray::client::Event::Update(
@@ -220,8 +196,27 @@ impl TrayModule {
 }
 
 impl Module for TrayModule {
+    type Config = ();
+
+    fn connect() -> Self {
+        let (state_tx, state_rx) = watch_chan(Default::default());
+        let (menu_interact_tx, menu_interact_rx) = unb_chan();
+        let reload_tx = ReloadTx::new();
+        Self {
+            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
+                state_tx,
+                menu_interact_rx,
+                reload_tx.subscribe(),
+            ))),
+            state_rx,
+            menu_interact_tx,
+            reload_tx,
+        }
+    }
+
     async fn run_module_instance(
         self: Arc<Self>,
+        cfg: Self::Config,
         ModuleArgs {
             act_tx,
             mut upd_rx,
@@ -230,18 +225,12 @@ impl Module for TrayModule {
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
     ) {
-        let handle = self.enter_backend().await;
-        let TrayBackend {
-            state_rx,
-            menu_interact_tx: mut interact_tx,
-            mut reload_tx,
-        } = handle.backend().clone();
-
+        let mut reload_tx = self.reload_tx.clone();
         let reload_fut = reload_tx.reload_on(&mut reload_rx);
 
         let bar_fut = async {
             let mut act_tx = act_tx.clone();
-            let mut state_rx = state_rx.clone();
+            let mut state_rx = self.state_rx.clone();
             while state_rx.changed().await.is_ok() {
                 let items = state_rx.borrow_and_update().items.clone();
                 let mut parts = Vec::new();
@@ -288,12 +277,13 @@ impl Module for TrayModule {
                     }
                 }
                 let tui = tui::Stack::horizontal(parts);
-                act_tx.emit(ModuleAct::RenderAll(tui.into()));
+                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(tui)));
             }
         };
 
         let interact_fut = async {
             let mut act_tx = act_tx.clone();
+            let mut interact_tx = self.menu_interact_tx.clone();
             while let Some(upd) = upd_rx.next().await {
                 match upd {
                     ModuleUpd::Interact(ModuleInteract {
@@ -313,7 +303,7 @@ impl Module for TrayModule {
                         let tui;
                         match kind {
                             tui::InteractKind::Hover => {
-                                let items = state_rx.borrow().items.clone();
+                                let items = self.state_rx.borrow().items.clone();
                                 let Some(system_tray::item::Tooltip {
                                     icon_name: _,
                                     icon_data: _,
@@ -345,7 +335,7 @@ impl Module for TrayModule {
                                 .into();
                             }
                             tui::InteractKind::Click(tui::MouseButton::Right) => {
-                                let menus = state_rx.borrow().menus.clone();
+                                let menus = self.state_rx.borrow().menus.clone();
                                 let Some(TrayMenuExt {
                                     menu_path,
                                     submenus,
@@ -386,7 +376,11 @@ impl Module for TrayModule {
             }
         };
 
-        await_first!(reload_fut, bar_fut, interact_fut);
+        tokio::select! {
+            () = bar_fut => (),
+            () = reload_fut => (),
+            () = interact_fut => (),
+        }
     }
 }
 fn tray_menu_item_to_tui(

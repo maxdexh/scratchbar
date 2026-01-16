@@ -12,7 +12,7 @@ use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
     modules::prelude::{
-        MenuKind, ModuleAct, ModuleId, ModuleInteract, ModuleInteractPayload, ModuleUpd, OpenMenu,
+        MenuKind, ModuleAct, ModuleInteract, ModuleInteractPayload, ModuleUpd, OpenMenu,
     },
     monitors::{MonitorEvent, MonitorInfo},
     tui,
@@ -24,6 +24,8 @@ use crate::{
 
 const EDGE: &str = "top";
 
+type ModuleId = u64;
+
 #[derive(Clone, Debug)]
 pub struct ModuleActTxImpl {
     id: ModuleId,
@@ -31,9 +33,8 @@ pub struct ModuleActTxImpl {
 }
 impl Emit<ModuleAct> for ModuleActTxImpl {
     fn try_emit(&mut self, val: ModuleAct) -> EmitResult<ModuleAct> {
-        let id = self.id.clone();
         self.tx
-            .try_emit(Upd::Act(id, val))
+            .try_emit(Upd::Act(self.id, val))
             .map_err(|err| err.retype())
     }
 }
@@ -49,14 +50,12 @@ pub struct BarMgrModuleArgs {
     pub cancel: tokio_util::sync::CancellationToken,
     // TODO: Config
 }
-pub struct BarMgrModuleParams {
+pub struct BarMgrModuleStartArgs {
     pub start: Box<dyn FnOnce(BarMgrModuleArgs) -> anyhow::Result<()> + Send>,
 }
 
 pub struct LoadModules {
-    pub start: HashMap<ModuleId, BarMgrModuleParams>,
-    pub left: Vec<ModuleId>,
-    pub right: Vec<ModuleId>,
+    pub modules: Vec<BarMgrModuleStartArgs>,
 }
 
 struct ModuleInst {
@@ -64,19 +63,14 @@ struct ModuleInst {
     tui: BarTuiElem,
     upd_tx: UnbTx<ModuleUpd>,
 }
-fn mod_inst(
-    old: Option<ModuleInst>,
-    reload_rx: ReloadRx,
-    act_tx: ModuleActTxImpl,
-) -> (ModuleInst, BarMgrModuleArgs) {
+fn mod_inst(reload_rx: ReloadRx, act_tx: ModuleActTxImpl) -> (ModuleInst, BarMgrModuleArgs) {
     let (upd_tx, upd_rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
-    let tui = old.map_or_else(|| BarTuiElem::Shared(Default::default()), |it| it.tui);
     (
         ModuleInst {
             _cancel: cancel.clone().into(),
-            tui,
+            tui: BarTuiElem::Hide,
             upd_tx,
         },
         BarMgrModuleArgs {
@@ -97,40 +91,23 @@ enum Upd {
 
 #[derive(Debug, Clone)]
 enum BarTuiElem {
-    Shared(Arc<tui::Elem>),
-    ByMonitor(HashMap<Arc<str>, Arc<tui::Elem>>),
+    Shared(tui::StackItem),
+    ByMonitor(HashMap<Arc<str>, tui::StackItem>),
     Hide,
 }
-#[derive(Default)]
-struct BarTui {
-    left: Vec<BarTuiElem>,
-    right: Vec<BarTuiElem>,
-}
-impl BarTui {
-    fn to_tui(&self, monitor: &MonitorInfo) -> tui::Tui {
-        let mut parts = Vec::new();
-        let ap = |parts: &mut Vec<_>, elem: &_| {
-            // TODO: Error on missing
-            let elem = match elem {
-                BarTuiElem::Shared(elem) => Some(elem.clone()),
-                BarTuiElem::ByMonitor(elems) => Some(elems.get(&monitor.name).cloned()?),
-                BarTuiElem::Hide => None,
-            };
-            parts.extend(elem.map(tui::StackItem::auto));
-            Some(())
+fn gather_bar_tui(bar_tui: &[BarTuiElem], monitor: &MonitorInfo) -> tui::Tui {
+    let mut parts = Vec::new();
+    for elem in bar_tui {
+        let elem = match elem {
+            BarTuiElem::Shared(elem) => Some(elem.clone()),
+            BarTuiElem::ByMonitor(elems) => elems.get(&monitor.name).cloned(),
+            BarTuiElem::Hide => None,
         };
-        parts.push(tui::StackItem::spacing(1));
-        for elem in &self.left {
-            ap(&mut parts, elem);
-        }
-        parts.push(tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty));
-        for elem in &self.right {
-            ap(&mut parts, elem);
-        }
-        parts.push(tui::StackItem::spacing(1));
-        tui::Tui {
-            root: Box::new(tui::Stack::horizontal(parts).into()),
-        }
+        parts.extend(elem);
+    }
+    parts.push(tui::StackItem::spacing(1));
+    tui::Tui {
+        root: Box::new(tui::Stack::horizontal(parts).into()),
     }
 }
 
@@ -142,8 +119,7 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
     #[derive(Default)]
     struct State {
         modules: HashMap<ModuleId, ModuleInst>,
-        left: Vec<ModuleId>,
-        right: Vec<ModuleId>,
+        module_order: Vec<ModuleId>,
         monitors: HashMap<Arc<str>, Monitor>,
     }
     struct Monitor {
@@ -151,9 +127,15 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
         _cancel: CancelDropGuard,
     }
     let mut state = State::default();
-    let bar_tui_tx = WatchTx::new(BarTui::default());
+    let bar_tui_tx = WatchTx::new(Vec::new());
 
     let (mgr_upd_tx, mut mgr_upd_rx) = unb_chan();
+
+    let mut next_mod_id = 0;
+    let mut next_mod_id = move || -> ModuleId {
+        next_mod_id += 1;
+        next_mod_id
+    };
 
     crate::monitors::connect(mgr_upd_tx.clone().with(Upd::Monitor));
 
@@ -170,16 +152,13 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
                     .modules
                     .retain(|_, module| module.upd_tx.try_emit(ev.clone()).is_ok());
             }
-            Upd::Bar(BarMgrUpd::LoadModules(LoadModules { start, left, right })) => {
-                state.left = left;
-                state.right = right;
-                let mut old = std::mem::take(&mut state.modules);
-                for (id, m) in start {
+            Upd::Bar(BarMgrUpd::LoadModules(LoadModules { modules })) => {
+                for m in modules {
+                    let id = next_mod_id();
                     let (inst, args) = mod_inst(
-                        old.remove(&id),
                         reload_tx.subscribe(),
                         ModuleActTxImpl {
-                            id: id.clone(),
+                            id,
                             tx: mgr_upd_tx.clone(),
                         },
                     );
@@ -187,6 +166,7 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
                         continue;
                     }
                     state.modules.insert(id, inst);
+                    state.module_order.push(id);
                 }
                 reload_tx.reload();
             }
@@ -225,12 +205,11 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
                     let mut rerender = false;
                     match act {
                         ModuleAct::RenderByMonitor(elems) => {
-                            let elems = elems.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
                             module.tui = BarTuiElem::ByMonitor(elems);
                             rerender = true
                         }
                         ModuleAct::RenderAll(elem) => {
-                            module.tui = BarTuiElem::Shared(Arc::new(elem));
+                            module.tui = BarTuiElem::Shared(elem);
                             rerender = true
                         }
                         ModuleAct::OpenMenu(open) => {
@@ -244,17 +223,13 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
                     }
 
                     if rerender {
-                        let mut tui = BarTui::default();
-                        for (src, dst) in
-                            [(&state.left, &mut tui.left), (&state.right, &mut tui.right)]
-                        {
-                            for mid in src {
-                                let Some(module) = state.modules.get(mid) else {
-                                    log::error!("Unknown module id {mid:?}");
-                                    continue;
-                                };
-                                dst.push(module.tui.clone());
-                            }
+                        let mut tui = Vec::new();
+                        for mid in &state.module_order {
+                            let Some(module) = state.modules.get(mid) else {
+                                log::error!("Internal Error: Unknown module id {mid:?}");
+                                continue;
+                            };
+                            tui.push(module.tui.clone());
                         }
                         _ = bar_tui_tx.send(tui);
                     }
@@ -267,7 +242,7 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
 async fn run_monitor(
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
-    mut bar_tui_rx: WatchRx<BarTui>,
+    mut bar_tui_rx: WatchRx<Vec<BarTuiElem>>,
     menu_rx: impl Stream<Item = OpenMenu>,
     mut reload_tx: ReloadTx,
     mut mod_upd_tx: impl SharedEmit<ModuleUpd>, // FIXME: (ModuleId, ModuleUpd)
@@ -479,7 +454,7 @@ async fn run_monitor(
             };
             match upd {
                 Upd::BarTui => {
-                    let tui = bar_tui_rx.borrow_and_update().to_tui(&monitor);
+                    let tui = gather_bar_tui(&bar_tui_rx.borrow_and_update(), &monitor);
                     let mut buf = Vec::new();
                     let Some(layout) = tui::draw_to(&mut buf, |ctx| {
                         let size = bar.sizes.cell_size;

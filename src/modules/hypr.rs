@@ -1,62 +1,26 @@
 use crate::data::{BasicDesktopState, BasicWorkspace};
 use crate::modules::prelude::*;
 use crate::tui;
-use crate::utils::{
-    Emit, LazyTaskHandle, ReloadRx, ReloadTx, SharedEmit, WatchRx, WatchTx, watch_chan,
-};
-use crate::utils::{LazyTask, ResultExt};
+use crate::utils::ResultExt;
+use crate::utils::{Emit, ReloadRx, ReloadTx, SharedEmit, WatchRx, watch_chan};
 use anyhow::Context;
 use hyprland::data::*;
 use hyprland::shared::{HyprData, HyprDataVec};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
+use tokio_util::task::AbortOnDropHandle;
 
 // TODO: Detailed state (for menu), including clients
 
-type HyprBackend = (WatchRx<BasicDesktopState>, ReloadTx);
 pub struct HyprModule {
-    updater: LazyTask<HyprBackend>,
+    basic_rx: WatchRx<BasicDesktopState>,
+    reload_tx: ReloadTx,
+    _background: AbortOnDropHandle<()>,
 }
 
-// reqs:
-// - Instantiation does nothing.
-// - There is no leaked task if non-running instance is leaked
-// - Updater task is shared between all instances
-// - Once all instances stop running, updater task does too
-// - If all instances go out of scope, then no resources are used. Including Arcs
-//
-// Logical consequeces
-// - We need to do module tracking in the controller. We can drop unused modules though.
-// - We want a way to create an updater task in `run_instance` such that reentering does not spawn
-//   a new one. We can use a tokio mutex for this without any downsides because `run_instance`
-//   already needs to run in its own task. the updater task can take an `Arc<Self>` because it will
-//   be controlled through handles.
-
 impl HyprModule {
-    pub fn new() -> Self {
-        Self {
-            updater: LazyTask::new(),
-        }
-    }
-
-    async fn enter_backend(&self) -> LazyTaskHandle<HyprBackend> {
-        self.updater
-            .enter(async || {
-                let (tx, rx) = watch_chan(BasicDesktopState::default());
-                let reload_tx = ReloadTx::new();
-                (
-                    Self::run_backend(tx, reload_tx.subscribe()),
-                    (rx, reload_tx),
-                )
-            })
-            .await
-    }
-
-    async fn run_backend(
-        mut basic_tx: impl SharedEmit<BasicDesktopState>,
-        mut reload_rx: ReloadRx,
-    ) {
+    async fn run_bg(mut basic_tx: impl SharedEmit<BasicDesktopState>, mut reload_rx: ReloadRx) {
         let ev_rx = hyprland::event_listener::EventStream::new()
             .filter_map(|res| res.context("Hyprland error").ok_or_log());
         tokio::pin!(ev_rx);
@@ -67,7 +31,7 @@ impl HyprModule {
         loop {
             type HyprEvent = hyprland::event_listener::Event;
             let (upd_wss, upd_mons) = tokio::select! {
-                () = reload_rx.wait() => (true, true),
+                Some(()) = reload_rx.wait() => (true, true),
                 Some(ev) = ev_rx.next() => match ev {
                     HyprEvent::MonitorAdded(_) => (false, true),
                     HyprEvent::ActiveMonitorChanged(_) => (false, true),
@@ -151,8 +115,24 @@ impl HyprModule {
     }
 }
 impl Module for HyprModule {
+    type Config = ();
+
+    fn connect() -> Self {
+        let (basic_tx, basic_rx) = watch_chan(BasicDesktopState::default());
+        let reload_tx = ReloadTx::new();
+        Self {
+            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
+                basic_tx,
+                reload_tx.subscribe(),
+            ))),
+            basic_rx,
+            reload_tx,
+        }
+    }
+
     async fn run_module_instance(
         self: Arc<Self>,
+        cfg: Self::Config,
         ModuleArgs {
             mut act_tx,
             mut upd_rx,
@@ -161,8 +141,8 @@ impl Module for HyprModule {
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
     ) {
-        let updater_handle = self.enter_backend().await;
-        let (mut basic_rx, mut reload_tx) = updater_handle.backend().clone();
+        let mut basic_rx = self.basic_rx.clone();
+        let mut reload_tx = self.reload_tx.clone();
 
         enum Upd {
             State,
@@ -174,7 +154,7 @@ impl Module for HyprModule {
                     Ok(()) => Upd::State,
                     Err(_) => break,
                 },
-                () = reload_rx.wait() => {
+                Some(()) = reload_rx.wait() => {
                     reload_tx.reload();
                     continue;
                 }
@@ -202,7 +182,7 @@ impl Module for HyprModule {
                     }
                     let by_monitor = by_monitor
                         .into_iter()
-                        .map(|(k, v)| (k, tui::Stack::horizontal(v).into()))
+                        .map(|(k, v)| (k, tui::StackItem::auto(tui::Stack::horizontal(v))))
                         .collect();
 
                     act_tx.emit(ModuleAct::RenderByMonitor(by_monitor));

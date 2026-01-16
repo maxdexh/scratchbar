@@ -7,20 +7,14 @@ use tokio_util::time::FutureExt;
 use crate::{
     modules::{
         self,
-        prelude::{Module, ModuleId},
+        prelude::{Module, ModuleArgs},
     },
-    panels::{BarMgrModuleArgs, BarMgrModuleParams, BarMgrUpd},
+    panels::{BarMgrModuleArgs, BarMgrModuleStartArgs, BarMgrUpd},
+    tui,
     utils::{Emit, ResultExt, unb_chan},
 };
 
-pub struct ModuleArgs {
-    pub act_tx: crate::modules::prelude::ModuleActTx,
-    pub upd_rx: crate::modules::prelude::ModuleUpdRx,
-    pub reload_rx: crate::utils::ReloadRx,
-    _p: (),
-}
-
-fn botch_module(mid: &ModuleId, module: Arc<impl Module>) -> (ModuleId, BarMgrModuleParams) {
+fn mkstart<M: Module>(module: Arc<M>, cfg: M::Config) -> BarMgrModuleStartArgs {
     let start = move |args| {
         let BarMgrModuleArgs {
             act_tx,
@@ -32,11 +26,11 @@ fn botch_module(mid: &ModuleId, module: Arc<impl Module>) -> (ModuleId, BarMgrMo
         tokio::spawn(async move {
             module
                 .run_module_instance(
+                    cfg,
                     ModuleArgs {
                         act_tx,
                         upd_rx,
                         reload_rx,
-                        _p: (),
                     },
                     cancel.clone().into(),
                 )
@@ -46,13 +40,41 @@ fn botch_module(mid: &ModuleId, module: Arc<impl Module>) -> (ModuleId, BarMgrMo
 
         Ok(())
     };
-    let params = BarMgrModuleParams {
+    BarMgrModuleStartArgs {
         start: Box::new(start),
-    };
-
-    (mid.clone(), params)
+    }
 }
 
+struct WeakModule<M>(std::sync::Weak<M>);
+impl<M: Module> WeakModule<M> {
+    pub fn get(&mut self) -> Arc<M> {
+        if let Some(it) = self.0.upgrade() {
+            it
+        } else {
+            let it = Arc::new(M::connect());
+            self.0 = Arc::downgrade(&it);
+            it
+        }
+    }
+}
+impl<M> Default for WeakModule<M> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+#[derive(Default)]
+struct Modules {
+    hypr: WeakModule<modules::hypr::HyprModule>,
+    time: WeakModule<modules::time::TimeModule>,
+    pulse: WeakModule<modules::pulse::PulseModule>,
+    ppd: WeakModule<modules::ppd::PpdModule>,
+    energy: WeakModule<modules::upower::EnergyModule>,
+    tray: WeakModule<modules::tray::TrayModule>,
+    fixed: WeakModule<modules::fixed::FixedTuiModule>,
+}
+
+#[allow(clippy::unit_arg)]
 pub async fn main() {
     let mut tasks = JoinSet::new();
     let mut bar_upd_tx;
@@ -62,26 +84,27 @@ pub async fn main() {
         tasks.spawn(crate::panels::run_manager(bar_upd_rx));
     }
 
-    let hypr = ModuleId::new("hypr");
-    let clock = ModuleId::new("clock");
-    let pulse = ModuleId::new("pulse");
-    let ppd = ModuleId::new("ppd");
-    let energy = ModuleId::new("energy");
-    let tray = ModuleId::new("tray");
+    let mut modules = Modules::default();
 
     bar_upd_tx.emit(BarMgrUpd::LoadModules(crate::panels::LoadModules {
-        start: [
-            botch_module(&hypr, Arc::new(modules::hypr::HyprModule::new())),
-            botch_module(&clock, Arc::new(modules::time::TimeModule)),
-            botch_module(&pulse, Arc::new(modules::pulse::PulseModule)),
-            botch_module(&ppd, Arc::new(modules::ppd::PpdModule::new())),
-            botch_module(&energy, Arc::new(modules::upower::EnergyModule)),
-            botch_module(&tray, Arc::new(modules::tray::TrayModule::new())),
+        modules: [
+            mkstart(modules.fixed.get(), tui::StackItem::spacing(1)),
+            mkstart(modules.hypr.get(), Default::default()),
+            mkstart(
+                modules.fixed.get(),
+                tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
+            ),
+            mkstart(modules.tray.get(), Default::default()),
+            mkstart(modules.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(modules.pulse.get(), Default::default()),
+            mkstart(modules.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(modules.ppd.get(), Default::default()),
+            mkstart(modules.energy.get(), Default::default()),
+            mkstart(modules.fixed.get(), tui::StackItem::spacing(3)),
+            mkstart(modules.time.get(), Default::default()),
+            mkstart(modules.fixed.get(), tui::StackItem::spacing(1)),
         ]
-        .into_iter()
-        .collect(),
-        left: [hypr].into(),
-        right: [tray, pulse, ppd, energy, clock].into(),
+        .into(),
     }));
 
     if let Some(res) = tasks.join_next().await {

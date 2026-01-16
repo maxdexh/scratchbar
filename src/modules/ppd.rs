@@ -3,14 +3,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::Semaphore;
 use tokio_stream::StreamExt as _;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     modules::prelude::*,
     tui,
-    utils::{
-        Emit, LazyTask, LazyTaskHandle, ReloadRx, ReloadTx, ResultExt, SharedEmit, WatchRx,
-        await_first, watch_chan,
-    },
+    utils::{Emit, ReloadRx, ReloadTx, ResultExt, SharedEmit, WatchRx, watch_chan},
 };
 
 mod dbus {
@@ -47,42 +45,16 @@ mod dbus {
     }
 }
 
-#[derive(Clone)]
-struct PpdBackend {
-    cycle: Arc<Semaphore>,
-    profile_rx: WatchRx<Arc<str>>,
-    reload_tx: ReloadTx,
-}
-// FIXME: Refactor
 pub struct PpdModule {
-    background: LazyTask<PpdBackend>,
+    cycle: Arc<Semaphore>,
+    profile_rx: WatchRx<Option<Arc<str>>>,
+    reload_tx: ReloadTx,
+    _background: AbortOnDropHandle<()>,
 }
 impl PpdModule {
-    pub fn new() -> Self {
-        Self {
-            background: LazyTask::new(),
-        }
-    }
-    async fn enter_backend(&self) -> LazyTaskHandle<PpdBackend> {
-        self.background
-            .enter(|| async {
-                let cycle = Arc::new(Semaphore::new(0));
-                let (profile_tx, profile_rx) = watch_chan(Default::default());
-                let reload_tx = ReloadTx::new();
-                (
-                    Self::run_backend(cycle.clone(), profile_tx, reload_tx.subscribe()),
-                    PpdBackend {
-                        cycle,
-                        profile_rx,
-                        reload_tx,
-                    },
-                )
-            })
-            .await
-    }
-    async fn run_backend(
+    async fn run_bg(
         cycle_rx: Arc<Semaphore>,
-        mut profile_tx: impl SharedEmit<Arc<str>>,
+        mut profile_tx: impl SharedEmit<Option<Arc<str>>>,
         mut reload_rx: ReloadRx,
     ) {
         let Some(connection) = zbus::Connection::system().await.ok_or_log() else {
@@ -99,14 +71,11 @@ impl PpdModule {
             loop {
                 tokio::select! {
                     Some(_) = profile_rx.next() => (),
-                    _ = reload_rx.wait() => (),
+                    Some(()) = reload_rx.wait() => (),
                 };
 
-                let Some(profile) = proxy.active_profile().await.ok_or_log() else {
-                    continue;
-                };
-
-                profile_tx.emit(profile.into());
+                let profile = proxy.active_profile().await.ok_or_log();
+                profile_tx.emit(profile.map(Into::into));
             }
         };
 
@@ -151,12 +120,34 @@ impl PpdModule {
             }
         };
 
-        await_first!(profiles_fut, cycle_fut);
+        tokio::select! {
+            () = profiles_fut => (),
+            () = cycle_fut => (),
+        }
     }
 }
 impl Module for PpdModule {
+    type Config = ();
+
+    fn connect() -> Self {
+        let cycle = Arc::new(Semaphore::new(0));
+        let (profile_tx, profile_rx) = watch_chan(Default::default());
+        let reload_tx = ReloadTx::new();
+        Self {
+            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
+                cycle.clone(),
+                profile_tx,
+                reload_tx.subscribe(),
+            ))),
+            cycle,
+            profile_rx,
+            reload_tx,
+        }
+    }
+
     async fn run_module_instance(
         self: Arc<Self>,
+        cfg: Self::Config,
         ModuleArgs {
             act_tx,
             mut upd_rx,
@@ -165,36 +156,31 @@ impl Module for PpdModule {
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
     ) -> () {
-        let handle = self.enter_backend().await;
-        let PpdBackend {
-            cycle: cycle_tx,
-            profile_rx,
-            mut reload_tx,
-        } = handle.backend().clone();
-
         let profile_ui_fut = async {
-            let mut profile_rx = profile_rx.clone();
+            let mut profile_rx = self.profile_rx.clone();
             let mut act_tx = act_tx.clone();
             while profile_rx.changed().await.is_ok() {
-                act_tx.emit(ModuleAct::RenderAll(
-                    tui::InteractElem::new(
+                let profile = profile_rx.borrow_and_update();
+                act_tx.emit(if let Some(profile) = &*profile {
+                    ModuleAct::RenderAll(tui::StackItem::auto(tui::InteractElem::new(
                         Arc::new(PpdInteractTag),
-                        tui::Text::plain(match &profile_rx.borrow_and_update() as &str {
+                        tui::Text::plain(match profile as &str {
                             "balanced" => " ",
                             "performance" => " ", // FIXME: Center
                             "power-saver" => " ",
-                            _ => "",
+                            _ => "?",
                         }),
-                    )
-                    .into(),
-                ))
+                    )))
+                } else {
+                    ModuleAct::HideModule
+                })
             }
         };
 
+        let mut reload_tx = self.reload_tx.clone();
         let reload_fut = reload_tx.reload_on(&mut reload_rx);
 
         let interact_fut = async {
-            let profile_rx = profile_rx.clone();
             let mut act_tx = act_tx.clone();
             while let Some(upd) = upd_rx.next().await {
                 match upd {
@@ -207,23 +193,32 @@ impl Module for PpdModule {
                             continue;
                         };
 
-                        match kind {
-                            tui::InteractKind::Click(tui::MouseButton::Left) => {
-                                cycle_tx.add_permits(1);
+                        let profile = self.profile_rx.borrow();
+                        if let Some(profile) = &*profile {
+                            match kind {
+                                tui::InteractKind::Click(tui::MouseButton::Left) => {
+                                    self.cycle.add_permits(1);
+                                }
+                                _ => act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
+                                    monitor,
+                                    tui: tui::Text::plain(profile).into(),
+                                    pos: location,
+                                    menu_kind: MenuKind::Tooltip,
+                                })),
                             }
-                            _ => act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
-                                monitor,
-                                tui: tui::Text::plain(&profile_rx.borrow() as &str).into(),
-                                pos: location,
-                                menu_kind: MenuKind::Tooltip,
-                            })),
+                        } else {
+                            act_tx.emit(ModuleAct::HideModule);
                         }
                     }
                 }
             }
         };
 
-        await_first!(profile_ui_fut, reload_fut, interact_fut);
+        tokio::select! {
+            () = profile_ui_fut => (),
+            () = reload_fut => (),
+            () = interact_fut => (),
+        }
     }
 }
 #[derive(Debug)]

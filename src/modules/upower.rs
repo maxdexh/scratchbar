@@ -1,13 +1,17 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Context;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
+use tokio_util::task::AbortOnDropHandle;
 pub use udbus::*;
 
 use crate::tui;
-use crate::utils::{Emit, ReloadRx, lossy_broadcast};
+use crate::utils::{
+    Emit, ReloadRx, ReloadTx, ResultExt, WatchRx, WatchTx, stream_from_fn, watch_chan,
+};
 
 // https://upower.freedesktop.org/docs/UPower.html
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -29,94 +33,11 @@ impl Default for EnergyState {
     }
 }
 
-pub fn connect(reload_rx: ReloadRx) -> impl Stream<Item = EnergyState> {
-    log::debug!("Connecting to upower");
-    let (tx, rx) = broadcast::channel(50);
-
-    tokio::spawn(async move {
-        match run(tx, reload_rx).await {
-            Ok(()) => log::warn!("UPower listener exited"),
-            Err(err) => log::error!("upower client failed to open: {err}"),
-        }
-    });
-
-    lossy_broadcast(rx)
-}
-async fn run(tx: broadcast::Sender<EnergyState>, reload_rx: ReloadRx) -> anyhow::Result<()> {
-    let dbus = zbus::Connection::system().await?;
-    let device_proxy = UPowerProxy::new(&dbus).await?;
-    let device = device_proxy.get_display_device().await?;
-
-    enum Upd {
-        Reload(()),
-        Rate(f64),
-        Percentage(f64),
-        ShouldShow(bool),
-        BState(BatteryState),
-    }
-
-    let updates = reload_rx
-        .into_stream()
-        .map(Upd::Reload)
-        .merge(
-            device
-                .receive_energy_rate_changed()
-                .await
-                .then(|opt| async move { opt.get().await })
-                .filter_map(|it| it.map_err(|err| log::error!("on energy rate: {err}")).ok())
-                .map(Upd::Rate),
-        )
-        .merge(
-            device
-                .receive_percentage_changed()
-                .await
-                .then(|opt| async move { opt.get().await })
-                .filter_map(|it| it.map_err(|err| log::error!("on percentage: {err}")).ok())
-                .map(Upd::Percentage),
-        )
-        .merge(
-            device
-                .receive_is_present_changed()
-                .await
-                .then(|opt| async move { opt.get().await })
-                .filter_map(|it| it.map_err(|err| log::error!("on IsPresent: {err}")).ok())
-                .map(Upd::ShouldShow),
-        )
-        .merge(
-            device
-                .receive_state_changed()
-                .await
-                .then(|opt| async move { opt.get().await })
-                .filter_map(|it| it.map_err(|err| log::error!("on charge state: {err}")).ok())
-                .map(Upd::BState),
-        );
-    tokio::pin!(updates);
-
-    let mut state = EnergyState::default();
-
-    log::debug!("Listening to upower");
-    while let Some(update) = updates.next().await {
-        match update {
-            Upd::Reload(()) => (),
-            Upd::Rate(rate) => state.rate = rate,
-            Upd::Percentage(percentage) => state.percentage = percentage,
-            Upd::ShouldShow(should_show) => state.should_show = should_show,
-            Upd::BState(bstate) => state.bstate = bstate,
-        }
-
-        if let Err(err) = tx.send(state.clone()) {
-            log::warn!("Failed to send upower update: {err}");
-            break;
-        }
-    }
-    Ok(())
-}
-
-/// Originally taken from `upower-dbus` crate
-/// <https://github.com/pop-os/upower-dbus/blob/main/LICENSE>
-///  Copyright 2021 System76 <info@system76.com>
-///  SPDX-License-Identifier: MPL-2.0
 mod udbus {
+    /// Originally taken from `upower-dbus` crate
+    /// <https://github.com/pop-os/upower-dbus/blob/main/LICENSE>
+    ///  Copyright 2021 System76 <info@system76.com>
+    ///  SPDX-License-Identifier: MPL-2.0
     use serde::{Deserialize, Serialize};
     use zbus::proxy;
     use zbus::zvariant::{OwnedValue, Value};
@@ -302,46 +223,145 @@ mod udbus {
     }
 }
 
-// FIXME: refactor
 use crate::modules::prelude::*;
-#[derive(Debug)]
-pub struct EnergyModule;
+pub struct EnergyModule {
+    state_rx: WatchRx<EnergyState>,
+    reload_tx: ReloadTx,
+    _background: AbortOnDropHandle<()>,
+}
+
+impl EnergyModule {
+    async fn run_bg(state_tx: WatchTx<EnergyState>, mut reload_rx: ReloadRx) {
+        let device = loop {
+            let fut = async {
+                let dbus = zbus::Connection::system().await?;
+                let device_proxy = UPowerProxy::<'static>::new(&dbus).await?;
+                let device = device_proxy.get_display_device().await?;
+                anyhow::Ok(device)
+            };
+            let Some(trip) = fut.await.ok_or_log() else {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            };
+
+            break trip;
+        };
+        log::debug!("{device:?}");
+
+        enum Upd {
+            Reload(()),
+            Rate(f64),
+            Percentage(f64),
+            ShouldShow(bool),
+            BState(BatteryState),
+        }
+
+        fn stream_prop<'a, T: TryFrom<zbus::zvariant::OwnedValue, Error: Into<zbus::Error>>>(
+            prop: impl Stream<Item = zbus::proxy::PropertyChanged<'a, T>>,
+            tf: impl Fn(T) -> Upd,
+            propname: &str,
+        ) -> impl Stream<Item = Upd> {
+            prop.then(|opt| async move { opt.get().await })
+                .filter_map(move |it| {
+                    it.with_context(|| format!("Failed to get {propname}"))
+                        .ok_or_log()
+                })
+                .map(tf)
+        }
+
+        // TODO: Use Proxy::receive_property_changed?
+        let updates = stream_from_fn(async move || reload_rx.wait().await)
+            .map(Upd::Reload)
+            .merge(stream_prop(
+                device.receive_energy_rate_changed().await,
+                Upd::Rate,
+                "wattage",
+            ))
+            .merge(stream_prop(
+                device.receive_percentage_changed().await,
+                Upd::Percentage,
+                "percentage",
+            ))
+            .merge(stream_prop(
+                device.receive_is_present_changed().await,
+                Upd::ShouldShow,
+                "isPresent attribute",
+            ))
+            .merge(stream_prop(
+                device.receive_state_changed().await,
+                Upd::BState,
+                "charge state",
+            ));
+        tokio::pin!(updates);
+
+        log::debug!("Listening to upower");
+        while let Some(update) = updates.next().await {
+            state_tx.send_modify(|state| match update {
+                Upd::Reload(()) => (),
+                Upd::Rate(rate) => state.rate = rate,
+                Upd::Percentage(percentage) => state.percentage = percentage,
+                Upd::ShouldShow(should_show) => state.should_show = should_show,
+                Upd::BState(bstate) => state.bstate = bstate,
+            })
+        }
+    }
+}
+
 impl Module for EnergyModule {
+    type Config = ();
+
+    fn connect() -> Self {
+        let (state_tx, state_rx) = watch_chan(Default::default());
+        let reload_tx = ReloadTx::new();
+        Self {
+            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
+                state_tx,
+                reload_tx.subscribe(),
+            ))),
+            state_rx,
+            reload_tx,
+        }
+    }
+
     async fn run_module_instance(
         self: Arc<Self>,
+        cfg: Self::Config,
         ModuleArgs {
             mut act_tx,
-            upd_rx: _upd_rx,
-            reload_rx,
+            mut reload_rx,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
     ) {
-        let rx = connect(reload_rx);
-        tokio::pin!(rx);
-        while let Some(energy) = rx.next().await {
-            if !energy.should_show {
-                act_tx.emit(ModuleAct::HideModule);
-                continue;
-            }
+        let mut state_rx = self.state_rx.clone();
+        let mut reload_tx = self.reload_tx.clone();
 
-            // TODO: Time estimate tooltip
-            let percentage = energy.percentage.round() as i64;
-            let sign = match energy.bstate {
-                BatteryState::Discharging | BatteryState::PendingDischarge => '-',
-                _ => '+',
-            };
-            let rate = format!("{sign}{:.1}W", energy.rate);
-            let energy = format!("{percentage:>3}% {rate:<6}");
+        let render_fut = async {
+            while let Ok(()) = state_rx.changed().await {
+                let energy = state_rx.borrow_and_update();
+                if !energy.should_show {
+                    act_tx.emit(ModuleAct::HideModule);
+                    continue;
+                }
 
-            let tui = tui::Stack::horizontal([
-                tui::StackItem::auto(tui::InteractElem::new(
-                    Arc::new(EnergyModule),
+                // TODO: Time estimate tooltip
+                let percentage = energy.percentage.round() as i64;
+                let sign = match energy.bstate {
+                    BatteryState::Discharging | BatteryState::PendingDischarge => '-',
+                    _ => '+',
+                };
+                let rate = format!("{sign}{:.1}W", energy.rate);
+                let energy = format!("{percentage:>3}% {rate:>6}");
+
+                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(
                     tui::Text::plain(energy),
-                )),
-                tui::StackItem::spacing(3),
-            ]);
-            act_tx.emit(ModuleAct::RenderAll(tui.into()));
+                )));
+            }
+        };
+
+        tokio::select! {
+            () = render_fut => (),
+            () = reload_tx.reload_on(&mut reload_rx) => (),
         }
     }
 }

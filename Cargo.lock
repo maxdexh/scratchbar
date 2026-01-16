@@ -281,6 +281,7 @@ dependencies = [
  "image",
  "libpulse-binding",
  "log",
+ "pin-project-lite",
  "postcard",
  "ppd",
  "serde",

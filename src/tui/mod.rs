@@ -104,6 +104,8 @@ impl Text {
     }
 }
 
+// FIXME: InteractTag should uniquely identify a module instance.
+// E.g. store sender/on_interact here directly?
 #[derive(Debug, Clone)]
 pub struct InteractElem {
     pub tag: InteractTag,

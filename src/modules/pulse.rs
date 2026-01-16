@@ -16,7 +16,7 @@ use pulse::{
 };
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt as _;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use std::{
     cell::RefCell,
@@ -27,47 +27,26 @@ use std::{
 use crate::{
     modules::prelude::*,
     tui,
-    utils::{CancelDropGuard, Emit, ReloadRx, ResultExt, SharedEmit, unb_chan},
+    utils::{
+        CancelDropGuard, Emit, ReloadRx, ReloadTx, ResultExt, SharedEmit, UnbTx, WatchRx, unb_chan,
+        watch_chan,
+    },
 };
 
-pub fn connect(
-    reload_rx: ReloadRx,
-) -> (impl SharedEmit<PulseUpdate>, impl Stream<Item = PulseState>) {
-    let (ev_tx, ev_rx) = unb_chan();
-
-    let cancel = CancellationToken::new();
-    let cancel_pulse_arg = CancelDropGuard::from(cancel.clone());
-    std::thread::spawn(|| match run_blocking(ev_tx, reload_rx, cancel_pulse_arg) {
-        Ok(()) => log::warn!("PulseAudio client has quit"),
-        Err(err) => log::error!("PulseAudio client has failed: {err}"),
-    });
-    let (up_tx, up_rx) = unb_chan();
-
-    tokio::task::spawn(async move {
-        let _cancel = CancelDropGuard::from(cancel);
-        match run_updater(up_rx).await {
-            Ok(()) => log::warn!("PulseAudio updater has quit"),
-            Err(err) => log::error!("PulseAudio updater has failed: {err}"),
-        }
-    });
-
-    (up_tx, ev_rx)
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PulseState {
     pub sink: PulseDeviceState,
     pub source: PulseDeviceState,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PulseDeviceState {
     pub name: Option<Arc<str>>,
     pub volume: f64,
     pub muted: bool,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PulseDeviceKind {
     Sink,
     Source,
@@ -95,23 +74,10 @@ fn handle_iterate_result(res: IterateResult) -> anyhow::Result<()> {
 
 fn run_blocking(
     tx: impl SharedEmit<PulseState>,
-    mut reload_rx: ReloadRx,
-    cancel: CancelDropGuard,
+    cancel: CancellationToken,
+    awaiting_reload: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     log::info!("Connecting to PulseAudio");
-
-    let awaiting_reload = Arc::new(AtomicBool::new(false));
-    std::thread::spawn({
-        let awaiting_reload = awaiting_reload.clone();
-        move || {
-            while Arc::strong_count(&awaiting_reload) > 1 {
-                let Some(()) = reload_rx.blocking_wait() else {
-                    break;
-                };
-                awaiting_reload.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    });
 
     let mut mainloop = Mainloop::new().ok_or_else(|| anyhow!("Failed to create mainloop"))?;
 
@@ -262,7 +228,7 @@ fn run_blocking(
                 .get_server_info(full_update.clone());
         }
 
-        if cancel.inner.is_cancelled() {
+        if cancel.is_cancelled() {
             break;
         }
     }
@@ -279,10 +245,10 @@ fn avg_volume_frac(vol: &ChannelVolumes) -> f64 {
     avg as f64 / (normal - muted) as f64
 }
 
-async fn run_updater(updates: impl Stream<Item = PulseUpdate>) -> anyhow::Result<()> {
-    tokio::pin!(updates);
+async fn run_updater(update_rx: impl Stream<Item = PulseUpdate>) {
+    tokio::pin!(update_rx);
 
-    while let Some(PulseUpdate { kind, target }) = updates.next().await {
+    while let Some(PulseUpdate { kind, target }) = update_rx.next().await {
         let (device_name, set_mute_cmd, set_vol_cmd) = match target {
             PulseDeviceKind::Sink => ("@DEFAULT_SINK@", "set-sink-mute", "set-sink-volume"),
             PulseDeviceKind::Source => ("@DEFAULT_SOURCE@", "set-source-mute", "set-source-volume"),
@@ -292,7 +258,6 @@ async fn run_updater(updates: impl Stream<Item = PulseUpdate>) -> anyhow::Result
             it.stderr(std::process::Stdio::piped());
             it
         };
-        // FIXME: Can we do this with libpulse_binding instead?
         let output = match kind {
             // FIXME: Task pooling/buffer_unordered
             PulseUpdateKind::VolumeDelta(vol_delta) => {
@@ -323,20 +288,73 @@ async fn run_updater(updates: impl Stream<Item = PulseUpdate>) -> anyhow::Result
             _ => (),
         }
     }
-
-    log::warn!("Pulse updater exited");
-    Ok(())
 }
 
-// FIXME: Refactor
-pub struct PulseModule;
+pub struct PulseModule {
+    state_rx: WatchRx<PulseState>,
+    update_tx: UnbTx<PulseUpdate>,
+    reload_tx: ReloadTx,
+    _background: AbortOnDropHandle<()>,
+}
+impl PulseModule {
+    async fn run_bg(
+        state_tx: impl SharedEmit<PulseState>,
+        update_rx: impl Stream<Item = PulseUpdate> + 'static + Send,
+        mut reload_rx: ReloadRx,
+    ) {
+        let mut tasks = JoinSet::<()>::new();
+        tasks.spawn(run_updater(update_rx));
+
+        let awaiting_reload = Arc::new(AtomicBool::new(false));
+        let auto_cancel = CancelDropGuard::new();
+        {
+            let awaiting_reload = awaiting_reload.clone();
+            let cancel = auto_cancel.inner.clone();
+            // FIXME: Rerun on failure
+            std::thread::spawn(|| {
+                _ = run_blocking(state_tx, cancel, awaiting_reload)
+                    .context("PulseAudio client has failed")
+                    .ok_or_log()
+            });
+        }
+
+        tokio::spawn(async move {
+            while let Some(()) = reload_rx.wait().await {
+                awaiting_reload.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        if let Some(res) = tasks.join_next().await {
+            res.context("PulseAudio module failed").ok_or_log();
+        }
+    }
+}
 impl Module for PulseModule {
+    type Config = ();
+
+    fn connect() -> Self {
+        let (state_tx, state_rx) = watch_chan(Default::default());
+        let (update_tx, update_rx) = unb_chan();
+        let reload_tx = ReloadTx::new();
+        Self {
+            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
+                state_tx,
+                update_rx,
+                reload_tx.subscribe(),
+            ))),
+            state_rx,
+            update_tx,
+            reload_tx,
+        }
+    }
+
     async fn run_module_instance(
         self: Arc<Self>,
+        cfg: Self::Config,
         ModuleArgs {
             mut act_tx,
             mut upd_rx,
-            reload_rx,
+            mut reload_rx,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
@@ -358,11 +376,16 @@ impl Module for PulseModule {
                 ]),
             ))
         }
-        let (mut tx, rx) = connect(reload_rx);
+
         let mut tasks = JoinSet::new();
+
+        let mut reload_tx = self.reload_tx.clone();
+        tasks.spawn(async move { reload_tx.reload_on(&mut reload_rx).await });
+
+        let mut state_rx = self.state_rx.clone();
         tasks.spawn(async move {
-            tokio::pin!(rx);
-            while let Some(pulse) = rx.next().await {
+            while let Ok(()) = state_rx.changed().await {
+                let pulse = state_rx.borrow_and_update();
                 let tui = tui::Stack::horizontal([
                     audio_item(
                         PulseDeviceKind::Source,
@@ -385,18 +408,19 @@ impl Module for PulseModule {
                         },
                         || tui::StackItem::auto(tui::Text::plain(" ")),
                     ),
-                    tui::StackItem::spacing(3),
+                    tui::StackItem::spacing(3), // FIXME: No
                     audio_item(
                         PulseDeviceKind::Sink,
                         &pulse.sink,
                         || tui::StackItem::auto(tui::Text::plain(" ")),
                         || tui::StackItem::auto(tui::Text::plain(" ")),
                     ),
-                    tui::StackItem::spacing(3),
                 ]);
-                act_tx.emit(ModuleAct::RenderAll(tui.into()));
+                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(tui)));
             }
         });
+
+        let mut update_tx = self.update_tx.clone();
         tasks.spawn(async move {
             while let Some(upd) = upd_rx.next().await {
                 match upd {
@@ -408,7 +432,7 @@ impl Module for PulseModule {
                         let Some(&target) = payload.tag.downcast_ref::<PulseDeviceKind>() else {
                             continue;
                         };
-                        tx.emit(PulseUpdate {
+                        update_tx.emit(PulseUpdate {
                             target,
                             kind: match kind {
                                 tui::InteractKind::Click(tui::MouseButton::Left) => {
