@@ -2,132 +2,131 @@ use std::io::Write;
 
 use crate::tui::*;
 
-// FIXME: rework this
-#[derive(Clone, Copy, Debug)]
-pub struct SizingContext {
-    pub font_size: Vec2<u16>,
-    pub div_w: Option<u16>,
-    pub div_h: Option<u16>,
+pub(super) trait Render {
+    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()>;
+    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16>;
 }
+
+#[derive(Debug)]
 pub struct RenderCtx<'a, W> {
-    pub writer: &'a mut W,
+    pub sizing: &'a SizingArgs,
+    pub writer: W,
     pub layout: &'a mut RenderedLayout,
+}
+#[derive(Debug)]
+pub struct SizingArgs {
+    pub font_size: Vec2<u16>,
 }
 
 impl Tui {
-    pub fn calc_size(&self, sizing: SizingContext) -> anyhow::Result<Vec2<u16>> {
-        self.root.calc_auto_size(sizing)
+    pub fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
+        self.root.calc_min_size(args)
     }
-    pub fn render(
+    pub fn render2(
         &self,
-        ctx: &mut RenderCtx<impl Write>,
-        sizing: SizingContext,
-        area: Area,
-    ) -> std::io::Result<()> {
-        self.root.render(ctx, sizing, area)
+        cell_size: Vec2<u16>,
+        writer: &mut impl Write,
+        sizing: &SizingArgs,
+    ) -> std::io::Result<RenderedLayout> {
+        crossterm::queue!(
+            writer,
+            crossterm::terminal::BeginSynchronizedUpdate,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        )?;
+        let mut layout = RenderedLayout::default();
+        self.root.render2(
+            &mut RenderCtx {
+                sizing,
+                writer: &mut *writer,
+                layout: &mut layout,
+            },
+            Area {
+                pos: Default::default(),
+                size: cell_size,
+            },
+        )?;
+        crossterm::execute!(writer, crossterm::terminal::EndSynchronizedUpdate)?;
+        Ok(layout)
     }
 }
-impl Elem {
-    pub fn calc_auto_size(&self, sizing: SizingContext) -> anyhow::Result<Vec2<u16>> {
-        auto_size_invariants(sizing, || match self {
-            Self::Stack(subdiv) => subdiv.calc_auto_size(sizing),
-            Self::Text(text) => text.calc_auto_size(sizing),
-            Self::Image(image) => image.calc_auto_size(sizing),
-            Self::Block(block) => block.calc_auto_size(sizing),
-            Self::Tagged(elem) => elem.elem.calc_auto_size(sizing),
-            Self::Shared(elem) => elem.calc_auto_size(sizing),
-            Self::Empty => Ok(Vec2::default()),
-        })
-    }
-    pub fn render(
-        &self,
-        ctx: &mut RenderCtx<impl Write>,
-        sizing: SizingContext,
-        area: Area,
-    ) -> std::io::Result<()> {
+impl Render for Elem {
+    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         match self {
-            Self::Stack(subdiv) => subdiv.render(ctx, sizing, area),
-            Self::Image(image) => image.render(ctx, sizing, area),
-            Self::Block(block) => block.render(ctx, sizing, area),
-            Self::Text(text) => text.render(ctx, sizing, area),
-            Self::Tagged(elem) => {
+            Self::Stack(subdiv) => subdiv.render2(ctx, area),
+            Self::Image(image) => image.render2(ctx, area),
+            Self::Block(block) => block.render2(ctx, area),
+            Self::Text(text) => text.render2(ctx, area),
+            Self::Interact(elem) => {
                 ctx.layout.insert(area, elem.payload.clone());
-                elem.elem.render(ctx, sizing, area)
+                elem.elem.render2(ctx, area)
             }
-            Self::Shared(elem) => elem.render(ctx, sizing, area),
+            Self::Shared(elem) => elem.render2(ctx, area),
             Self::Empty => Ok(()),
         }
     }
+    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
+        match self {
+            Self::Stack(subdiv) => subdiv.calc_min_size(args),
+            Self::Text(text) => text.calc_min_size(args),
+            Self::Image(image) => image.calc_min_size(args),
+            Self::Block(block) => block.calc_min_size(args),
+            Self::Interact(elem) => elem.elem.calc_min_size(args),
+            Self::Shared(elem) => elem.calc_min_size(args),
+            Self::Empty => Vec2::default(),
+        }
+    }
 }
+
 impl Image {
-    // Computes the maximal dimensions with correct aspect ratio that do not exceed
-    // (div_w, div_h), if specified. Errors if neither is specified.
-    //
-    // Also returns the axis that is being filled.
-    fn calc_fill_size(&self, sizing: SizingContext) -> anyhow::Result<(Axis, Vec2<u16>)> {
+    // Aspect ratio of the image in cells
+    fn img_cell_ratio(&self, sizing: &SizingArgs) -> f64 {
         let Vec2 {
             x: font_w,
             y: font_h,
         } = sizing.font_size;
 
-        let img = &self.img;
         // Aspect ratio of the image in cells
-        let cell_ratio = std::ops::Mul::mul(
-            f64::from(img.width()) / f64::from(img.height()),
+        std::ops::Mul::mul(
+            f64::from(self.img.width()) / f64::from(self.img.height()),
             f64::from(font_h) / f64::from(font_w),
-        );
-
-        let (fill_axis, fill_axis_len) = match (sizing.div_w, sizing.div_h) {
-            // larger aspect ratio means wider.
-            // if the aspect ratio of the bounding box is wider than that of the image,
-            // it is effectively unconstrained along the horizontal axis. That makes
-            // it the flex axis, the other the fill axis.
-            (Some(w), Some(h)) => match f64::from(w) / f64::from(h) > cell_ratio {
-                true => (Axis::Y, h),
-                false => (Axis::X, w),
-            },
-            (None, Some(h)) => (Axis::Y, h),
-            (Some(w), None) => (Axis::X, w),
-            (None, None) => anyhow::bail!("sizing context must include some dimension to fill"),
-        };
-
-        Ok((
-            fill_axis,
-            match fill_axis {
-                Axis::Y => Vec2 {
-                    y: fill_axis_len,
-                    // cell ratio is width over height, so we get the flex dimension by multiplying
-                    x: (cell_ratio * f64::from(fill_axis_len)).ceil() as _,
-                },
-                Axis::X => Vec2 {
-                    x: fill_axis_len,
-                    // likewise, but by division
-                    y: (cell_ratio / f64::from(fill_axis_len)).ceil() as _,
-                },
-            },
-        ))
+        )
     }
-    pub fn calc_auto_size(&self, sizing: SizingContext) -> anyhow::Result<Vec2<u16>> {
-        auto_size_invariants(sizing, || {
-            Ok(match (sizing.div_w, sizing.div_h) {
-                (Some(w), Some(h)) => Vec2 { x: w, y: h },
-                _ => self.calc_fill_size(sizing)?.1,
-            })
-        })
+    fn max_fit_to_fill_axis(size: Vec2<u16>, img_cell_ratio: f64) -> (Axis, u16) {
+        let w = size.x;
+        let h = size.y;
+
+        // larger aspect ratio means wider.
+        // if the aspect ratio of the bounding box is wider than that of the image,
+        // it is effectively unconstrained along the horizontal axis. That makes
+        // it the flex axis, the other the fill axis.
+        match f64::from(w) / f64::from(h) > img_cell_ratio {
+            true => (Axis::Y, h),
+            false => (Axis::X, w),
+        }
     }
-    fn render(
-        &self,
-        ctx: &mut RenderCtx<impl Write>,
-        sizing: SizingContext,
-        area: Area,
-    ) -> std::io::Result<()> {
-        let Ok((fill_axis, fill_size)) = self
-            .calc_fill_size(sizing)
-            .map_err(|err| log::error!("{err}"))
-        else {
-            return Ok(());
-        };
-        let img = &self.img;
+    fn fill_axis_to_min_size(
+        fill_axis: Axis,
+        fill_axis_len: u16,
+        img_cell_ratio: f64,
+    ) -> Vec2<u16> {
+        match fill_axis {
+            Axis::Y => Vec2 {
+                y: fill_axis_len,
+                // cell ratio is width over height, so we get the flex dimension by multiplying
+                x: (img_cell_ratio * f64::from(fill_axis_len)).ceil() as _,
+            },
+            Axis::X => Vec2 {
+                x: fill_axis_len,
+                // likewise, but by division
+                y: (img_cell_ratio / f64::from(fill_axis_len)).ceil() as _,
+            },
+        }
+    }
+}
+impl Render for Image {
+    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+        let img_cell_ratio = self.img_cell_ratio(ctx.sizing);
+        let (fill_axis, fill_axis_len) = Self::max_fit_to_fill_axis(area.size, img_cell_ratio);
 
         crossterm::queue!(
             ctx.writer,
@@ -135,7 +134,6 @@ impl Image {
         )?;
 
         // https://sw.kovidgoyal.net/kitty/graphics-protocol/#control-data-reference
-        // Explanation:
         // - \x1b_G...\x1b\\: kitty graphics apc
         // - a=T: Transfer and display
         // - f=32: 32-bit RGBA
@@ -146,99 +144,45 @@ impl Image {
         write!(
             ctx.writer,
             "\x1b_Ga=T,f=32,C=1,s={},v={},{}={};",
-            img.width(),
-            img.height(),
+            self.img.width(),
+            self.img.height(),
             match fill_axis {
                 Axis::X => "c",
                 Axis::Y => "r",
             },
-            fill_size.get(fill_axis),
+            fill_axis_len,
         )?;
         {
             let mut encoder_writer = base64::write::EncoderWriter::new(
                 &mut ctx.writer,
                 &base64::engine::general_purpose::STANDARD,
             );
-            encoder_writer.write_all(img.as_raw())?;
+            encoder_writer.write_all(self.img.as_raw())?;
         }
         write!(ctx.writer, "\x1b\\")?;
 
         Ok(())
     }
-}
-impl Stack {
-    fn calc_elem_auto_size(
-        part: &StackItem,
-        sizing: SizingContext,
-        axis: Axis,
-    ) -> anyhow::Result<Vec2<u16>> {
-        part.elem
-            .calc_auto_size(Self::inner_sizing_arg(&part.constr, sizing, axis))
-    }
-    fn inner_sizing_arg(constr: &Constr, sizing: SizingContext, axis: Axis) -> SizingContext {
-        match *constr {
-            Constr::Length(l) => match axis {
-                Axis::X => SizingContext {
-                    div_w: Some(l),
-                    ..sizing
-                },
-                Axis::Y => SizingContext {
-                    div_h: Some(l),
-                    ..sizing
-                },
-            },
-            Constr::Fill(_) | Constr::Auto => match axis {
-                Axis::X => SizingContext {
-                    div_w: None,
-                    ..sizing
-                },
-                Axis::Y => SizingContext {
-                    div_h: None,
-                    ..sizing
-                },
-            },
+
+    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
+        let img_cell_ratio = self.img_cell_ratio(args);
+        match self.sizing {
+            ImageSizeMode::FillAxis(axis, len) => {
+                Self::fill_axis_to_min_size(axis, len, img_cell_ratio)
+            }
         }
     }
-    pub fn calc_auto_size(&self, sizing: SizingContext) -> anyhow::Result<Vec2<u16>> {
-        auto_size_invariants(sizing, || {
-            let mut size = Vec2::default();
-            for part in &self.parts {
-                let elem_size = Self::calc_elem_auto_size(part, sizing, self.axis)?;
-                let horiz = (&mut size.x, elem_size.x);
-                let vert = (&mut size.y, elem_size.y);
-                let ((adst, asrc), (mdst, msrc)) = match self.axis {
-                    Axis::X => (horiz, vert),
-                    Axis::Y => (vert, horiz),
-                };
-                *adst += asrc;
-                *mdst = msrc.max(*mdst);
-            }
-            Ok(size)
-        })
-    }
-    fn render(
-        &self,
-        ctx: &mut RenderCtx<impl Write>,
-        sizing: SizingContext,
-        area: Area,
-    ) -> std::io::Result<()> {
+}
+impl Render for Stack {
+    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let mut lens = Vec::with_capacity(self.parts.len());
         let mut total_weight = 0u64;
-        let mut rem_len = Some(area.size.get(self.axis));
+        let mut rem_len = Some(area.size[self.axis]);
         for part in &self.parts {
-            let len = match part.constr {
-                Constr::Length(len) => len,
-                Constr::Auto => Self::calc_elem_auto_size(part, sizing, self.axis)
-                    .unwrap_or_else(|err| {
-                        log::error!("Skipping element {part:?} with broken size: {err}");
-                        Default::default()
-                    })
-                    .get(self.axis),
-                Constr::Fill(weight) => {
-                    total_weight += u64::from(weight);
-                    0
-                }
-            };
+            if let Constr::Fill(weight) = part.constr {
+                total_weight += u64::from(weight);
+            }
+            let len = Self::calc_min_part_size(part, self.axis, ctx.sizing)[self.axis];
             if let Some(rlen) = rem_len {
                 rem_len = rlen.checked_sub(len);
             }
@@ -246,20 +190,26 @@ impl Stack {
         }
         assert_eq!(lens.len(), self.parts.len());
 
-        let fill_len = rem_len.unwrap_or_else(|| {
+        let tot_fill_len = rem_len.unwrap_or_else(|| {
             log::warn!("Stack does not fit into {area:?}: {self:?}");
             0
         });
 
         if total_weight > 0 {
-            let mut rem_fill_len = fill_len;
+            let mut rem_fill_len = tot_fill_len;
 
             for (part, len) in self.parts.iter().zip(&mut lens) {
                 if let Constr::Fill(weight) = part.constr {
-                    // weight does not exceed total weight, so this should always succeed
-                    *len = u16::try_from(u64::from(fill_len) * u64::from(weight) / total_weight)
-                        .unwrap();
-                    rem_fill_len = rem_fill_len.checked_sub(*len).unwrap();
+                    let extra_len =
+                        u16::try_from(u64::from(tot_fill_len) * u64::from(weight) / total_weight)
+                            .expect("bounded by render area");
+                    *len = len.checked_add(extra_len).unwrap_or_else(|| {
+                        log::error!("Element is way too large");
+                        *len
+                    });
+                    rem_fill_len = rem_fill_len
+                        .checked_sub(extra_len)
+                        .expect("bounded by partition via floor div");
                 }
             }
             if rem_fill_len > 0 {
@@ -282,38 +232,41 @@ impl Stack {
         let mut offset = 0;
         for (part, len) in self.parts.iter().zip(lens) {
             let mut subarea = area;
-            *subarea.size.get_mut(self.axis) = len;
-            *subarea.pos.get_mut(self.axis) += offset;
+            subarea.size[self.axis] = len;
+            subarea.pos[self.axis] += offset;
 
-            part.elem.render(
-                ctx,
-                Self::inner_sizing_arg(&part.constr, sizing, self.axis),
-                subarea,
-            )?;
+            part.elem.render2(ctx, subarea)?;
 
             offset += len;
         }
 
         Ok(())
     }
-}
-// TODO: Styling (using crossterm)
-impl Text {
-    pub fn calc_auto_size(&self, sizing: SizingContext) -> anyhow::Result<Vec2<u16>> {
-        // TODO: Warn if text is too large
-        auto_size_invariants(sizing, || {
-            Ok(Vec2 {
-                x: self.width,
-                y: self.lines.iter().map(|line| line.height).sum(),
-            })
-        })
+
+    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
+        let mut tot = Vec2::default();
+        for part in &self.parts {
+            let size = Self::calc_min_part_size(part, self.axis, args);
+
+            tot[self.axis] = size[self.axis].saturating_add(tot[self.axis]);
+
+            tot[self.axis.other()] = size[self.axis.other()].max(tot[self.axis.other()]);
+        }
+        tot
     }
-    fn render(
-        &self,
-        ctx: &mut RenderCtx<impl Write>,
-        _: SizingContext,
-        area: Area,
-    ) -> std::io::Result<()> {
+}
+impl Stack {
+    fn calc_min_part_size(part: &StackItem, axis: Axis, args: &SizingArgs) -> Vec2<u16> {
+        let mut size = part.elem.calc_min_size(args);
+        match part.constr {
+            Constr::Length(l) => size[axis] = size[axis].max(l),
+            Constr::Fill(_) | Constr::Auto => (),
+        }
+        size
+    }
+}
+impl Render for Text {
+    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let mut y_off = 0;
         // TODO: Style
         for line in &self.lines {
@@ -335,51 +288,16 @@ impl Text {
 
         Ok(())
     }
-}
-impl Block {
-    fn extra_dim(&self) -> Vec2<u16> {
-        let Borders {
-            top,
-            bottom,
-            left,
-            right,
-        } = self.borders;
+
+    fn calc_min_size(&self, _: &SizingArgs) -> Vec2<u16> {
         Vec2 {
-            x: u16::from(left) + u16::from(right),
-            y: u16::from(top) + u16::from(bottom),
+            x: self.width,
+            y: self.lines.iter().map(|line| line.height).sum(),
         }
     }
-    fn inner_sizing_arg(&self, mut sizing: SizingContext) -> SizingContext {
-        let Vec2 { x: w, y: h } = self.extra_dim();
-        if let Some(div_w) = &mut sizing.div_w {
-            *div_w -= w;
-        }
-        if let Some(div_h) = &mut sizing.div_h {
-            *div_h -= h;
-        }
-        sizing
-    }
-    pub fn calc_auto_size(&self, sizing: SizingContext) -> anyhow::Result<Vec2<u16>> {
-        auto_size_invariants(sizing, || {
-            let inner_ctx = self.inner_sizing_arg(sizing);
-            let mut size = self
-                .inner
-                .as_ref()
-                .map(|it| it.calc_auto_size(inner_ctx))
-                .transpose()?
-                .unwrap_or_default();
-            let Vec2 { x: w, y: h } = self.extra_dim();
-            size.x = size.x.saturating_add(w);
-            size.y = size.y.saturating_add(h);
-            Ok(size)
-        })
-    }
-    fn render(
-        &self,
-        ctx: &mut RenderCtx<impl Write>,
-        sizing: SizingContext,
-        area: Area,
-    ) -> std::io::Result<()> {
+}
+impl Render for Block {
+    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let Borders {
             top,
             bottom,
@@ -387,15 +305,13 @@ impl Block {
             right,
         } = self.borders;
 
-        let inner_sizing_arg = self.inner_sizing_arg(sizing);
         if let Some(inner) = &self.inner {
             let Area {
                 pos: Vec2 { x, y },
                 size: Vec2 { x: w, y: h },
             } = area;
-            inner.render(
+            inner.render2(
                 ctx,
-                inner_sizing_arg,
                 Area {
                     pos: Vec2 {
                         x: x.saturating_add(left.into()),
@@ -471,22 +387,32 @@ impl Block {
 
         Ok(())
     }
+
+    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
+        let mut size = self
+            .inner
+            .as_ref()
+            .map(|it| it.calc_min_size(args))
+            .unwrap_or_default();
+        let Vec2 { x: w, y: h } = self.extra_dim();
+        size.x = size.x.saturating_add(w);
+        size.y = size.y.saturating_add(h);
+        size
+    }
 }
-fn auto_size_invariants(
-    sizing: SizingContext,
-    f: impl FnOnce() -> anyhow::Result<Vec2<u16>>,
-) -> anyhow::Result<Vec2<u16>> {
-    if let (Some(w), Some(h)) = (sizing.div_w, sizing.div_h) {
-        return Ok(Vec2 { x: w, y: h });
+impl Block {
+    fn extra_dim(&self) -> Vec2<u16> {
+        let Borders {
+            top,
+            bottom,
+            left,
+            right,
+        } = self.borders;
+        Vec2 {
+            x: u16::from(left) + u16::from(right),
+            y: u16::from(top) + u16::from(bottom),
+        }
     }
-    let mut size = f()?;
-    if let Some(w) = sizing.div_w {
-        size.x = w;
-    }
-    if let Some(h) = sizing.div_h {
-        size.y = h;
-    }
-    Ok(size)
 }
 fn stylize<S>(
     s: S,
@@ -542,23 +468,4 @@ where
     }
 
     s
-}
-
-pub fn draw_to<W: std::io::Write>(
-    writer: &mut W,
-    doit: impl FnOnce(&mut RenderCtx<W>) -> std::io::Result<()>,
-) -> std::io::Result<RenderedLayout> {
-    let mut layout = Default::default();
-    let mut ctx = RenderCtx {
-        layout: &mut layout,
-        writer,
-    };
-    crossterm::queue!(
-        ctx.writer,
-        crossterm::terminal::BeginSynchronizedUpdate,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-    )?;
-    doit(&mut ctx)?;
-    crossterm::execute!(ctx.writer, crossterm::terminal::EndSynchronizedUpdate)?;
-    Ok(layout)
 }

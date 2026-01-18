@@ -3,10 +3,7 @@ pub use render::*;
 mod layout;
 pub use layout::*;
 
-use anyhow::Context;
 use std::sync::Arc;
-
-// FIXME: Split mod by elem kind
 
 trait InteractTagBounds: std::any::Any + std::fmt::Debug + Send + Sync {}
 impl<T> InteractTagBounds for T where T: std::any::Any + std::fmt::Debug + Send + Sync {}
@@ -35,11 +32,11 @@ impl InteractTag {
 
 #[derive(Default, Debug, Clone)]
 pub enum Elem {
-    Stack(Stack),
     Text(Text),
     Image(Image),
-    Block(Block),
-    Tagged(Box<InteractElem>),
+    Stack(Stack),
+    Block(Box<Block>),
+    Interact(Box<InteractElem>),
     Shared(Arc<Self>),
     #[default]
     Empty,
@@ -56,12 +53,12 @@ impl From<Image> for Elem {
 }
 impl From<Block> for Elem {
     fn from(value: Block) -> Self {
-        Self::Block(value)
+        Self::Block(Box::new(value))
     }
 }
 impl From<InteractElem> for Elem {
     fn from(value: InteractElem) -> Self {
-        Self::Tagged(Box::new(value))
+        Self::Interact(Box::new(value))
     }
 }
 impl From<Text> for Elem {
@@ -150,18 +147,14 @@ pub struct InteractElem {
     pub elem: Elem,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ImageSizeMode {
+    FillAxis(Axis, u16),
+}
 #[derive(Clone)]
 pub struct Image {
     pub img: image::RgbaImage,
-}
-impl Image {
-    pub fn try_load(data: impl AsRef<[u8]>, format: image::ImageFormat) -> anyhow::Result<Image> {
-        image::load_from_memory_with_format(data.as_ref(), format)
-            .context("Systray icon has invalid png data")
-            .map(|img| Image {
-                img: img.into_rgba8(),
-            })
-    }
+    pub sizing: ImageSizeMode,
 }
 
 impl std::fmt::Debug for Image {
@@ -177,7 +170,7 @@ pub struct Block {
     pub borders: Borders,
     pub border_style: Style,
     pub border_set: LineSet,
-    pub inner: Option<Box<Elem>>,
+    pub inner: Option<Elem>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]

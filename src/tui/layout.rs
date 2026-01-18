@@ -30,26 +30,39 @@ pub struct Vec2<T> {
     pub x: T,
     pub y: T,
 }
+impl<T> std::ops::Index<Axis> for Vec2<T> {
+    type Output = T;
 
-impl<T> Vec2<T> {
-    pub fn get_mut(&mut self, axis: Axis) -> &mut T {
+    fn index(&self, index: Axis) -> &Self::Output {
         let Self { x, y } = self;
-        match axis {
+        match index {
             Axis::X => x,
             Axis::Y => y,
         }
     }
-    pub fn get(mut self, axis: Axis) -> T
-    where
-        T: Copy,
-    {
-        *self.get_mut(axis)
+}
+impl<T> std::ops::IndexMut<Axis> for Vec2<T> {
+    fn index_mut(&mut self, index: Axis) -> &mut Self::Output {
+        let Self { x, y } = self;
+        match index {
+            Axis::X => x,
+            Axis::Y => y,
+        }
     }
 }
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Axis {
     X,
     Y,
+}
+impl Axis {
+    pub fn other(self) -> Self {
+        match self {
+            Self::X => Self::Y,
+            Self::Y => Self::X,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

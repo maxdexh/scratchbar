@@ -236,6 +236,8 @@ impl Module for TrayModule {
                 let items = state_rx.borrow_and_update().items.clone();
                 let mut parts = Vec::new();
                 for (addr, item) in items.iter() {
+                    // FIXME: Handle the other options
+                    // FIXME: Why are we showing all icons?
                     for system_tray::item::IconPixmap {
                         width,
                         height,
@@ -258,15 +260,6 @@ impl Module for TrayModule {
                         for image::Rgba(pixel) in img.pixels_mut() {
                             *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
                         }
-                        let mut png_data = Vec::new();
-                        if let Err(err) =
-                            img.write_with_encoder(image::codecs::png::PngEncoder::new(
-                                std::io::Cursor::new(&mut png_data),
-                            ))
-                        {
-                            log::error!("Error encoding image: {err}");
-                            continue;
-                        }
 
                         parts.extend([
                             tui::StackItem::auto(tui::InteractElem {
@@ -276,10 +269,11 @@ impl Module for TrayModule {
                                         addr: addr.clone(),
                                     }),
                                 },
-                                elem: tui::Image::try_load(png_data, image::ImageFormat::Png)
-                                    .ok_or_log()
-                                    .map(Into::into)
-                                    .unwrap_or_default(),
+                                elem: tui::Image {
+                                    img,
+                                    sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                                }
+                                .into(),
                             }),
                             tui::StackItem::spacing(1),
                         ])
@@ -363,13 +357,13 @@ impl Module for TrayModule {
                                         ..Default::default()
                                     },
                                     border_set: tui::LineSet::thick(),
-                                    inner: Some(Box::new(tray_menu_to_tui(
+                                    inner: Some(tray_menu_to_tui(
                                         &inst_id,
                                         0,
                                         submenus,
                                         addr,
                                         menu_path.as_ref(),
-                                    ))),
+                                    )),
                                 }
                                 .into();
                             }
@@ -438,19 +432,22 @@ fn tray_menu_item_to_tui(
         } => {
             let elem = tui::Stack::horizontal([
                 tui::StackItem::spacing(depth + 1),
-                if let Some(icon) = icon_data {
+                if let Some(icon) = icon_data
+                    && let Some(img) =
+                        image::load_from_memory_with_format(icon, image::ImageFormat::Png)
+                            .context("Systray icon has invalid png data")
+                            .ok_or_log()
+                {
                     let mut lines = label.lines();
                     let first_line = lines.next().unwrap_or_default();
                     tui::StackItem::auto(tui::Stack::vertical([
                         tui::StackItem::length(
                             1,
                             tui::Stack::horizontal([
-                                tui::StackItem::auto(
-                                    tui::Image::try_load(icon, image::ImageFormat::Png)
-                                        .ok_or_log()
-                                        .map(tui::Elem::from)
-                                        .unwrap_or_default(),
-                                ),
+                                tui::StackItem::auto(tui::Image {
+                                    img: img.into_rgba8(),
+                                    sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                                }),
                                 tui::StackItem::spacing(1),
                                 tui::StackItem::auto(tui::Text::plain(first_line)),
                             ]),

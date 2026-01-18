@@ -313,7 +313,6 @@ impl EnergyModule {
                             state.update(&member, value).ok_or_log();
                         }
                     });
-                    device.refresh().await.ok_or_log();
                 }
             };
 

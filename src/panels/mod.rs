@@ -439,6 +439,7 @@ async fn run_monitor(
             kind: MenuKind,
             pos: tui::Vec2<u32>,
             tui_size_cache: tui::Vec2<u16>,
+            sizing: tui::SizingArgs,
             rendered: bool,
         }
         let mut show_menu = None::<ShowMenu>;
@@ -446,12 +447,6 @@ async fn run_monitor(
             // FIXME: Single state variable
             let mut resize_menu = false;
             let mut menu_render_ready = false;
-
-            let menu_siz_ctx = || tui::SizingContext {
-                font_size: menu.sizes.font_size(),
-                div_w: None,
-                div_h: None,
-            };
 
             let upd = tokio::select! {
                 Some(ev) = bar.term_ev_rx.next() => Upd::Term(TermKind::Bar, ev),
@@ -465,23 +460,17 @@ async fn run_monitor(
                 Upd::BarTui => {
                     let tui = gather_bar_tui(&bar_tui_rx.borrow_and_update(), &monitor);
                     let mut buf = Vec::new();
-                    let Some(layout) = tui::draw_to(&mut buf, |ctx| {
-                        let size = bar.sizes.cell_size;
-                        tui.render(
-                            ctx,
-                            tui::SizingContext {
+                    let Some(layout) = tui
+                        .render2(
+                            bar.sizes.cell_size,
+                            &mut buf,
+                            &tui::SizingArgs {
                                 font_size: bar.sizes.font_size(),
-                                div_w: Some(size.x),
-                                div_h: Some(size.y),
-                            },
-                            tui::Area {
-                                size,
-                                pos: Default::default(),
                             },
                         )
-                    })
-                    .context("Failed to render bar")
-                    .ok_or_log() else {
+                        .context("Failed to render bar")
+                        .ok_or_log()
+                    else {
                         continue;
                     };
                     bar.layout = layout;
@@ -561,19 +550,18 @@ async fn run_monitor(
                     let tui = tui::Tui {
                         root: Box::new(tui),
                     };
-                    if let Ok(cached_size) = tui
-                        .calc_size(menu_siz_ctx())
-                        .map_err(|err| log::error!("Failed to calculate tui size: {err}"))
-                    {
-                        show_menu = Some(ShowMenu {
-                            tui_size_cache: cached_size,
-                            tui,
-                            kind: menu_kind,
-                            pos,
-                            rendered: false,
-                        });
-                        resize_menu = true;
-                    }
+                    let sizing = tui::SizingArgs {
+                        font_size: menu.sizes.font_size(),
+                    };
+                    show_menu = Some(ShowMenu {
+                        tui_size_cache: tui.calc_min_size(&sizing),
+                        sizing,
+                        tui,
+                        kind: menu_kind,
+                        pos,
+                        rendered: false,
+                    });
+                    resize_menu = true;
                 }
                 Upd::MenuWatcherHide => {
                     show_menu = None;
@@ -659,9 +647,12 @@ async fn run_monitor(
                     ref mut tui,
                     rendered: ref mut rendered @ false,
                     tui_size_cache,
+                    ref sizing,
                     ..
                 }) = show_menu
             {
+                *rendered = true;
+
                 if tui_size_cache.x > menu.sizes.cell_size.x
                     || tui_size_cache.y > menu.sizes.cell_size.y
                 {
@@ -672,30 +663,15 @@ async fn run_monitor(
                 }
 
                 let mut buf = Vec::new();
-                match tui::draw_to(&mut buf, |ctx| {
-                    let size = tui_size_cache; // Or term size
-                    tui.render(
-                        ctx,
-                        tui::SizingContext {
-                            font_size: menu.sizes.font_size(),
-                            div_w: Some(size.x),
-                            div_h: Some(size.y),
-                        },
-                        tui::Area {
-                            // FIXME: probably better to render at the tui's size
-                            size,
-                            pos: Default::default(),
-                        },
-                    )
-                }) {
-                    Err(err) => log::error!("Failed to draw: {err}"),
-                    Ok(new_layout) => {
-                        menu.layout = new_layout;
-                        *rendered = true;
-                    }
+                if let Some(layout) = tui
+                    .render2(tui_size_cache, &mut buf, sizing)
+                    .context("Failed to draw menu")
+                    .ok_or_log()
+                {
+                    menu.layout = layout;
+                    menu.term_upd_tx.emit(TermUpdate::Print(buf));
+                    menu.term_upd_tx.emit(TermUpdate::Flush);
                 }
-                menu.term_upd_tx.emit(TermUpdate::Print(buf));
-                menu.term_upd_tx.emit(TermUpdate::Flush);
             }
         }
     };
