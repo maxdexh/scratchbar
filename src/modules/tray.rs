@@ -305,6 +305,8 @@ impl Module for TrayModule {
                         match kind {
                             tui::InteractKind::Hover => {
                                 let items = self.state_rx.borrow().items.clone();
+
+                                // FIXME: Handle more attrs
                                 let Some(system_tray::item::Tooltip {
                                     icon_name: _,
                                     icon_data: _,
@@ -337,7 +339,6 @@ impl Module for TrayModule {
                                     tui: tui.into(),
                                     location,
                                     menu_kind: MenuKind::Tooltip,
-                                    add_padding: true,
                                 }));
                             }
                             tui::InteractKind::Click(tui::MouseButton::Right) => {
@@ -372,7 +373,6 @@ impl Module for TrayModule {
                                     tui: tui.into(),
                                     location,
                                     menu_kind: MenuKind::Context,
-                                    add_padding: false,
                                 }));
                             }
                             _ => continue,

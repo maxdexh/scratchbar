@@ -491,7 +491,6 @@ impl Module for EnergyModule {
                                 tui: tui::Text::plain(text).into(),
                                 location,
                                 menu_kind: MenuKind::Tooltip,
-                                add_padding: true,
                             }))
                         }
                     }

@@ -50,7 +50,6 @@ pub struct BarMgrModuleArgs {
     pub reload_rx: crate::utils::ReloadRx,
     pub cancel: tokio_util::sync::CancellationToken,
     pub inst_id: ModInstIdImpl,
-    // TODO: Config
 }
 pub struct BarMgrModuleStartArgs {
     pub start: Box<dyn FnOnce(BarMgrModuleArgs) -> anyhow::Result<()> + Send>,
@@ -248,6 +247,12 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
     }
 }
 
+// FIXME: It would be nice to use this with padding-top and
+// padding-bottom, but using those makes crossterm's window_size
+// function fail.
+const VERTICAL_PADDING: u16 = 0;
+const HORIZONTAL_PADDING: u16 = 4;
+
 async fn run_monitor(
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
@@ -329,7 +334,7 @@ async fn run_monitor(
 
         let (mut bar, (mut menu, mut watcher_stream)) = futures::future::try_join(
             async {
-                let bar: Term = init_term(
+                init_term(
                     format!("BAR@{}", monitor.name),
                     vec![
                         format!("--output-name={}", monitor.name).into(),
@@ -347,12 +352,10 @@ async fn run_monitor(
                     ],
                     vec![],
                 )
-                .await?;
-                anyhow::Ok(bar)
+                .await
             },
-            // FIXME: Hide menu
             async {
-                let menu: Term = init_term(
+                let mut menu = init_term(
                     format!("MENU@{}", monitor.name),
                     vec![
                         {
@@ -402,6 +405,10 @@ async fn run_monitor(
                     vec![("BAR_MENU_WATCHER_SOCK", watcher_sock_path)],
                 )
                 .await?;
+                menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
+                    "resize-os-window".into(),
+                    "--action=hide".into(),
+                ]));
 
                 let (s, _) = watcher_sock.accept().await?;
                 anyhow::Ok((menu, s))
@@ -438,15 +445,13 @@ async fn run_monitor(
             tui: tui::Tui,
             kind: MenuKind,
             location: tui::Vec2<u32>,
-            tui_size_cache: tui::Vec2<u16>,
+            cached_tui_size: tui::Vec2<u16>,
             sizing: tui::SizingArgs,
             rendered: bool,
         }
         let mut show_menu = None::<ShowMenu>;
         loop {
-            // FIXME: Single state variable
             let mut resize_menu = false;
-            let mut menu_render_ready = false;
 
             let upd = tokio::select! {
                 Some(ev) = bar.term_ev_rx.next() => Upd::Term(TermKind::Bar, ev),
@@ -461,8 +466,11 @@ async fn run_monitor(
                     let tui = gather_bar_tui(&bar_tui_rx.borrow_and_update(), &monitor);
                     let mut buf = Vec::new();
                     let Some(layout) = tui
-                        .render2(
-                            bar.sizes.cell_size,
+                        .render(
+                            tui::Area {
+                                size: bar.sizes.cell_size,
+                                pos: Default::default(),
+                            },
                             &mut buf,
                             &tui::SizingArgs {
                                 font_size: bar.sizes.font_size(),
@@ -526,26 +534,28 @@ async fn run_monitor(
                             //
                         }
                     },
-                    TermEvent::Sizes(sizes) => {
-                        match term_kind {
-                            TermKind::Bar => {
-                                bar.sizes = sizes;
-                                reload_tx.reload();
-                            }
-                            TermKind::Menu => {
-                                // FIXME: Check size not too small (and not way too big from
-                                // external resize)
+                    TermEvent::Sizes(sizes) => match term_kind {
+                        TermKind::Bar => {
+                            bar.sizes = sizes;
+                            reload_tx.reload();
+                        }
+                        TermKind::Menu => {
+                            if menu.sizes.font_size() != sizes.font_size()
+                                && let Some(show) = &mut show_menu
+                            {
+                                show.rendered = false;
                                 menu.sizes = sizes;
-                                menu_render_ready = true;
+                            } else {
+                                menu.sizes = sizes;
                             }
                         }
-                    }
+                    },
                 },
                 Upd::OpenMenu(OpenMenu {
                     tui,
                     location,
                     menu_kind,
-                    ..
+                    monitor: _,
                 }) => {
                     let tui = tui::Tui {
                         root: Box::new(tui),
@@ -554,7 +564,7 @@ async fn run_monitor(
                         font_size: menu.sizes.font_size(),
                     };
                     show_menu = Some(ShowMenu {
-                        tui_size_cache: tui.calc_min_size(&sizing),
+                        cached_tui_size: tui.calc_min_size(&sizing),
                         sizing,
                         tui,
                         kind: menu_kind,
@@ -571,68 +581,67 @@ async fn run_monitor(
             if resize_menu {
                 if let Some(ShowMenu {
                     location,
-                    tui_size_cache,
+                    cached_tui_size,
                     rendered: false,
                     ..
                 }) = show_menu
+                    && cached_tui_size != menu.sizes.cell_size
                 {
+                    // HACK: This minimizes the rounding error for some reason (as far as I can tell).
                     let scale = (monitor.scale * 1000.0).ceil() / 1000.0;
 
-                    // No need to wait before rendering if we have enough space
-                    if tui_size_cache.x <= menu.sizes.cell_size.x
-                        && tui_size_cache.y <= menu.sizes.cell_size.y
-                    {
-                        menu_render_ready = true;
-                    }
-                    if tui_size_cache != menu.sizes.cell_size {
-                        // NOTE: There is no absolute positioning system, nor a way to directly specify the
-                        // geometry (since this is controlled by the compositor). So we have to get creative by
-                        // using the right and left margin to control both position and size of the panel.
+                    // NOTE: There is no absolute positioning system, nor a way to directly specify the
+                    // geometry (since this is controlled by the compositor). So we have to get creative by
+                    // using the right and left margin to control both position and size of the panel.
 
-                        // cap position at monitor's size
-                        let x = std::cmp::min(location.x, monitor.width);
+                    let lines = cached_tui_size.y.saturating_add(VERTICAL_PADDING);
 
-                        // Find the distance between window edge and center
-                        let half_pix_w = (u32::from(tui_size_cache.x)
-                            * u32::from(menu.sizes.font_size().x))
-                        .div_ceil(2);
+                    // cap position at monitor's size
+                    let x = std::cmp::min(location.x, monitor.width);
 
-                        // The left margin should be such that half the space is between
-                        // left margin and x. Use saturating_sub so that the left
-                        // margin becomes zero if the width would reach outside the screen.
-                        let mleft = x.saturating_sub(half_pix_w);
+                    // Find the distance between window edge and center
+                    let half_pix_w = {
+                        let cell_pix_w = u32::from(menu.sizes.font_size().x);
+                        let cell_w = cached_tui_size.x + HORIZONTAL_PADDING;
+                        let pix_w = u32::from(cell_w) * cell_pix_w;
+                        pix_w.div_ceil(2)
+                    };
 
-                        // Get the overshoot, i.e. the amount lost to saturating_sub (we have to account for it
-                        // in the right margin). For this observe that a.saturating_sub(b) = a - min(a, b) and
-                        // therefore the overshoot is:
-                        // a.saturating_sub(b) - (a - b)
-                        // = a - min(a, b) - (a - b)
-                        // = b - min(a, b)
-                        // = b.saturating_sub(a)
-                        let overshoot = half_pix_w.saturating_sub(x);
+                    // The left margin should be such that half the space is between
+                    // left margin and x. Use saturating_sub so that the left
+                    // margin becomes zero if the width would reach outside the screen.
+                    let mleft = x.saturating_sub(half_pix_w);
 
-                        let mright = (monitor.width - x)
-                            .saturating_sub(half_pix_w)
-                            .saturating_sub(overshoot);
+                    // Get the overshoot, i.e. the amount lost to saturating_sub (we have to account for it
+                    // in the right margin). For this observe that a.saturating_sub(b) = a - min(a, b) and
+                    // therefore the overshoot is:
+                    // a.saturating_sub(b) - (a - b)
+                    // = a - min(a, b) - (a - b)
+                    // = b - min(a, b)
+                    // = b.saturating_sub(a)
+                    let overshoot = half_pix_w.saturating_sub(x);
 
-                        // The font size (on which cell->pixel conversion is based) and the monitor's
-                        // size are in physical pixels. This makes sense because different monitors can
-                        // have different scales, and the application should not be affected by that
-                        // (this is not x11 after all).
-                        // However, panels are bound to a monitor and the margins are in scaled pixels,
-                        // so we have to make this correction.
-                        let margin_left = (f64::from(mleft) / scale) as u32;
-                        let margin_right = (f64::from(mright) / scale) as u32;
+                    let mright = (monitor.width - x)
+                        .saturating_sub(half_pix_w)
+                        .saturating_sub(overshoot);
 
-                        menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
-                            "resize-os-window".into(),
-                            "--incremental".into(),
-                            "--action=os-panel".into(),
-                            format!("margin-left={margin_left}").into(),
-                            format!("margin-right={margin_right}").into(),
-                            format!("lines={}", tui_size_cache.y).into(),
-                        ]));
-                    }
+                    // The font size (on which cell->pixel conversion is based) and the monitor's
+                    // size are in physical pixels. This makes sense because different monitors can
+                    // have different scales, and the application should not be affected by that
+                    // (this is not x11 after all).
+                    // However, panels are bound to a monitor and the margins are in scaled pixels,
+                    // so we have to make this correction.
+                    let margin_left = (f64::from(mleft) / scale) as u32;
+                    let margin_right = (f64::from(mright) / scale) as u32;
+
+                    menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
+                        "resize-os-window".into(),
+                        "--incremental".into(),
+                        "--action=os-panel".into(),
+                        format!("margin-left={margin_left}").into(),
+                        format!("margin-right={margin_right}").into(),
+                        format!("lines={lines}").into(),
+                    ]));
                 }
 
                 // TODO: be smarter about when to run this
@@ -642,29 +651,35 @@ async fn run_monitor(
                     format!("--action={}", action).into(),
                 ]));
             }
-            if menu_render_ready
-                && let Some(ShowMenu {
-                    ref mut tui,
-                    rendered: ref mut rendered @ false,
-                    tui_size_cache,
-                    ref sizing,
-                    ..
-                }) = show_menu
+
+            if let Some(ShowMenu {
+                ref mut tui,
+                rendered: ref mut rendered @ false,
+                cached_tui_size,
+                ref sizing,
+                ..
+            }) = show_menu
             {
                 *rendered = true;
 
-                if tui_size_cache.x > menu.sizes.cell_size.x
-                    || tui_size_cache.y > menu.sizes.cell_size.y
-                {
-                    log::warn!(
-                        "Tui size {tui_size_cache:?} is too big for panel size {:?}",
-                        menu.sizes.cell_size
-                    );
-                }
-
                 let mut buf = Vec::new();
+
+                // NOTE: The terminal might not be done resizing at this point,
+                // which would cause issues if passing the terminal's size here.
+                // Passing the tui's desired size sidesteps this because kitty
+                // will rerender it correctly once the resize is done.
                 if let Some(layout) = tui
-                    .render2(tui_size_cache, &mut buf, sizing)
+                    .render(
+                        tui::Area {
+                            size: cached_tui_size,
+                            pos: tui::Vec2 {
+                                x: HORIZONTAL_PADDING / 2,
+                                y: 0,
+                            },
+                        },
+                        &mut buf,
+                        sizing,
+                    )
                     .context("Failed to draw menu")
                     .ok_or_log()
                 {

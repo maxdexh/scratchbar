@@ -219,7 +219,6 @@ impl Module for PpdModule {
                                     tui: tui::Text::plain(profile).into(),
                                     location,
                                     menu_kind: MenuKind::Tooltip,
-                                    add_padding: true,
                                 })),
                             }
                         } else {

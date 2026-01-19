@@ -3,7 +3,7 @@ use std::io::Write;
 use crate::tui::*;
 
 pub(super) trait Render {
-    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()>;
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()>;
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16>;
 }
 
@@ -22,9 +22,9 @@ impl Tui {
     pub fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         self.root.calc_min_size(args)
     }
-    pub fn render2(
+    pub fn render(
         &self,
-        cell_size: Vec2<u16>,
+        area: Area,
         writer: &mut impl Write,
         sizing: &SizingArgs,
     ) -> std::io::Result<RenderedLayout> {
@@ -34,33 +34,30 @@ impl Tui {
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
         )?;
         let mut layout = RenderedLayout::default();
-        self.root.render2(
+        self.root.render(
             &mut RenderCtx {
                 sizing,
                 writer: &mut *writer,
                 layout: &mut layout,
             },
-            Area {
-                pos: Default::default(),
-                size: cell_size,
-            },
+            area,
         )?;
         crossterm::execute!(writer, crossterm::terminal::EndSynchronizedUpdate)?;
         Ok(layout)
     }
 }
 impl Render for Elem {
-    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         match self {
-            Self::Stack(subdiv) => subdiv.render2(ctx, area),
-            Self::Image(image) => image.render2(ctx, area),
-            Self::Block(block) => block.render2(ctx, area),
-            Self::Text(text) => text.render2(ctx, area),
+            Self::Stack(subdiv) => subdiv.render(ctx, area),
+            Self::Image(image) => image.render(ctx, area),
+            Self::Block(block) => block.render(ctx, area),
+            Self::Text(text) => text.render(ctx, area),
             Self::Interact(elem) => {
                 ctx.layout.insert(area, elem.payload.clone());
-                elem.elem.render2(ctx, area)
+                elem.elem.render(ctx, area)
             }
-            Self::Shared(elem) => elem.render2(ctx, area),
+            Self::Shared(elem) => elem.render(ctx, area),
             Self::Empty => Ok(()),
         }
     }
@@ -124,7 +121,7 @@ impl Image {
     }
 }
 impl Render for Image {
-    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let img_cell_ratio = self.img_cell_ratio(ctx.sizing);
         let (fill_axis, fill_axis_len) = Self::max_fit_to_fill_axis(area.size, img_cell_ratio);
 
@@ -174,7 +171,7 @@ impl Render for Image {
     }
 }
 impl Render for Stack {
-    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let mut lens = Vec::with_capacity(self.parts.len());
         let mut total_weight = 0u64;
         let mut rem_len = Some(area.size[self.axis]);
@@ -235,7 +232,7 @@ impl Render for Stack {
             subarea.size[self.axis] = len;
             subarea.pos[self.axis] += offset;
 
-            part.elem.render2(ctx, subarea)?;
+            part.elem.render(ctx, subarea)?;
 
             offset += len;
         }
@@ -266,7 +263,7 @@ impl Stack {
     }
 }
 impl Render for Text {
-    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let mut y_off = 0;
         // TODO: Style
         for line in &self.lines {
@@ -297,7 +294,7 @@ impl Render for Text {
     }
 }
 impl Render for Block {
-    fn render2(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let Borders {
             top,
             bottom,
@@ -313,7 +310,7 @@ impl Render for Block {
             //    return inner.render2(ctx, area);
             //}
 
-            inner.render2(
+            inner.render(
                 ctx,
                 Area {
                     pos: Vec2 {
