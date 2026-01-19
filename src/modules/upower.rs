@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
+use tokio_stream::StreamExt;
 use tokio_util::task::AbortOnDropHandle;
 pub use udbus::*;
 
@@ -13,19 +15,21 @@ macro_rules! declare_properties {
             $field_name:ident,
             $prop_name:expr,
             $typ:ty,
-            $($default:expr)?,
+            $default:expr,
+            $try_from_value:expr,
         )),* $(,)? ]
     ) => {
-        pub struct EnergyState {
+        #[derive(Clone, Debug)]
+        pub struct UpowerState {
             $($field_name: $typ,)*
             _p: (),
         }
 
-        impl EnergyState {
+        impl UpowerState {
             fn update(&mut self, prop_name: &str, value: zbus::zvariant::OwnedValue) -> anyhow::Result<bool> {
                 match prop_name {
                     $($prop_name => {
-                        let value = value.try_into()?;
+                        let value = ($try_from_value)(value)?;
                         if self.$field_name == value {
                             return Ok(false);
                         }
@@ -37,13 +41,10 @@ macro_rules! declare_properties {
             }
         }
 
-        impl Default for EnergyState {
+        impl Default for UpowerState {
             fn default() -> Self {
                 Self {
-                    $($field_name: '__default: {
-                        $( break '__default $default; )?
-                        Default::default()
-                    },)*
+                    $($field_name: ($default)(),)*
                     _p: (),
                 }
             }
@@ -51,12 +52,64 @@ macro_rules! declare_properties {
     };
 }
 declare_properties!([
-    (battery_level, "BatteryLevel", BatteryLevel,,),
-    (battery_state, "BatteryState", BatteryState,,),
-    (is_present, "IsPresent", bool,,),
-    (percentage, "Percentage", f64,,),
-    (energy_rate, "EnergyRate", f64,,),
+    (
+        battery_level,
+        "BatteryLevel",
+        BatteryLevel,
+        Default::default,
+        TryFrom::try_from,
+    ),
+    (
+        battery_state,
+        "State",
+        BatteryState,
+        Default::default,
+        TryFrom::try_from,
+    ),
+    (
+        is_present,
+        "IsPresent",
+        bool,
+        Default::default,
+        TryFrom::try_from,
+    ),
+    (
+        percentage,
+        "Percentage",
+        f64,
+        Default::default,
+        TryFrom::try_from,
+    ),
+    (
+        energy_rate,
+        "EnergyRate",
+        f64,
+        Default::default,
+        TryFrom::try_from,
+    ),
+    (
+        time_to_empty,
+        "TimeToEmpty",
+        Duration,
+        Default::default,
+        duration_from_value,
+    ),
+    (
+        time_to_full,
+        "TimeToFull",
+        Duration,
+        Default::default,
+        duration_from_value,
+    ),
 ]);
+
+fn duration_from_value(value: zbus::zvariant::OwnedValue) -> anyhow::Result<Duration> {
+    Ok(Duration::from_secs(
+        i64::try_from(value)?
+            .try_into()
+            .context("Failed to convert negative duration")?,
+    ))
+}
 
 mod udbus {
     /// Originally taken from `upower-dbus` crate
@@ -257,13 +310,13 @@ mod udbus {
 
 use crate::modules::prelude::*;
 pub struct EnergyModule {
-    state_rx: WatchRx<EnergyState>,
+    state_rx: WatchRx<UpowerState>,
     reload_tx: ReloadTx,
     _background: AbortOnDropHandle<()>,
 }
 
 impl EnergyModule {
-    async fn run_bg(state_tx: WatchTx<EnergyState>, mut reload_rx: ReloadRx) {
+    async fn run_bg(state_tx: WatchTx<UpowerState>, mut reload_rx: ReloadRx) {
         let mut run_fallible = async || {
             let dbus = zbus::Connection::system().await.ok_or_log()?;
             let upower = UPowerProxy::<'static>::new(&dbus).await.ok_or_log()?;
@@ -310,7 +363,10 @@ impl EnergyModule {
                     };
                     state_tx.send_modify(|state| {
                         for (member, value) in props {
-                            state.update(&member, value).ok_or_log();
+                            state
+                                .update(&member, value)
+                                .context("Failed to update upower energy state")
+                                .ok_or_log();
                         }
                     });
                 }
@@ -354,16 +410,20 @@ impl Module for EnergyModule {
         self: Arc<Self>,
         cfg: Self::Config,
         ModuleArgs {
-            mut act_tx,
+            act_tx,
             mut reload_rx,
+            mut upd_rx,
+            inst_id,
             ..
         }: ModuleArgs,
         _cancel: crate::utils::CancelDropGuard,
     ) {
-        let mut state_rx = self.state_rx.clone();
+        let state_rx = self.state_rx.clone();
         let mut reload_tx = self.reload_tx.clone();
 
         let render_fut = async {
+            let mut act_tx = act_tx.clone();
+            let mut state_rx = state_rx.clone();
             while let Ok(()) = state_rx.changed().await {
                 let energy = state_rx.borrow_and_update();
                 if !energy.is_present {
@@ -375,20 +435,77 @@ impl Module for EnergyModule {
                 let percentage = energy.percentage.round() as i64;
                 let sign = match energy.battery_state {
                     BatteryState::Discharging | BatteryState::PendingDischarge => '-',
-                    _ => '+',
+                    BatteryState::Charging | BatteryState::PendingCharge => '+',
+                    BatteryState::FullyCharged | BatteryState::Unknown | BatteryState::Empty => '±',
                 };
                 let rate = format!("{sign}{:.1}W", energy.energy_rate);
-                let energy = format!("{percentage:>3}% {rate:>6}");
+                let energy = format!("{percentage:>3}% {rate:<6}");
 
                 act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(
-                    tui::Text::plain(energy),
+                    tui::InteractElem {
+                        payload: tui::InteractPayload {
+                            mod_inst: inst_id.clone(),
+                            tag: tui::InteractTag::new(EnergyInteractTag),
+                        },
+                        elem: tui::Text::plain(energy).into(),
+                    },
                 )));
+            }
+        };
+        let menu_fut = async {
+            let mut act_tx = act_tx.clone();
+            while let Some(upd) = upd_rx.next().await {
+                match upd {
+                    ModuleUpd::Interact(ModuleInteract {
+                        location,
+                        payload: ModuleInteractPayload { tag, monitor },
+                        kind,
+                    }) => {
+                        let Some(EnergyInteractTag {}) = tag.downcast_ref() else {
+                            continue;
+                        };
+
+                        let text = {
+                            let lock = state_rx.borrow();
+                            let display_time = |time: Duration| {
+                                let hours = time.as_secs() / 3600;
+                                let mins = (time.as_secs() / 60) % 60;
+                                format!("{hours}h {mins}min")
+                            };
+                            match lock.battery_state {
+                                BatteryState::Discharging | BatteryState::PendingDischarge => {
+                                    format!("Battery empty in {}", display_time(lock.time_to_empty))
+                                }
+                                BatteryState::FullyCharged => "Battery full".to_owned(),
+                                BatteryState::Empty => "Battery empty".to_owned(),
+                                BatteryState::Unknown => "Battery state unknown".to_owned(),
+                                BatteryState::Charging | BatteryState::PendingCharge => {
+                                    format!("Battery full in {}", display_time(lock.time_to_full))
+                                }
+                            }
+                        };
+
+                        if let tui::InteractKind::Hover = kind {
+                            act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
+                                monitor,
+                                tui: tui::Text::plain(text).into(),
+                                location,
+                                menu_kind: MenuKind::Tooltip,
+                                add_padding: true,
+                            }))
+                        }
+                    }
+                }
             }
         };
 
         tokio::select! {
-            () = render_fut => (),
-            () = reload_tx.reload_on(&mut reload_rx) => (),
+            () = render_fut => {}
+            () = menu_fut => {}
+            () = reload_tx.reload_on(&mut reload_rx) => {}
         }
     }
 }
+
+#[derive(Debug)]
+struct EnergyInteractTag;

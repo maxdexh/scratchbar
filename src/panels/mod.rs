@@ -437,7 +437,7 @@ async fn run_monitor(
         struct ShowMenu {
             tui: tui::Tui,
             kind: MenuKind,
-            pos: tui::Vec2<u32>,
+            location: tui::Vec2<u32>,
             tui_size_cache: tui::Vec2<u16>,
             sizing: tui::SizingArgs,
             rendered: bool,
@@ -543,7 +543,7 @@ async fn run_monitor(
                 },
                 Upd::OpenMenu(OpenMenu {
                     tui,
-                    pos,
+                    location,
                     menu_kind,
                     ..
                 }) => {
@@ -558,7 +558,7 @@ async fn run_monitor(
                         sizing,
                         tui,
                         kind: menu_kind,
-                        pos,
+                        location,
                         rendered: false,
                     });
                     resize_menu = true;
@@ -570,7 +570,7 @@ async fn run_monitor(
 
             if resize_menu {
                 if let Some(ShowMenu {
-                    pos,
+                    location,
                     tui_size_cache,
                     rendered: false,
                     ..
@@ -590,7 +590,7 @@ async fn run_monitor(
                         // using the right and left margin to control both position and size of the panel.
 
                         // cap position at monitor's size
-                        let x = std::cmp::min(pos.x, monitor.width);
+                        let x = std::cmp::min(location.x, monitor.width);
 
                         // Find the distance between window edge and center
                         let half_pix_w = (u32::from(tui_size_cache.x)

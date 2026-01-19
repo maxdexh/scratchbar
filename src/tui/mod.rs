@@ -276,25 +276,34 @@ pub struct LineSet {
     pub bottom_left: Arc<str>,
 }
 
+macro_rules! lazy_str {
+    ($s:expr) => {{
+        static VALUE: std::sync::OnceLock<std::sync::Arc<str>> = std::sync::OnceLock::new();
+        VALUE
+            .get_or_init(|| std::sync::Arc::<str>::from($s))
+            .clone()
+    }};
+}
+
 impl LineSet {
     pub fn normal() -> Self {
         Self {
-            vertical: "│".into(),
-            horizontal: "─".into(),
-            top_right: "┐".into(),
-            top_left: "┌".into(),
-            bottom_right: "┘".into(),
-            bottom_left: "└".into(),
+            vertical: lazy_str!("│"),
+            horizontal: lazy_str!("─"),
+            top_right: lazy_str!("┐"),
+            top_left: lazy_str!("┌"),
+            bottom_right: lazy_str!("┘"),
+            bottom_left: lazy_str!("└"),
         }
     }
 
     #[expect(dead_code)]
     pub fn rounded() -> Self {
         Self {
-            top_right: "╮".into(),
-            top_left: "╭".into(),
-            bottom_right: "╯".into(),
-            bottom_left: "╰".into(),
+            top_right: lazy_str!("╮"),
+            top_left: lazy_str!("╭"),
+            bottom_right: lazy_str!("╯"),
+            bottom_left: lazy_str!("╰"),
             ..Self::normal()
         }
     }
@@ -302,31 +311,31 @@ impl LineSet {
     #[expect(dead_code)]
     pub fn double() -> Self {
         Self {
-            vertical: "║".into(),
-            horizontal: "═".into(),
-            top_right: "╗".into(),
-            top_left: "╔".into(),
-            bottom_right: "╝".into(),
-            bottom_left: "╚".into(),
+            vertical: lazy_str!("║"),
+            horizontal: lazy_str!("═"),
+            top_right: lazy_str!("╗"),
+            top_left: lazy_str!("╔"),
+            bottom_right: lazy_str!("╝"),
+            bottom_left: lazy_str!("╚"),
         }
     }
 
     pub fn thick() -> Self {
         Self {
-            vertical: "┃".into(),
-            horizontal: "━".into(),
-            top_right: "┓".into(),
-            top_left: "┏".into(),
-            bottom_right: "┛".into(),
-            bottom_left: "┗".into(),
+            vertical: lazy_str!("┃"),
+            horizontal: lazy_str!("━"),
+            top_right: lazy_str!("┓"),
+            top_left: lazy_str!("┏"),
+            bottom_right: lazy_str!("┛"),
+            bottom_left: lazy_str!("┗"),
         }
     }
 
     #[expect(dead_code)]
     pub fn light_double_dashed() -> Self {
         Self {
-            vertical: "╎".into(),
-            horizontal: "╌".into(),
+            vertical: lazy_str!("╎"),
+            horizontal: lazy_str!("╌"),
             ..Self::normal()
         }
     }
@@ -334,8 +343,8 @@ impl LineSet {
     #[expect(dead_code)]
     pub fn heavy_double_dashed() -> Self {
         Self {
-            vertical: "╏".into(),
-            horizontal: "╍".into(),
+            vertical: lazy_str!("╏"),
+            horizontal: lazy_str!("╍"),
             ..Self::thick()
         }
     }
@@ -343,8 +352,8 @@ impl LineSet {
     #[expect(dead_code)]
     pub fn light_triple_dashed() -> Self {
         Self {
-            vertical: "┆".into(),
-            horizontal: "┄".into(),
+            vertical: lazy_str!("┆"),
+            horizontal: lazy_str!("┄"),
             ..Self::normal()
         }
     }
@@ -352,8 +361,8 @@ impl LineSet {
     #[expect(dead_code)]
     pub fn heavy_triple_dashed() -> Self {
         Self {
-            vertical: "┇".into(),
-            horizontal: "┅".into(),
+            vertical: lazy_str!("┇"),
+            horizontal: lazy_str!("┅"),
             ..Self::thick()
         }
     }
@@ -361,8 +370,8 @@ impl LineSet {
     #[expect(dead_code)]
     pub fn light_quadruple_dashed() -> Self {
         Self {
-            vertical: "┊".into(),
-            horizontal: "┈".into(),
+            vertical: lazy_str!("┊"),
+            horizontal: lazy_str!("┈"),
             ..Self::normal()
         }
     }
@@ -370,8 +379,8 @@ impl LineSet {
     #[expect(dead_code)]
     pub fn heavy_quadruple_dashed() -> Self {
         Self {
-            vertical: "┋".into(),
-            horizontal: "┉".into(),
+            vertical: lazy_str!("┋"),
+            horizontal: lazy_str!("┉"),
             ..Self::thick()
         }
     }

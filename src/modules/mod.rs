@@ -24,8 +24,9 @@ pub mod prelude {
     pub struct OpenMenu {
         pub monitor: Arc<str>,
         pub tui: tui::Elem,
-        pub pos: tui::Vec2<u32>,
+        pub location: tui::Vec2<u32>,
         pub menu_kind: MenuKind,
+        pub add_padding: bool,
     }
     #[derive(Debug, Clone, Copy)]
     pub enum MenuKind {
@@ -45,16 +46,18 @@ pub mod prelude {
     }
     pub struct ModuleArgs {
         pub act_tx: ModuleActTx,
+        //pub interact_rx: ModInteractRx,
         pub upd_rx: ModuleUpdRx,
         pub reload_rx: crate::utils::ReloadRx,
         pub inst_id: ModInstId,
     }
     pub type ModuleActTx = crate::panels::ModuleActTxImpl;
     pub type ModuleUpdRx = crate::panels::ModuleUpdRxImpl;
+    //pub type ModInteractRx = crate::panels::ModInteractRxImpl;
     pub type ModInstId = crate::panels::ModInstIdImpl;
 
     pub trait Module: 'static + Send + Sync {
-        type Config: 'static + Send; //+ serde::de::DeserializeOwned + Default;
+        type Config: 'static + Send;
 
         fn connect() -> Self;
 

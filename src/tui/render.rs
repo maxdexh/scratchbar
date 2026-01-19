@@ -306,20 +306,23 @@ impl Render for Block {
         } = self.borders;
 
         if let Some(inner) = &self.inner {
-            let Area {
-                pos: Vec2 { x, y },
-                size: Vec2 { x: w, y: h },
-            } = area;
+            let min_size = self.calc_min_size(ctx.sizing);
+            log::debug!("{min_size:?} {area:?}");
+            //if min_size.x > area.size.x || min_size.y > area.size.y {
+            //    log::error!("Not rendering borders of block elem because area is too small");
+            //    return inner.render2(ctx, area);
+            //}
+
             inner.render2(
                 ctx,
                 Area {
                     pos: Vec2 {
-                        x: x.saturating_add(left.into()),
-                        y: y.saturating_add(top.into()),
+                        x: area.pos.x.saturating_add(left.into()),
+                        y: area.pos.y.saturating_add(top.into()),
                     },
                     size: Vec2 {
-                        x: w.saturating_sub(right.into()),
-                        y: h.saturating_sub(bottom.into()),
+                        x: area.size.x.saturating_sub(right.into()),
+                        y: area.size.y.saturating_sub(bottom.into()),
                     },
                 },
             )?;

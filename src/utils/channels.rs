@@ -35,6 +35,7 @@ pub fn stream_from_fn<T>(f: impl AsyncFnMut() -> Option<T>) -> impl Stream<Item 
     )
 }
 
+// TODO: Find a safer version of watch::Sender that is not prone to blocking and deadlocks
 pub type WatchTx<T> = tokio::sync::watch::Sender<T>;
 pub type WatchRx<T> = tokio::sync::watch::Receiver<T>;
 pub fn watch_chan<T>(init: T) -> (WatchTx<T>, WatchRx<T>) {

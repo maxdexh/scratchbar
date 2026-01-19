@@ -302,8 +302,6 @@ impl Module for TrayModule {
                             continue;
                         };
 
-                        let menu_kind;
-                        let tui;
                         match kind {
                             tui::InteractKind::Hover => {
                                 let items = self.state_rx.borrow().items.clone();
@@ -318,8 +316,7 @@ impl Module for TrayModule {
                                     continue;
                                 };
 
-                                menu_kind = MenuKind::Tooltip;
-                                tui = tui::Stack::vertical([
+                                let tui = tui::Stack::vertical([
                                     tui::StackItem::auto(tui::Stack::horizontal([
                                         tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
                                         tui::StackItem::auto(
@@ -334,8 +331,14 @@ impl Module for TrayModule {
                                         tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
                                     ])),
                                     tui::StackItem::auto(tui::Text::plain(description.as_str())),
-                                ])
-                                .into();
+                                ]);
+                                act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
+                                    monitor,
+                                    tui: tui.into(),
+                                    location,
+                                    menu_kind: MenuKind::Tooltip,
+                                    add_padding: true,
+                                }));
                             }
                             tui::InteractKind::Click(tui::MouseButton::Right) => {
                                 let menus = self.state_rx.borrow().menus.clone();
@@ -349,8 +352,7 @@ impl Module for TrayModule {
                                     continue;
                                 };
 
-                                menu_kind = MenuKind::Context;
-                                tui = tui::Block {
+                                let tui = tui::Block {
                                     borders: tui::Borders::all(),
                                     border_style: tui::Style {
                                         fg: Some(tui::Color::DarkGrey),
@@ -364,17 +366,17 @@ impl Module for TrayModule {
                                         addr,
                                         menu_path.as_ref(),
                                     )),
-                                }
-                                .into();
+                                };
+                                act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
+                                    monitor,
+                                    tui: tui.into(),
+                                    location,
+                                    menu_kind: MenuKind::Context,
+                                    add_padding: false,
+                                }));
                             }
                             _ => continue,
                         };
-                        act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
-                            monitor,
-                            tui,
-                            pos: location,
-                            menu_kind,
-                        }));
                     }
                 }
             }

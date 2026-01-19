@@ -217,8 +217,9 @@ impl Module for PpdModule {
                                 _ => act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
                                     monitor,
                                     tui: tui::Text::plain(profile).into(),
-                                    pos: location,
+                                    location,
                                     menu_kind: MenuKind::Tooltip,
+                                    add_padding: true,
                                 })),
                             }
                         } else {
