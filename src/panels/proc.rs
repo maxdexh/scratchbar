@@ -124,11 +124,10 @@ async fn run_term_inst_mgr(
     let (read_half, write_half) = socket.into_split();
 
     tasks.spawn(
-        read_cobs_sock::<TermEvent>(read_half, ev_tx, cancel.clone().drop_guard())
-            .with_cancellation_token_owned(cancel.clone()),
+        read_cobs_sock::<TermEvent>(read_half, ev_tx).with_cancellation_token_owned(cancel.clone()),
     );
     tasks.spawn(
-        write_cobs_sock::<TermUpdate>(write_half, updates, cancel.clone().drop_guard())
+        write_cobs_sock::<TermUpdate>(write_half, updates)
             .with_cancellation_token_owned(cancel.clone()),
     );
 
@@ -146,7 +145,7 @@ pub async fn term_proc_main() {
 }
 
 async fn term_proc_main_inner() -> anyhow::Result<()> {
-    let proc_tok = CancellationToken::new();
+    let mut tasks = JoinSet::new();
     let (mut ev_tx, upd_rx);
     {
         let socket = std::env::var_os(SOCK_PATH_VAR).context("Missing socket path env var")?;
@@ -159,8 +158,8 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         (ev_tx, ev_rx) = unb_chan::<TermEvent>();
         (upd_tx, upd_rx) = std::sync::mpsc::channel::<TermUpdate>();
 
-        tokio::spawn(read_cobs_sock(read, upd_tx, proc_tok.clone().drop_guard()));
-        tokio::spawn(write_cobs_sock(write, ev_rx, proc_tok.clone().drop_guard()));
+        tasks.spawn(read_cobs_sock(read, upd_tx));
+        tasks.spawn(write_cobs_sock(write, ev_rx));
     }
 
     crossterm::execute!(
@@ -171,28 +170,30 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
     )?;
     crossterm::terminal::enable_raw_mode()?;
 
-    let init_sizes = tui::Sizes::query()?;
+    let Some(init_sizes) = tui::Sizes::query()? else {
+        anyhow::bail!("Terminal reported window size of 0. Do not start as hidden!");
+    };
 
     if let Err(err) = ev_tx.try_emit(TermEvent::Sizes(init_sizes)) {
         return Err(err).context("Failed to send initial font size while starting panel. Exiting.");
     }
 
-    let proc_tok_clone = proc_tok.clone();
-    tokio::spawn(async move {
-        let _important_task = proc_tok_clone.drop_guard();
-        let mut events = crossterm::event::EventStream::new();
+    tasks.spawn(async move {
+        let mut events = crossterm::event::EventStream::new()
+            .filter_map(|res| res.context("Crossterm error").ok_or_log());
         while let Some(ev) = events.next().await {
-            match ev {
-                Err(err) => log::error!("Crossterm error: {err}"),
-                Ok(ev) => {
-                    if let crossterm::event::Event::Resize(_, _) = &ev
-                        && let Ok(sizes) = tui::Sizes::query().map_err(|err| log::error!("{err}"))
-                    {
-                        ev_tx.emit(TermEvent::Sizes(sizes));
-                    }
-                    ev_tx.emit(TermEvent::Crossterm(ev));
+            if let crossterm::event::Event::Resize(_, _) = &ev
+                && let Some(sizes) = tui::Sizes::query().ok_or_log()
+            {
+                if let Some(sizes) = sizes {
+                    ev_tx.emit(TermEvent::Sizes(sizes));
+                } else {
+                    log::warn!(
+                        "Terminal reported window size of 0 (this should only happen when hidden)"
+                    );
                 }
             }
+            ev_tx.emit(TermEvent::Crossterm(ev));
         }
     });
 
@@ -216,10 +217,10 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         }
     }
 
-    let proc_tok_clone = proc_tok.clone();
+    let cancel_blocking = CancellationToken::new();
+    let cancel_blocking_clone = cancel_blocking.clone();
     std::thread::spawn(move || {
-        let _important_task = proc_tok_clone.drop_guard();
-
+        let _auto_cancel = cancel_blocking_clone.drop_guard();
         use std::io::Write as _;
         let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
         while let Ok(upd) = upd_rx.recv() {
@@ -256,7 +257,12 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         }
     });
 
-    proc_tok.cancelled().await;
+    tokio::select! {
+        Some(res) = tasks.join_next() => {
+            res.ok_or_log();
+        }
+        () = cancel_blocking.cancelled() => {}
+    }
 
     Ok(())
 }
@@ -264,7 +270,6 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
 async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
     read: tokio::net::unix::OwnedReadHalf,
     mut tx: impl SharedEmit<T>,
-    _auto_cancel: tokio_util::sync::DropGuard,
 ) {
     use tokio::io::AsyncBufReadExt as _;
     let mut read = tokio::io::BufReader::new(read);
@@ -298,7 +303,6 @@ async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
 async fn write_cobs_sock<T: serde::Serialize>(
     mut write: tokio::net::unix::OwnedWriteHalf,
     stream: impl Stream<Item = T>,
-    _auto_cancel: tokio_util::sync::DropGuard,
 ) {
     use tokio::io::AsyncWriteExt as _;
     tokio::pin!(stream);

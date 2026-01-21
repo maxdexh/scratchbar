@@ -99,7 +99,7 @@ pub async fn main() {
             mkstart(ms.hypr.get(), ()),
             mkstart(
                 ms.fixed.get(),
-                tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
+                tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::empty()),
             ),
             mkstart(ms.tray.get(), ()),
             mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
@@ -107,8 +107,8 @@ pub async fn main() {
                 ms.pulse.get(),
                 modules::pulse::PulseConfig {
                     device_kind: modules::pulse::PulseDeviceKind::Source,
-                    muted_sym: tui::Text::plain(" ").into(),
-                    unmuted_sym: tui::Text::plain(" ").into(),
+                    muted_sym: tui::RawPrint::plain(" ").into(),
+                    unmuted_sym: tui::RawPrint::plain(" ").into(),
                 },
             ),
             mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
@@ -116,8 +116,8 @@ pub async fn main() {
                 ms.pulse.get(),
                 modules::pulse::PulseConfig {
                     device_kind: modules::pulse::PulseDeviceKind::Sink,
-                    muted_sym: tui::Text::plain(" ").into(),
-                    unmuted_sym: tui::Text::centered_symbol("", 2).into(),
+                    muted_sym: tui::RawPrint::plain(" ").into(),
+                    unmuted_sym: tui::RawPrint::center_symbol("", 2).into(),
                 },
             ),
             mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
@@ -125,12 +125,12 @@ pub async fn main() {
                 ms.ppd.get(),
                 modules::ppd::PpdConfig {
                     icons: FromIterator::<(String, tui::Elem)>::from_iter([
-                        ("balanced".into(), tui::Text::plain(" ").into()),
+                        ("balanced".into(), tui::RawPrint::plain(" ").into()),
                         (
                             "performance".into(),
-                            tui::Text::centered_symbol(" ", 2).into(),
+                            tui::RawPrint::center_symbol(" ", 2).into(),
                         ),
-                        ("power-saver".into(), tui::Text::plain(" ").into()),
+                        ("power-saver".into(), tui::RawPrint::plain(" ").into()),
                     ]),
                     ..Default::default()
                 },

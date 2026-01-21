@@ -3,10 +3,10 @@ pub use render::*;
 mod layout;
 pub use layout::*;
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-trait InteractTagBounds: std::any::Any + std::fmt::Debug + Send + Sync {}
-impl<T> InteractTagBounds for T where T: std::any::Any + std::fmt::Debug + Send + Sync {}
+trait InteractTagBounds: std::any::Any + fmt::Debug + Send + Sync {}
+impl<T> InteractTagBounds for T where T: std::any::Any + fmt::Debug + Send + Sync {}
 
 #[derive(Debug, Clone)]
 pub struct InteractTag {
@@ -23,7 +23,7 @@ impl InteractTag {
         // so make sure this is actually a deref!
         <dyn std::any::Any>::downcast_ref(&*self.inner as &dyn std::any::Any)
     }
-    pub fn new(inner: impl std::any::Any + std::fmt::Debug + Send + Sync) -> Self {
+    pub fn new(inner: impl std::any::Any + fmt::Debug + Send + Sync) -> Self {
         Self {
             inner: Arc::new(inner),
         }
@@ -31,111 +31,152 @@ impl InteractTag {
 }
 
 #[derive(Default, Debug, Clone)]
-pub enum Elem {
-    Text(Text),
+enum ElemKind {
+    Print(RawPrint),
     Image(Image),
     Stack(Stack),
     Block(Box<Block>),
     Interact(Box<InteractElem>),
-    Shared(Arc<Self>),
+    Shared(Arc<Elem>),
     #[default]
     Empty,
 }
+
+#[derive(Default, Debug, Clone)]
+pub struct Elem {
+    kind: ElemKind,
+}
+impl Elem {
+    pub fn empty() -> Self {
+        Self {
+            kind: ElemKind::Empty,
+        }
+    }
+}
 impl From<Stack> for Elem {
     fn from(value: Stack) -> Self {
-        Self::Stack(value)
+        Self {
+            kind: ElemKind::Stack(value),
+        }
     }
 }
 impl From<Image> for Elem {
     fn from(value: Image) -> Self {
-        Self::Image(value)
+        Self {
+            kind: ElemKind::Image(value),
+        }
     }
 }
 impl From<Block> for Elem {
     fn from(value: Block) -> Self {
-        Self::Block(Box::new(value))
+        Self {
+            kind: ElemKind::Block(Box::new(value)),
+        }
     }
 }
 impl From<InteractElem> for Elem {
     fn from(value: InteractElem) -> Self {
-        Self::Interact(Box::new(value))
-    }
-}
-impl From<Text> for Elem {
-    fn from(value: Text) -> Self {
-        Self::Text(value)
+        Self {
+            kind: ElemKind::Interact(Box::new(value)),
+        }
     }
 }
 impl From<Arc<Elem>> for Elem {
     fn from(value: Arc<Elem>) -> Self {
-        Self::Shared(value)
+        Self {
+            kind: ElemKind::Shared(value),
+        }
+    }
+}
+impl<D: Into<String>> From<RawPrint<D>> for Elem {
+    fn from(value: RawPrint<D>) -> Self {
+        Self {
+            kind: ElemKind::Print(value.map(Into::into)),
+        }
+    }
+}
+impl From<PlainLines<'_>> for Elem {
+    fn from(value: PlainLines<'_>) -> Self {
+        Stack::horizontal(
+            value
+                .text
+                .lines()
+                .map(|line| StackItem::auto(RawPrint::plain(line).styled(value.style))),
+        )
+        .into()
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct TextLine {
-    pub text: String,
-    /// The height of the line. Relevant for the text sizing and graphics protocols.
-    /// Only used for layout calculations, including determining where the next line is printed in
-    /// a [`Text`] element.
-    pub height: u16,
+#[derive(Clone, Debug)]
+pub struct RawPrint<D = String> {
+    pub raw: D,
+    pub size: Vec2<u16>,
 }
-impl TextLine {
-    pub fn plain(text: String) -> Self {
-        if text.contains(['\n', '\x1b']) {
-            log::warn!("Plain text line {text:?} should not contain <ESC> or newlines.");
-        }
-        Self { text, height: 1 }
-    }
-}
-
-// FIXME: Remove in favor of TextLine
-#[derive(Debug, Default, Clone)]
-pub struct Text {
-    // FIXME: Consider removing this in favor of utility functions for styling and size calculations
-    pub style: Style,
-    pub lines: Vec<TextLine>,
-    /// The width of the longest line in cells. Only used for layout calculations.
-    /// Each line is printed as-is, regardless of this value.
-    pub width: u16,
-}
-impl Text {
-    pub fn plain(text: impl AsRef<str>) -> Self {
-        let text = text.as_ref();
-        if text.contains('\x1b') {
-            log::warn!("Plain text {text:?} should not contain <ESC>.");
-        }
-        let mut lines = Vec::with_capacity(text.lines().count());
-        let mut width = 0u16;
-        for line in text.lines() {
-            // FIXME: Use unicode-segmentation
-            width = std::cmp::max(width, line.chars().count().try_into().unwrap_or(u16::MAX));
-            lines.push(TextLine::plain(line.into()));
+impl<D> RawPrint<D> {
+    pub fn plain(text: D) -> Self
+    where
+        D: AsRef<str>,
+    {
+        // FIXME: Strip control characters
+        let s = text.as_ref();
+        if s.chars().any(|c| c.is_ascii_control()) {
+            log::warn!("Plain text {s:?} should not contain ascii control chars");
         }
         Self {
-            lines,
-            width,
+            size: Vec2 {
+                x: unicode_width::UnicodeWidthStr::width(s)
+                    .try_into()
+                    .unwrap_or(u16::MAX),
+                y: 1,
+            },
+            raw: text,
+        }
+    }
+
+    pub fn center_symbol(sym: D, width: u16) -> RawPrint<impl fmt::Display + Into<String>>
+    where
+        D: fmt::Display,
+    {
+        RawPrint {
+            raw: KittyTextSize::center_width(width).apply(sym),
+            size: Vec2 { x: width, y: 1 },
+        }
+    }
+
+    pub fn styled(self, style: Style) -> RawPrint<impl fmt::Display + Into<String>>
+    where
+        D: fmt::Display,
+    {
+        let Self { size, raw } = self;
+        RawPrint {
+            size,
+            raw: style.apply(raw),
+        }
+    }
+
+    pub fn map<T>(self, f: impl FnOnce(D) -> T) -> RawPrint<T> {
+        RawPrint {
+            raw: f(self.raw),
+            size: self.size,
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct PlainLines<'a> {
+    pub text: &'a str,
+    pub style: Style,
+}
+impl<'a> PlainLines<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
             style: Default::default(),
         }
     }
     pub fn styled(mut self, style: Style) -> Self {
         self.style = style;
         self
-    }
-    pub fn centered_symbol(sym: impl std::fmt::Display, width: u16) -> Self {
-        Self {
-            width,
-            style: Default::default(),
-            lines: [TextLine {
-                height: 1,
-                // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
-                // - w      set width to 2
-                // - h      ceter the text horizontally
-                // - n,d    use fractional scale of 1:1. kitty ignores w without this
-                text: format!("\x1b]66;w={width}:h=2:n=1:d=1;{sym}\x07"),
-            }]
-            .into(),
-        }
     }
 }
 
@@ -157,8 +198,8 @@ pub struct Image {
     pub sizing: ImageSizeMode,
 }
 
-impl std::fmt::Debug for Image {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Image {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut hasher = std::hash::DefaultHasher::new();
         std::hash::Hasher::write(&mut hasher, &self.img);
         let hash = std::hash::Hasher::finish(&hasher);
@@ -225,7 +266,7 @@ pub struct StackItem {
 }
 impl StackItem {
     pub fn spacing(len: u16) -> Self {
-        Self::length(len, Elem::Empty)
+        Self::length(len, Elem::empty())
     }
     pub fn auto(elem: impl Into<Elem>) -> Self {
         Self::new(Constr::Auto, elem)
@@ -254,9 +295,13 @@ pub struct Style {
     pub bg: Option<Color>,
     pub modifier: Modifier,
     pub underline_color: Option<Color>,
+
+    #[doc(hidden)]
+    pub __non_exhaustive: (),
 }
 pub type Color = crossterm::style::Color;
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(Rust, packed)]
 pub struct Modifier {
     pub bold: bool,
     pub dim: bool,
@@ -264,6 +309,32 @@ pub struct Modifier {
     pub underline: bool,
     pub hidden: bool,
     pub strike: bool,
+}
+
+// TODO: enums
+#[derive(Default, Debug, Clone, Copy)]
+pub struct KittyTextSize {
+    pub s: Option<u16>,
+    pub w: Option<u16>,
+    pub n: Option<u16>,
+    pub d: Option<u16>,
+    pub v: Option<u16>,
+    pub h: Option<u16>,
+}
+impl KittyTextSize {
+    pub fn center_width(width: u16) -> Self {
+        // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
+        // - w      sets the width of the multicell
+        // - h      ceter the text horizontally
+        // - n,d    use fractional scale of 1:1. kitty ignores w without this
+        Self {
+            w: Some(width),
+            h: Some(2),
+            d: Some(1),
+            n: Some(1),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]

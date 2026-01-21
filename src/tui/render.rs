@@ -48,28 +48,42 @@ impl Tui {
 }
 impl Render for Elem {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+        self.kind.render(ctx, area)
+    }
+    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
+        self.kind.calc_min_size(args)
+    }
+}
+impl Render for ElemKind {
+    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
+        crossterm::queue!(
+            ctx.writer,
+            crossterm::cursor::MoveTo(area.pos.x, area.pos.y),
+        )?;
         match self {
             Self::Stack(subdiv) => subdiv.render(ctx, area),
             Self::Image(image) => image.render(ctx, area),
             Self::Block(block) => block.render(ctx, area),
-            Self::Text(text) => text.render(ctx, area),
             Self::Interact(elem) => {
                 ctx.layout.insert(area, elem.payload.clone());
                 elem.elem.render(ctx, area)
             }
             Self::Shared(elem) => elem.render(ctx, area),
             Self::Empty => Ok(()),
+            Self::Print(raw_print) => {
+                crossterm::queue!(ctx.writer, crossterm::style::Print(raw_print.raw.as_str()))
+            }
         }
     }
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         match self {
             Self::Stack(subdiv) => subdiv.calc_min_size(args),
-            Self::Text(text) => text.calc_min_size(args),
             Self::Image(image) => image.calc_min_size(args),
             Self::Block(block) => block.calc_min_size(args),
             Self::Interact(elem) => elem.elem.calc_min_size(args),
             Self::Shared(elem) => elem.calc_min_size(args),
             Self::Empty => Vec2::default(),
+            Self::Print(raw_print) => raw_print.size,
         }
     }
 }
@@ -262,37 +276,6 @@ impl Stack {
         size
     }
 }
-impl Render for Text {
-    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
-        let mut y_off = 0;
-        // TODO: Style
-        for line in &self.lines {
-            let Some(y) = area.pos.y.checked_add(y_off) else {
-                log::error!("Vertical position overflow");
-                break;
-            };
-            crossterm::queue!(
-                ctx.writer,
-                crossterm::cursor::MoveTo(area.pos.x, y),
-                crossterm::style::Print(stylize(line.text.as_str(), self.style)),
-            )?;
-            let Some(new_y_off) = y_off.checked_add(line.height) else {
-                log::error!("Vertical position overflow");
-                break;
-            };
-            y_off = new_y_off;
-        }
-
-        Ok(())
-    }
-
-    fn calc_min_size(&self, _: &SizingArgs) -> Vec2<u16> {
-        Vec2 {
-            x: self.width,
-            y: self.lines.iter().map(|line| line.height).sum(),
-        }
-    }
-}
 impl Render for Block {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let Borders {
@@ -326,7 +309,7 @@ impl Render for Block {
         }
 
         let mut horiz_border = |l: &str, r: &str, y: u16| {
-            let m = stylize(
+            let m = self.border_style.apply(
                 self.border_set.horizontal.repeat(
                     area.size
                         .x
@@ -334,10 +317,9 @@ impl Render for Block {
                         .saturating_sub(right.into())
                         .into(),
                 ),
-                self.border_style,
             );
-            let l = stylize(if left { l } else { "" }, self.border_style);
-            let r = stylize(if right { r } else { "" }, self.border_style);
+            let l = self.border_style.apply(if left { l } else { "" });
+            let r = self.border_style.apply(if right { r } else { "" });
 
             crossterm::queue!(
                 ctx.writer,
@@ -370,10 +352,9 @@ impl Render for Block {
                 crossterm::queue!(
                     ctx.writer,
                     crossterm::cursor::MoveTo(x, y),
-                    crossterm::style::Print(stylize(
-                        &self.border_set.vertical as &str,
-                        self.border_style
-                    )),
+                    crossterm::style::Print(
+                        self.border_style.apply(&self.border_set.vertical as &str)
+                    ),
                 )?;
             }
             Ok(())
@@ -414,58 +395,97 @@ impl Block {
         }
     }
 }
-fn stylize<S>(
-    s: S,
-    Style {
-        fg,
-        bg,
-        modifier:
-            Modifier {
-                bold,
-                dim,
-                italic,
-                underline,
-                hidden,
-                strike,
-            },
-        underline_color,
-    }: Style,
-) -> S::Styled
+
+struct DisplayFn<F: Fn(&mut fmt::Formatter) -> fmt::Result>(F);
+impl<F> fmt::Display for DisplayFn<F>
 where
-    S: crossterm::style::Stylize<
-            Styled: crossterm::style::Stylize<Styled = S::Styled> + std::fmt::Display,
-        >,
+    F: Fn(&mut fmt::Formatter) -> fmt::Result,
 {
-    use crossterm::style::Stylize;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0(f)
+    }
+}
+impl<F> From<DisplayFn<F>> for String
+where
+    F: Fn(&mut fmt::Formatter) -> fmt::Result,
+{
+    fn from(value: DisplayFn<F>) -> Self {
+        value.to_string()
+    }
+}
 
-    let mut s = s.stylize();
-    if bold {
-        s = s.bold();
-    }
-    if dim {
-        s = s.dim();
-    }
-    if italic {
-        s = s.italic();
-    }
-    if underline {
-        s = s.underlined();
-    }
-    if hidden {
-        s = s.hidden();
-    }
-    if strike {
-        s = s.crossed_out();
-    }
-    if let Some(fg) = fg {
-        s = s.with(fg);
-    }
-    if let Some(bg) = bg {
-        s = s.on(bg);
-    }
-    if let Some(col) = underline_color {
-        s = s.underline(col);
-    }
+impl Style {
+    pub fn apply(self, d: impl std::fmt::Display) -> impl std::fmt::Display + Into<String> {
+        use crossterm::style::{StyledContent, Stylize};
 
-    s
+        let Self {
+            fg,
+            bg,
+            modifier:
+                Modifier {
+                    bold,
+                    dim,
+                    italic,
+                    underline,
+                    hidden,
+                    strike,
+                },
+            underline_color,
+            __non_exhaustive: (),
+        } = self;
+
+        let mut styled = StyledContent::new(Default::default(), d);
+        if bold {
+            styled = styled.bold();
+        }
+        if dim {
+            styled = styled.dim();
+        }
+        if italic {
+            styled = styled.italic();
+        }
+        if underline {
+            styled = styled.underlined();
+        }
+        if hidden {
+            styled = styled.hidden();
+        }
+        if strike {
+            styled = styled.crossed_out();
+        }
+        if let Some(fg) = fg {
+            styled = styled.with(fg);
+        }
+        if let Some(bg) = bg {
+            styled = styled.on(bg);
+        }
+        if let Some(col) = underline_color {
+            styled = styled.underline(col);
+        }
+        DisplayFn(move |f| write!(f, "{styled}"))
+    }
+}
+impl KittyTextSize {
+    pub fn apply(self, inner: impl std::fmt::Display) -> impl std::fmt::Display + Into<String> {
+        let Self { s, w, n, d, v, h } = self;
+        DisplayFn(move |f: &mut std::fmt::Formatter| {
+            write!(f, "\x1b]66;s={}", s.unwrap_or(1))?;
+            if let Some(w) = w {
+                write!(f, ":w={w}")?;
+            }
+            if let Some(n) = n {
+                write!(f, ":n={n}")?;
+            }
+            if let Some(d) = d {
+                write!(f, ":d={d}")?;
+            }
+            if let Some(v) = v {
+                write!(f, ":v={v}")?;
+            }
+            if let Some(h) = h {
+                write!(f, ":h={h}")?;
+            }
+            write!(f, ";{inner}\x07")
+        })
+    }
 }

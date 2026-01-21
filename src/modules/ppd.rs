@@ -216,7 +216,7 @@ impl Module for PpdModule {
                                 }
                                 _ => act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
                                     monitor,
-                                    tui: tui::Text::plain(profile).into(),
+                                    tui: tui::PlainLines::new(profile).into(),
                                     location,
                                     menu_kind: MenuKind::Tooltip,
                                 })),

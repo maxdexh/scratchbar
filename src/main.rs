@@ -9,6 +9,13 @@ mod utils;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    tokio::select! {
+        () = main_inner() => {}
+        () = exit_signal() => {}
+    }
+}
+
+async fn main_inner() {
     use crate::logging::{ProcKindForLogger, init_logger};
     use crate::utils::ResultExt as _;
 
@@ -29,5 +36,32 @@ async fn main() {
             simple_bar::main().await
         }
         _ => log::error!("Bad arguments"),
+    }
+}
+
+async fn exit_signal() {
+    use tokio::signal::unix::SignalKind;
+    let mut tasks = tokio::task::JoinSet::new();
+    for signal in [
+        SignalKind::interrupt(),
+        SignalKind::quit(),
+        SignalKind::alarm(),
+        SignalKind::hangup(),
+        SignalKind::pipe(),
+        SignalKind::terminate(),
+        SignalKind::user_defined1(),
+        SignalKind::user_defined2(),
+    ] {
+        if let Some(mut signal) = utils::ResultExt::ok_or_log(tokio::signal::unix::signal(signal)) {
+            tasks.spawn(async move { signal.recv().await.is_some() });
+        }
+    }
+    loop {
+        let Some(quit) = tasks.join_next().await else {
+            return futures::future::pending().await;
+        };
+        if utils::ResultExt::ok_or_log(quit) != Some(false) {
+            break;
+        }
     }
 }

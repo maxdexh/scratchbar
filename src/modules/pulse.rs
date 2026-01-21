@@ -398,7 +398,7 @@ impl Module for PulseModule {
                             } else {
                                 unmuted_sym.clone()
                             }),
-                            tui::StackItem::auto(tui::Text::plain(format!(
+                            tui::StackItem::auto(tui::RawPrint::plain(format!(
                                 "{:>3}%",
                                 (volume * 100.0).round() as u32
                             ))),

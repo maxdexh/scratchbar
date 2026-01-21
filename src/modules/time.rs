@@ -33,7 +33,7 @@ impl Module for TimeModule {
             let now = chrono::Local::now();
             let minute = now.minute();
             if last_minutes != Some(minute) {
-                let tui = tui::Text::plain(now.format("%H:%M %d/%m").to_string());
+                let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
                 act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(tui)));
 
                 last_minutes = Some(minute);

@@ -447,7 +447,7 @@ impl Module for EnergyModule {
                             mod_inst: inst_id.clone(),
                             tag: tui::InteractTag::new(EnergyInteractTag),
                         },
-                        elem: tui::Text::plain(energy).into(),
+                        elem: tui::RawPrint::plain(energy).into(),
                     },
                 )));
             }
@@ -488,7 +488,7 @@ impl Module for EnergyModule {
                         if let tui::InteractKind::Hover = kind {
                             act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
                                 monitor,
-                                tui: tui::Text::plain(text).into(),
+                                tui: tui::RawPrint::plain(text).into(),
                                 location,
                                 menu_kind: MenuKind::Tooltip,
                             }))

@@ -196,7 +196,7 @@ impl Sizes {
             y: ph / h,
         }
     }
-    pub fn query() -> anyhow::Result<Self> {
+    pub fn query() -> anyhow::Result<Option<Self>> {
         let crossterm::terminal::WindowSize {
             rows,
             columns,
@@ -204,9 +204,9 @@ impl Sizes {
             height,
         } = crossterm::terminal::window_size()?;
         if width == 0 || height == 0 {
-            anyhow::bail!("Terminal does not support window_size");
+            return Ok(None);
         }
-        Ok(Self {
+        Ok(Some(Self {
             cell_size: Vec2 {
                 x: columns,
                 y: rows,
@@ -215,6 +215,6 @@ impl Sizes {
                 x: width,
                 y: height,
             },
-        })
+        }))
     }
 }

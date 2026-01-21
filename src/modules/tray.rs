@@ -320,19 +320,29 @@ impl Module for TrayModule {
 
                                 let tui = tui::Stack::vertical([
                                     tui::StackItem::auto(tui::Stack::horizontal([
-                                        tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
+                                        tui::StackItem::new(
+                                            tui::Constr::Fill(1),
+                                            tui::Elem::empty(),
+                                        ),
                                         tui::StackItem::auto(
-                                            tui::Text::plain(title.as_str()).styled(tui::Style {
-                                                modifier: tui::Modifier {
-                                                    bold: true,
+                                            tui::PlainLines::new(title.as_str()).styled(
+                                                tui::Style {
+                                                    modifier: tui::Modifier {
+                                                        bold: true,
+                                                        ..Default::default()
+                                                    },
                                                     ..Default::default()
                                                 },
-                                                ..Default::default()
-                                            }),
+                                            ),
                                         ),
-                                        tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::Empty),
+                                        tui::StackItem::new(
+                                            tui::Constr::Fill(1),
+                                            tui::Elem::empty(),
+                                        ),
                                     ])),
-                                    tui::StackItem::auto(tui::Text::plain(description.as_str())),
+                                    tui::StackItem::auto(tui::PlainLines::new(
+                                        description.as_str(),
+                                    )),
                                 ]);
                                 act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
                                     monitor,
@@ -442,8 +452,8 @@ fn tray_menu_item_to_tui(
                 {
                     let mut lines = label.lines();
                     let first_line = lines.next().unwrap_or_default();
-                    tui::StackItem::auto(tui::Stack::vertical([
-                        tui::StackItem::length(
+                    tui::StackItem::auto(tui::Stack::vertical(Iterator::chain(
+                        std::iter::once(tui::StackItem::length(
                             1,
                             tui::Stack::horizontal([
                                 tui::StackItem::auto(tui::Image {
@@ -451,15 +461,13 @@ fn tray_menu_item_to_tui(
                                     sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
                                 }),
                                 tui::StackItem::spacing(1),
-                                tui::StackItem::auto(tui::Text::plain(first_line)),
+                                tui::StackItem::auto(tui::PlainLines::new(first_line)),
                             ]),
-                        ),
-                        tui::StackItem::auto(tui::Text::plain(
-                            lines.collect::<Vec<&str>>().join("\n"),
                         )),
-                    ]))
+                        lines.map(tui::RawPrint::plain).map(tui::StackItem::auto),
+                    )))
                 } else {
-                    tui::StackItem::auto(tui::Text::plain(label))
+                    tui::StackItem::auto(tui::PlainLines::new(label))
                 },
                 tui::StackItem::spacing(1),
             ])

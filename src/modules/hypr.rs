@@ -172,7 +172,7 @@ impl Module for HyprModule {
                             };
                             let wss = by_monitor.entry(monitor).or_insert_with(Vec::new);
                             wss.push(tui::StackItem::auto(tui::InteractElem {
-                                elem: tui::Text::plain(&ws.name)
+                                elem: tui::RawPrint::plain(&ws.name)
                                     .styled(tui::Style {
                                         fg: ws.is_active.then_some(tui::Color::Green),
                                         ..Default::default()

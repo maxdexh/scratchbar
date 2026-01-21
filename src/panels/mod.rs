@@ -247,10 +247,8 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
     }
 }
 
-// FIXME: It would be nice to use this with padding-top and
-// padding-bottom, but using those makes crossterm's window_size
-// function fail.
-const VERTICAL_PADDING: u16 = 0;
+/// Adds an extra line and centers the content of the menu with padding of half a cell.
+const VERTICAL_PADDING: bool = true;
 const HORIZONTAL_PADDING: u16 = 4;
 
 async fn run_monitor(
@@ -375,6 +373,8 @@ async fn run_monitor(
                         "-o=background_opacity=0.85".into(),
                         "-o=background=black".into(),
                         "-o=foreground=white".into(),
+                        // Center within leftover pixels if cell size does not divide window size.
+                        "-o=placement-strategy=center".into(),
                         // location of the menu
                         "--edge=top".into(),
                         // disable hiding the mouse
@@ -409,6 +409,17 @@ async fn run_monitor(
                     "resize-os-window".into(),
                     "--action=hide".into(),
                 ]));
+                if VERTICAL_PADDING {
+                    // HACK: For some reason, using half font height padding at top and bottom
+                    // shrinks the height by 2 cells. This way of doing it only works assuming
+                    // that we do not have more than 1 pixel to spare for the padding and it
+                    // can only be used for vertical padding of 1 cell in total.
+                    menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
+                        "set-spacing".into(),
+                        "padding-top=1".into(),
+                        "padding-bottom=1".into(),
+                    ]));
+                }
 
                 let (s, _) = watcher_sock.accept().await?;
                 anyhow::Ok((menu, s))
@@ -594,7 +605,7 @@ async fn run_monitor(
                     // geometry (since this is controlled by the compositor). So we have to get creative by
                     // using the right and left margin to control both position and size of the panel.
 
-                    let lines = cached_tui_size.y.saturating_add(VERTICAL_PADDING);
+                    let lines = cached_tui_size.y.saturating_add(VERTICAL_PADDING.into());
 
                     // cap position at monitor's size
                     let x = std::cmp::min(location.x, monitor.width);
