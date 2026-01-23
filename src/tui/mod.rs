@@ -69,7 +69,7 @@ impl From<Arc<Elem>> for Elem {
 impl<D: fmt::Display> From<RawPrint<D>> for Elem {
     fn from(value: RawPrint<D>) -> Self {
         Self {
-            kind: ElemKind::Print(value.map(|it| it.to_string())),
+            kind: ElemKind::Print(value.map_display(|it| it.to_string())),
             ..Default::default()
         }
     }
@@ -133,7 +133,7 @@ impl<D> RawPrint<D> {
         }
     }
 
-    pub fn map<T>(self, f: impl FnOnce(D) -> T) -> RawPrint<T> {
+    pub fn map_display<T>(self, f: impl FnOnce(D) -> T) -> RawPrint<T> {
         RawPrint {
             raw: f(self.raw),
             size: self.size,

@@ -486,9 +486,6 @@ async fn run_monitor(
 
                     let lines = cached_tui_size.y.saturating_add(VERTICAL_PADDING.into());
 
-                    // cap position at monitor's size
-                    let x = std::cmp::min(location.x, monitor.width);
-
                     // Find the distance between window edge and center
                     let half_pix_w = {
                         let cell_pix_w = u32::from(menu.sizes.font_size().x);
@@ -497,23 +494,20 @@ async fn run_monitor(
                         pix_w.div_ceil(2)
                     };
 
+                    // Clamp position such that we fit. Note that this does not guarantee
+                    // that there is enough space for the entire width.
+                    let x = location.x.clamp(
+                        half_pix_w, //
+                        monitor.width.saturating_sub(half_pix_w),
+                    );
+
                     // The left margin should be such that half the space is between
                     // left margin and x. Use saturating_sub so that the left
                     // margin becomes zero if the width would reach outside the screen.
                     let mleft = x.saturating_sub(half_pix_w);
 
-                    // Get the overshoot, i.e. the amount lost to saturating_sub (we have to account for it
-                    // in the right margin). For this observe that a.saturating_sub(b) = a - min(a, b) and
-                    // therefore the overshoot is:
-                    // a.saturating_sub(b) - (a - b)
-                    // = a - min(a, b) - (a - b)
-                    // = b - min(a, b)
-                    // = b.saturating_sub(a)
-                    let overshoot = half_pix_w.saturating_sub(x);
-
-                    let mright = (monitor.width - x)
-                        .saturating_sub(half_pix_w)
-                        .saturating_sub(overshoot);
+                    // The right margin is calculated the same way, but starting from the right edge.
+                    let mright = (monitor.width - x).saturating_sub(half_pix_w);
 
                     // The font size (on which cell->pixel conversion is based) and the monitor's
                     // size are in physical pixels. This makes sense because different monitors can

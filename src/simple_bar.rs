@@ -161,11 +161,85 @@ async fn time_module(
     ModuleArgs {
         tui_tx,
         mut reload_rx,
+        menu_tx,
         ..
     }: ModuleArgs,
 ) {
-    use chrono::Timelike;
+    use chrono::{Datelike, Timelike};
     use std::time::Duration;
+
+    let on_interact = tui::InteractCallback::from_fn(move |interact| match interact.kind {
+        tui::InteractKind::Hover => {
+            let now = chrono::Local::now().date_naive();
+            let title = now.format("%B %Y").to_string();
+
+            let Some(first_day_offset) = now
+                .with_day(1)
+                .map(|first| first.weekday() as u16)
+                .context("Failed to set day")
+                .ok_or_log()
+            else {
+                return;
+            };
+
+            let num_weeks = usize::div_ceil(
+                usize::from(now.num_days_in_month()) + usize::from(first_day_offset),
+                7,
+            );
+            let mut lines = vec![vec![[tui::StackItem::spacing(2)]; 7]; num_weeks];
+
+            for n0 in 0u16..now.num_days_in_month().into() {
+                let n1 = n0 + 1;
+                let Some(day) = now
+                    .with_day(n1.into())
+                    .with_context(|| format!("Failed to set day {n1}"))
+                    .ok_or_log()
+                else {
+                    return;
+                };
+                let week_in_month = (first_day_offset + n0) / 7;
+                let item = &mut lines[usize::from(week_in_month)][day.weekday() as usize];
+                *item = [tui::StackItem::auto({
+                    let it = tui::RawPrint::plain(format!("{n1:>2}"));
+                    if now == day {
+                        it.styled(tui::Style {
+                            fg: Some(tui::Color::Green),
+                            ..Default::default()
+                        })
+                        .map_display(|styled| styled.to_string())
+                    } else {
+                        it
+                    }
+                })];
+            }
+            let weekday_line = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+                .map(|d| [tui::StackItem::auto(tui::RawPrint::plain(d))])
+                .into();
+
+            let title = tui::StackItem::auto(tui::RawPrint::plain(title).styled(tui::Style {
+                modifier: tui::Modifier {
+                    bold: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }));
+            let mut parts = vec![title];
+            for line in std::iter::once(weekday_line).chain(lines) {
+                let line = line.join(&tui::StackItem::spacing(1));
+                let line = tui::Stack::horizontal(line);
+                parts.push(tui::StackItem::auto(line));
+            }
+            _ = menu_tx.send(OpenMenu {
+                monitor: interact.monitor,
+                tui: tui::Stack::vertical(parts).into(),
+                location: interact.location,
+                menu_kind: MenuKind::Tooltip,
+            });
+        }
+        _ => {
+            //
+        }
+    });
 
     let mut prev_minutes = 61;
     loop {
@@ -173,7 +247,9 @@ async fn time_module(
         let minute = now.minute();
         if prev_minutes != minute {
             let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
-            tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(tui)));
+            tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
+                tui::Elem::from(tui).on_interact(on_interact.clone()),
+            )));
 
             prev_minutes = minute;
         } else {
