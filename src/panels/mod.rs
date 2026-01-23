@@ -11,83 +11,36 @@ use tokio_stream::StreamExt;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
-    modules::prelude::{MenuKind, ModuleAct, OpenMenu},
-    monitors::{MonitorEvent, MonitorInfo},
+    monitors::MonitorInfo,
     tui,
     utils::{
-        CancelDropGuard, Emit, EmitResult, ReloadRx, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx,
-        WatchTx, unb_chan,
+        CancelDropGuard, Emit, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, unb_chan, watch_chan,
     },
 };
 
+// FIXME: Add to args of run_manager
 const EDGE: &str = "top";
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct ModInstIdImpl(u64);
+/// Adds an extra line and centers the content of the menu with padding of half a cell.
+const VERTICAL_PADDING: bool = true;
+const HORIZONTAL_PADDING: u16 = 4;
 
 #[derive(Clone, Debug)]
-pub struct ModuleActTxImpl {
-    id: ModInstIdImpl,
-    tx: UnbTx<Upd>,
+pub struct OpenMenu {
+    pub monitor: Arc<str>,
+    pub tui: tui::Elem,
+    pub location: tui::Vec2<u32>,
+    pub menu_kind: MenuKind,
 }
-impl Emit<ModuleAct> for ModuleActTxImpl {
-    fn try_emit(&self, val: ModuleAct) -> EmitResult<ModuleAct> {
-        self.tx
-            .try_emit(Upd::Act(self.id.clone(), val))
-            .map_err(|err| err.retype())
-    }
-}
-
-pub enum BarMgrUpd {
-    LoadModules(LoadModules),
-}
-pub struct BarMgrModuleArgs {
-    pub act_tx: ModuleActTxImpl,
-    pub reload_rx: crate::utils::ReloadRx,
-    pub cancel: tokio_util::sync::CancellationToken,
-    pub inst_id: ModInstIdImpl,
-}
-pub struct BarMgrModuleStartArgs {
-    pub start: Box<dyn FnOnce(BarMgrModuleArgs) -> anyhow::Result<()> + Send>,
+#[derive(Debug, Clone, Copy)]
+pub enum MenuKind {
+    Tooltip,
+    Context,
 }
 
-pub struct LoadModules {
-    pub modules: Vec<BarMgrModuleStartArgs>,
-}
-
-struct ModuleInst {
-    _cancel: CancelDropGuard,
-    tui: BarTuiElem,
-}
-fn mod_inst(
-    inst_id: ModInstIdImpl,
-    reload_rx: ReloadRx,
-    act_tx: ModuleActTxImpl,
-) -> (ModuleInst, BarMgrModuleArgs) {
-    let cancel = CancellationToken::new();
-
-    (
-        ModuleInst {
-            _cancel: cancel.clone().into(),
-            tui: BarTuiElem::Hide,
-        },
-        BarMgrModuleArgs {
-            cancel,
-            act_tx,
-            reload_rx,
-            inst_id,
-        },
-    )
-}
-
-enum Upd {
-    Bar(BarMgrUpd),
-    Monitor(MonitorEvent),
-    Act(ModInstIdImpl, ModuleAct),
-}
-
+// FIXME: Take Vec<StackItem> (hide becomes empty list), add helper methods
 #[derive(Debug, Clone)]
-enum BarTuiElem {
+pub enum BarTuiElem {
     Shared(tui::StackItem),
     ByMonitor(HashMap<Arc<str>, tui::StackItem>),
     Hide,
@@ -108,63 +61,22 @@ fn gather_bar_tui(bar_tui: &[BarTuiElem], monitor: &MonitorInfo) -> tui::Tui {
     }
 }
 
-pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'static) {
-    tokio::pin!(bar_upd_rx);
+pub async fn run_manager(
+    bar_rx: WatchRx<Vec<WatchRx<BarTuiElem>>>,
+    menu_rx: impl Stream<Item = OpenMenu>,
+    mut reload_tx: ReloadTx,
+) {
+    tokio::pin!(menu_rx);
+    let mut monitors = HashMap::<_, (_, CancelDropGuard)>::new();
+    let (monitor_tx, mut monitor_rx) = unb_chan();
 
-    let mut reload_tx = crate::utils::ReloadTx::new();
-
-    #[derive(Default)]
-    struct State {
-        modules: HashMap<ModInstIdImpl, ModuleInst>,
-        module_order: Vec<ModInstIdImpl>,
-        monitors: HashMap<Arc<str>, Monitor>,
-    }
-    struct Monitor {
-        menu_tx: UnbTx<OpenMenu>,
-        _cancel: CancelDropGuard,
-    }
-    let mut state = State::default();
-    let bar_tui_tx = WatchTx::new(Vec::new());
-
-    let (mgr_upd_tx, mut mgr_upd_rx) = unb_chan();
-
-    let mut next_mod_id = 0;
-    let mut next_mod_id = move || -> ModInstIdImpl {
-        next_mod_id += 1;
-        ModInstIdImpl(next_mod_id)
-    };
-
-    crate::monitors::connect(mgr_upd_tx.clone().with(Upd::Monitor));
+    crate::monitors::connect(monitor_tx.clone());
 
     loop {
-        // TODO: listen for monitor cancellations
-        let upd = tokio::select! {
-            Some(upd) = bar_upd_rx.next() => Upd::Bar(upd),
-            Some(upd) = mgr_upd_rx.next() => upd,
-        };
-        match upd {
-            Upd::Bar(BarMgrUpd::LoadModules(LoadModules { modules })) => {
-                for m in modules {
-                    let id = next_mod_id();
-                    let (inst, args) = mod_inst(
-                        id.clone(),
-                        reload_tx.subscribe(),
-                        ModuleActTxImpl {
-                            id: id.clone(),
-                            tx: mgr_upd_tx.clone(),
-                        },
-                    );
-                    if (m.start)(args).ok_or_log().is_none() {
-                        continue;
-                    }
-                    state.modules.insert(id.clone(), inst);
-                    state.module_order.push(id);
-                }
-                reload_tx.reload();
-            }
-            Upd::Monitor(ev) => {
+        tokio::select! {
+            Some(ev) = monitor_rx.next() => {
                 for monitor in ev.removed() {
-                    state.monitors.remove(monitor);
+                    monitors.remove(monitor);
                 }
                 for monitor in ev.added_or_changed() {
                     let cancel = CancellationToken::new();
@@ -172,78 +84,33 @@ pub async fn run_manager(bar_upd_rx: impl Stream<Item = BarMgrUpd> + Send + 'sta
                     tokio::spawn(run_monitor(
                         monitor.clone(),
                         cancel.clone(),
-                        bar_tui_tx.subscribe(),
+                        bar_rx.clone(),
                         menu_rx,
                         reload_tx.clone(),
                     ));
-                    state.monitors.insert(
-                        monitor.name.clone(),
-                        Monitor {
-                            menu_tx,
-                            _cancel: cancel.into(),
-                        },
-                    );
+                    monitors.insert(monitor.name.clone(), (menu_tx, cancel.into()));
                 }
                 reload_tx.reload();
             }
-            Upd::Act(id, act) => {
-                if let Some(module) = state
-                    .modules
-                    .get_mut(&id)
-                    .with_context(|| format!("Unknown module id {id:?}"))
-                    .ok_or_log()
-                {
-                    let mut rerender = false;
-                    match act {
-                        ModuleAct::RenderByMonitor(elems) => {
-                            module.tui = BarTuiElem::ByMonitor(elems);
-                            rerender = true
-                        }
-                        ModuleAct::RenderAll(elem) => {
-                            module.tui = BarTuiElem::Shared(elem);
-                            rerender = true
-                        }
-                        ModuleAct::OpenMenu(open) => {
-                            if let Some(mtr) = state.monitors.get_mut(&open.monitor) {
-                                mtr.menu_tx.emit(open);
-                            }
-                        }
-                        ModuleAct::HideModule => {
-                            module.tui = BarTuiElem::Hide;
-                        }
-                    }
-
-                    if rerender {
-                        let mut tui = Vec::new();
-                        for mid in &state.module_order {
-                            let Some(module) = state.modules.get(mid) else {
-                                log::error!("Internal Error: Unknown module id {mid:?}");
-                                continue;
-                            };
-                            tui.push(module.tui.clone());
-                        }
-                        _ = bar_tui_tx.send(tui);
-                    }
-                }
+            Some(menu) = menu_rx.next() => {
+                let Some((menu_tx, _)) = monitors.get(&menu.monitor) else {
+                    continue;
+                };
+                menu_tx.emit(menu);
             }
         }
     }
 }
 
-/// Adds an extra line and centers the content of the menu with padding of half a cell.
-const VERTICAL_PADDING: bool = true;
-const HORIZONTAL_PADDING: u16 = 4;
-
 async fn run_monitor(
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
-    mut bar_tui_rx: WatchRx<Vec<BarTuiElem>>,
+    bar_rx: WatchRx<Vec<WatchRx<BarTuiElem>>>,
     menu_rx: impl Stream<Item = OpenMenu>,
     mut reload_tx: ReloadTx,
 ) {
-    tokio::pin!(menu_rx);
-
     let _auto_cancel = CancelDropGuard::from(cancel_monitor.clone());
+    tokio::pin!(menu_rx);
 
     struct Term {
         term_ev_rx: UnbRx<TermEvent>,
@@ -433,6 +300,52 @@ async fn run_monitor(
             }
         });
 
+        let (bar_tui_tx, mut bar_tui_rx) = watch_chan(Vec::new());
+        let mut bar_rx = bar_rx.clone();
+        subtasks.spawn(async move {
+            loop {
+                let mut current_bar = bar_rx.borrow_and_update().clone();
+                for it in current_bar.iter_mut() {
+                    it.mark_changed();
+                }
+
+                {
+                    let cleared =
+                        std::iter::repeat_n(BarTuiElem::Hide, current_bar.len()).collect();
+                    bar_tui_tx.send_if_modified(|tui| {
+                        *tui = cleared;
+                        false
+                    });
+                }
+
+                let mut bar_changed = tokio_stream::StreamMap::new();
+                for (i, mut rx) in current_bar.into_iter().enumerate() {
+                    bar_changed.insert(
+                        i,
+                        Box::pin(crate::utils::stream_from_fn(async move || {
+                            let Ok(()) = rx.changed().await else {
+                                return None;
+                            };
+
+                            Some(rx.borrow_and_update().clone())
+                        })),
+                    );
+                }
+
+                loop {
+                    tokio::select! {
+                        res = bar_rx.changed() => {
+                            res?;
+                            break; // restart the listener
+                        }
+                        Some((i, elem)) = bar_changed.next() => {
+                            bar_tui_tx.send_modify(|tui| tui[i] = elem);
+                        }
+                    }
+                }
+            }
+        });
+
         #[derive(Debug)]
         struct ShowMenu {
             tui: tui::Tui,
@@ -450,7 +363,7 @@ async fn run_monitor(
                 Some(ev) = bar.term_ev_rx.next() => Upd::Term(TermKind::Bar, ev),
                 Some(ev) = menu.term_ev_rx.next() => Upd::Term(TermKind::Menu, ev),
                 Some(upd) = intern_upd_rx.next() => upd,
-                Some(open) = menu_rx.next() => Upd::OpenMenu(open),
+                Some(menu) = menu_rx.next() => Upd::OpenMenu(menu),
                 Ok(()) = bar_tui_rx.changed() => Upd::BarTui,
                 Some(res) = subtasks.join_next() => return res?,
             };

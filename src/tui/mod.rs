@@ -31,14 +31,6 @@ impl Elem {
         }
     }
 
-    pub fn on_interact_fn(self, callback: impl Fn(InteractData) + 'static + Send + Sync) -> Self {
-        self.on_interact(InteractCallback::from_fn(callback))
-    }
-
-    pub fn on_interact_emit(self, callback: impl SharedEmit<InteractData>) -> Self {
-        self.on_interact(InteractCallback::from_emit(callback))
-    }
-
     pub fn on_interact(mut self, callback: InteractCallback) -> Self {
         self.on_interact = Some(callback);
         self
@@ -182,6 +174,12 @@ impl InteractCallback {
             callback(it);
             Ok(())
         })
+    }
+    pub fn from_fn_ctx<C: 'static + Send + Sync>(
+        ctx: C,
+        callback: impl Fn(&C, InteractData) + 'static + Send + Sync,
+    ) -> Self {
+        Self::from_fn(move |it| callback(&ctx, it))
     }
     pub fn from_emit(emit: impl SharedEmit<InteractData>) -> Self {
         Self(Arc::new(emit))

@@ -2,6 +2,8 @@ use std::marker::PhantomData;
 
 use crate::utils::{UnbTx, WatchTx};
 
+// FIXME: Remove
+
 #[derive(Debug)]
 pub struct EmitError<T>(PhantomData<T>);
 impl<T> std::fmt::Display for EmitError<T> {

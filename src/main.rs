@@ -1,6 +1,6 @@
+mod clients;
 mod data;
 mod logging;
-mod modules;
 mod monitors;
 mod panels;
 mod simple_bar;
@@ -33,7 +33,7 @@ async fn main_inner() {
         None => {
             init_logger(ProcKindForLogger::Controller);
 
-            simple_bar::main().await
+            simple_bar::main2().await
         }
         _ => log::error!("Bad arguments"),
     }

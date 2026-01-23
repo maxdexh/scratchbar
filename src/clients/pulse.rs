@@ -24,13 +24,8 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use crate::{
-    modules::prelude::*,
-    tui,
-    utils::{
-        CancelDropGuard, Emit, ReloadRx, ReloadTx, ResultExt, SharedEmit, UnbTx, WatchRx, unb_chan,
-        watch_chan,
-    },
+use crate::utils::{
+    CancelDropGuard, ReloadRx, ResultExt, SharedEmit, UnbTx, WatchRx, unb_chan, watch_chan,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -292,148 +287,49 @@ async fn run_updater(update_rx: impl Stream<Item = PulseUpdate>) {
     }
 }
 
-pub struct PulseModule {
-    state_rx: WatchRx<PulseState>,
-    update_tx: UnbTx<PulseUpdate>,
-    reload_tx: ReloadTx,
+pub struct PulseClient {
+    pub state_rx: WatchRx<PulseState>,
+    pub update_tx: UnbTx<PulseUpdate>,
     _background: AbortOnDropHandle<()>,
 }
-impl PulseModule {
-    async fn run_bg(
-        state_tx: impl SharedEmit<PulseState>,
-        update_rx: impl Stream<Item = PulseUpdate> + 'static + Send,
-        mut reload_rx: ReloadRx,
-    ) {
-        let mut tasks = JoinSet::<()>::new();
-        tasks.spawn(run_updater(update_rx));
-
-        let awaiting_reload = Arc::new(AtomicBool::new(false));
-        let auto_cancel = CancelDropGuard::new();
-        {
-            let awaiting_reload = awaiting_reload.clone();
-            let cancel = auto_cancel.inner.clone();
-            // FIXME: Rerun on failure
-            std::thread::spawn(|| {
-                _ = run_blocking(state_tx, cancel, awaiting_reload)
-                    .context("PulseAudio client has failed")
-                    .ok_or_log()
-            });
-        }
-
-        tokio::spawn(async move {
-            while let Some(()) = reload_rx.wait().await {
-                awaiting_reload.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        });
-
-        if let Some(res) = tasks.join_next().await {
-            res.context("PulseAudio module failed").ok_or_log();
-        }
+pub fn connect(reload_rx: ReloadRx) -> PulseClient {
+    let (state_tx, state_rx) = watch_chan(Default::default());
+    let (update_tx, update_rx) = unb_chan();
+    PulseClient {
+        _background: AbortOnDropHandle::new(tokio::spawn(run_bg(state_tx, update_rx, reload_rx))),
+        state_rx,
+        update_tx,
     }
 }
 
-// TODO: Implement more
-#[derive(Default)]
-pub struct PulseConfig {
-    pub device_kind: PulseDeviceKind,
-    pub muted_sym: tui::Elem,
-    pub unmuted_sym: tui::Elem,
-}
-impl Module for PulseModule {
-    type Config = PulseConfig;
+async fn run_bg(
+    state_tx: impl SharedEmit<PulseState>,
+    update_rx: impl Stream<Item = PulseUpdate> + 'static + Send,
+    mut reload_rx: ReloadRx,
+) {
+    let mut tasks = JoinSet::<()>::new();
+    tasks.spawn(run_updater(update_rx));
 
-    fn connect() -> Self {
-        let (state_tx, state_rx) = watch_chan(Default::default());
-        let (update_tx, update_rx) = unb_chan();
-        let reload_tx = ReloadTx::new();
-        Self {
-            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
-                state_tx,
-                update_rx,
-                reload_tx.subscribe(),
-            ))),
-            state_rx,
-            update_tx,
-            reload_tx,
-        }
+    let awaiting_reload = Arc::new(AtomicBool::new(false));
+    let auto_cancel = CancelDropGuard::new();
+    {
+        let awaiting_reload = awaiting_reload.clone();
+        let cancel = auto_cancel.inner.clone();
+        // FIXME: Rerun on failure
+        std::thread::spawn(|| {
+            _ = run_blocking(state_tx, cancel, awaiting_reload)
+                .context("PulseAudio client has failed")
+                .ok_or_log()
+        });
     }
 
-    async fn run_module_instance(
-        self: Arc<Self>,
-        PulseConfig {
-            device_kind,
-            muted_sym,
-            unmuted_sym,
-        }: Self::Config,
-        ModuleArgs {
-            act_tx,
-            mut reload_rx,
-            ..
-        }: ModuleArgs,
-        _cancel: crate::utils::CancelDropGuard,
-    ) {
-        let mut tasks = JoinSet::new();
-
-        let mut reload_tx = self.reload_tx.clone();
-        tasks.spawn(async move { reload_tx.reload_on(&mut reload_rx).await });
-
-        let mut state_rx = self.state_rx.clone();
-        tasks.spawn(async move {
-            while let Ok(()) = state_rx.changed().await {
-                let pulse = state_rx.borrow_and_update();
-                let &PulseDeviceState { volume, muted, .. } = match device_kind {
-                    PulseDeviceKind::Sink => &pulse.sink,
-                    PulseDeviceKind::Source => &pulse.source,
-                };
-                //payload: tui::InteractPayload {
-                //    mod_inst: inst_id.clone(),
-                //    tag: tui::InteractTag::new(device_kind),
-                //},
-                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(
-                    tui::Elem::from(tui::Stack::horizontal([
-                        tui::StackItem::auto(if muted {
-                            muted_sym.clone()
-                        } else {
-                            unmuted_sym.clone()
-                        }),
-                        tui::StackItem::auto(tui::RawPrint::plain(format!(
-                            "{:>3}%",
-                            (volume * 100.0).round() as u32
-                        ))),
-                    ]))
-                    .on_interact_fn({
-                        let update_tx = self.update_tx.clone();
-                        move |interact| {
-                            update_tx.emit(PulseUpdate {
-                                target: device_kind,
-                                kind: match interact.kind {
-                                    tui::InteractKind::Click(tui::MouseButton::Left) => {
-                                        PulseUpdateKind::ToggleMute
-                                    }
-                                    tui::InteractKind::Click(tui::MouseButton::Right) => {
-                                        PulseUpdateKind::ResetVolume
-                                    }
-                                    tui::InteractKind::Scroll(direction) => {
-                                        PulseUpdateKind::VolumeDelta(
-                                            2 * match direction {
-                                                tui::Direction::Up => 1,
-                                                tui::Direction::Down => -1,
-                                                tui::Direction::Left => -1,
-                                                tui::Direction::Right => 1,
-                                            },
-                                        )
-                                    }
-                                    _ => return,
-                                },
-                            })
-                        }
-                    }),
-                )));
-            }
-        });
-
-        if let Some(res) = tasks.join_next().await {
-            res.context("Pulse module failed").ok_or_log();
+    tokio::spawn(async move {
+        while let Some(()) = reload_rx.wait().await {
+            awaiting_reload.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    });
+
+    if let Some(res) = tasks.join_next().await {
+        res.context("PulseAudio module failed").ok_or_log();
     }
 }

@@ -1,13 +1,10 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use tokio_stream::StreamExt;
 use tokio_util::task::AbortOnDropHandle;
 pub use udbus::*;
 
-use crate::tui;
-use crate::utils::{Emit, ReloadRx, ReloadTx, ResultExt, WatchRx, WatchTx, unb_chan, watch_chan};
+use crate::utils::{ReloadRx, ResultExt, WatchRx, WatchTx, watch_chan};
 
 macro_rules! declare_properties {
     (
@@ -21,7 +18,7 @@ macro_rules! declare_properties {
     ) => {
         #[derive(Clone, Debug)]
         pub struct UpowerState {
-            $($field_name: $typ,)*
+            $(pub $field_name: $typ,)*
             _p: (),
         }
 
@@ -308,193 +305,90 @@ mod udbus {
     }
 }
 
-use crate::modules::prelude::*;
-pub struct EnergyModule {
-    state_rx: WatchRx<UpowerState>,
-    reload_tx: ReloadTx,
+pub struct EnergyClient {
+    pub state_rx: WatchRx<UpowerState>,
     _background: AbortOnDropHandle<()>,
 }
 
-impl EnergyModule {
-    async fn run_bg(state_tx: WatchTx<UpowerState>, mut reload_rx: ReloadRx) {
-        let mut run_fallible = async || {
-            let dbus = zbus::Connection::system().await.ok_or_log()?;
-            let upower = UPowerProxy::<'static>::new(&dbus).await.ok_or_log()?;
+async fn run_bg(state_tx: WatchTx<UpowerState>, mut reload_rx: ReloadRx) {
+    let mut run_fallible = async || {
+        let dbus = zbus::Connection::system().await.ok_or_log()?;
+        let upower = UPowerProxy::<'static>::new(&dbus).await.ok_or_log()?;
 
-            let device = upower.get_display_device().await.ok_or_log()?;
-            let device_proxy = device.inner();
-            let properties = zbus::fdo::PropertiesProxy::builder(&dbus)
-                .destination(device_proxy.destination())
-                .ok_or_log()?
-                .path(device_proxy.path())
-                .ok_or_log()?
-                .build()
+        let device = upower.get_display_device().await.ok_or_log()?;
+        let device_proxy = device.inner();
+        let properties = zbus::fdo::PropertiesProxy::builder(&dbus)
+            .destination(device_proxy.destination())
+            .ok_or_log()?
+            .path(device_proxy.path())
+            .ok_or_log()?
+            .build()
+            .await
+            .ok_or_log()?;
+
+        let prop_change_rx = device_proxy.receive_all_signals().await.ok_or_log()?;
+        let main_fut = futures::StreamExt::for_each_concurrent(prop_change_rx, 10, async |msg| {
+            let header = msg.header();
+            let Some(member) = header.member() else {
+                return;
+            };
+
+            let Some(value) = properties
+                .get(device_proxy.interface().clone(), member)
                 .await
-                .ok_or_log()?;
-
-            let prop_change_rx = device_proxy.receive_all_signals().await.ok_or_log()?;
-            let main_fut =
-                futures::StreamExt::for_each_concurrent(prop_change_rx, 10, async |msg| {
-                    let header = msg.header();
-                    let Some(member) = header.member() else {
-                        return;
-                    };
-
-                    let Some(value) = properties
-                        .get(device_proxy.interface().clone(), member)
-                        .await
-                        .ok_or_log()
-                    else {
-                        return;
-                    };
-
-                    state_tx.send_if_modified(|state| {
-                        state.update(member, value).ok_or_log().unwrap_or(false)
-                    });
-                });
-            let reload_fut = async {
-                while let Some(()) = reload_rx.wait().await {
-                    let Some(props) = properties
-                        .get_all(device_proxy.interface().clone())
-                        .await
-                        .ok_or_log()
-                    else {
-                        continue;
-                    };
-                    state_tx.send_modify(|state| {
-                        for (member, value) in props {
-                            state
-                                .update(&member, value)
-                                .context("Failed to update upower energy state")
-                                .ok_or_log();
-                        }
-                    });
-                }
+                .ok_or_log()
+            else {
+                return;
             };
 
-            tokio::select! {
-                () = main_fut => (),
-                () = reload_fut => (),
-            }
+            state_tx
+                .send_if_modified(|state| state.update(member, value).ok_or_log().unwrap_or(false));
+        });
 
-            Some(())
-        };
-
-        loop {
-            if let Some(()) = run_fallible().await {
-                break;
-            };
-
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
-    }
-}
-
-impl Module for EnergyModule {
-    type Config = ();
-
-    fn connect() -> Self {
-        let (state_tx, state_rx) = watch_chan(Default::default());
-        let reload_tx = ReloadTx::new();
-        Self {
-            _background: AbortOnDropHandle::new(tokio::spawn(Self::run_bg(
-                state_tx,
-                reload_tx.subscribe(),
-            ))),
-            state_rx,
-            reload_tx,
-        }
-    }
-
-    async fn run_module_instance(
-        self: Arc<Self>,
-        cfg: Self::Config,
-        ModuleArgs {
-            act_tx,
-            mut reload_rx,
-            ..
-        }: ModuleArgs,
-        _cancel: crate::utils::CancelDropGuard,
-    ) {
-        let state_rx = self.state_rx.clone();
-        let mut reload_tx = self.reload_tx.clone();
-
-        let (interact_tx, mut interact_rx) = unb_chan();
-
-        let on_interact =
-            tui::InteractCallback::from_fn(move |interact| interact_tx.emit(interact));
-
-        let render_fut = async {
-            let mut state_rx = state_rx.clone();
-            while let Ok(()) = state_rx.changed().await {
-                let energy = state_rx.borrow_and_update();
-                if !energy.is_present {
-                    act_tx.emit(ModuleAct::HideModule);
+        let reload_fut = async {
+            while let Some(()) = reload_rx.wait().await {
+                let Some(props) = properties
+                    .get_all(device_proxy.interface().clone())
+                    .await
+                    .ok_or_log()
+                else {
                     continue;
-                }
-
-                // TODO: Time estimate tooltip
-                let percentage = energy.percentage.round() as i64;
-                let sign = match energy.battery_state {
-                    BatteryState::Discharging | BatteryState::PendingDischarge => '-',
-                    BatteryState::Charging | BatteryState::PendingCharge => '+',
-                    BatteryState::FullyCharged | BatteryState::Unknown | BatteryState::Empty => '±',
                 };
-                let rate = format!("{sign}{:.1}W", energy.energy_rate);
-                let energy = format!("{percentage:>3}% {rate:<6}");
-
-                //payload: tui::InteractPayload {
-                //    mod_inst: inst_id.clone(),
-                //    tag: tui::InteractTag::new(EnergyInteractTag),
-                //},
-                act_tx.emit(ModuleAct::RenderAll(tui::StackItem::auto(
-                    tui::Elem::from(tui::RawPrint::plain(energy)).on_interact(on_interact.clone()),
-                )));
-            }
-        };
-        let menu_fut = async {
-            while let Some(tui::InteractData {
-                location,
-                monitor,
-                kind,
-                ..
-            }) = interact_rx.next().await
-            {
-                let text = {
-                    let lock = state_rx.borrow();
-                    let display_time = |time: Duration| {
-                        let hours = time.as_secs() / 3600;
-                        let mins = (time.as_secs() / 60) % 60;
-                        format!("{hours}h {mins}min")
-                    };
-                    match lock.battery_state {
-                        BatteryState::Discharging | BatteryState::PendingDischarge => {
-                            format!("Battery empty in {}", display_time(lock.time_to_empty))
-                        }
-                        BatteryState::FullyCharged => "Battery full".to_owned(),
-                        BatteryState::Empty => "Battery empty".to_owned(),
-                        BatteryState::Unknown => "Battery state unknown".to_owned(),
-                        BatteryState::Charging | BatteryState::PendingCharge => {
-                            format!("Battery full in {}", display_time(lock.time_to_full))
-                        }
+                state_tx.send_modify(|state| {
+                    for (member, value) in props {
+                        state
+                            .update(&member, value)
+                            .context("Failed to update upower energy state")
+                            .ok_or_log();
                     }
-                };
-
-                if let tui::InteractKind::Hover = kind {
-                    act_tx.emit(ModuleAct::OpenMenu(OpenMenu {
-                        monitor,
-                        tui: tui::RawPrint::plain(text).into(),
-                        location,
-                        menu_kind: MenuKind::Tooltip,
-                    }))
-                }
+                });
             }
         };
 
         tokio::select! {
-            () = render_fut => {}
-            () = menu_fut => {}
-            () = reload_tx.reload_on(&mut reload_rx) => {}
+            () = main_fut => {}
+            () = async {
+                reload_fut.await;
+                std::future::pending().await
+            } => {}
         }
+
+        Some(())
+    };
+
+    loop {
+        if let Some(()) = run_fallible().await {
+            break;
+        };
+
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+pub fn connect(reload_rx: ReloadRx) -> EnergyClient {
+    let (state_tx, state_rx) = watch_chan(Default::default());
+    EnergyClient {
+        _background: AbortOnDropHandle::new(tokio::spawn(run_bg(state_tx, reload_rx))),
+        state_rx,
     }
 }

@@ -1,139 +1,639 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use tokio::task::JoinSet;
-use tokio_util::time::FutureExt;
 
 use crate::{
-    modules::{
-        self,
-        prelude::{Module, ModuleArgs},
-    },
-    panels::{self, BarMgrModuleArgs, BarMgrModuleStartArgs, BarMgrUpd},
+    clients,
+    panels::{self, BarTuiElem, MenuKind, OpenMenu},
     tui,
-    utils::{Emit, ResultExt, unb_chan},
+    utils::{Emit, ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, unb_chan, watch_chan},
 };
 
-fn mkstart<M: Module>(module: Arc<M>, cfg: impl Into<M::Config>) -> BarMgrModuleStartArgs {
-    let cfg = cfg.into();
-    let start = move |args| {
-        let BarMgrModuleArgs {
-            inst_id,
-            act_tx,
-            reload_rx,
-            cancel,
-        } = args;
+struct ModuleArgs {
+    menu_tx: UnbTx<OpenMenu>,
+    tui_tx: WatchTx<BarTuiElem>,
+    reload_rx: ReloadRx,
+    _unused: (),
+}
 
-        log::trace!(
-            "Starting instance {inst_id:?} of {}",
-            std::any::type_name::<M>()
-        );
-
-        tokio::spawn(async move {
-            module
-                .run_module_instance(cfg, ModuleArgs { act_tx, reload_rx }, cancel.clone().into())
-                .with_cancellation_token_owned(cancel)
-                .await
-        });
-
-        Ok(())
-    };
-    BarMgrModuleStartArgs {
-        start: Box::new(start),
+struct BarModuleFactory {
+    menu_tx: UnbTx<OpenMenu>,
+    reload_tx: ReloadTx,
+    tasks: JoinSet<()>,
+}
+impl BarModuleFactory {
+    fn spawn<F: Future<Output = ()> + 'static + Send>(
+        &mut self,
+        task: impl FnOnce(ModuleArgs) -> F,
+    ) -> WatchRx<BarTuiElem> {
+        let (tui_tx, tui_rx) = watch_chan(BarTuiElem::Hide);
+        self.tasks.spawn(task(ModuleArgs {
+            menu_tx: self.menu_tx.clone(),
+            reload_rx: self.reload_tx.subscribe(),
+            tui_tx,
+            _unused: (),
+        }));
+        tui_rx
+    }
+    fn spawn_with<F: Future<Output = ()> + 'static + Send, C>(
+        &mut self,
+        ctx: C,
+        task: impl FnOnce(C, ModuleArgs) -> F,
+    ) -> WatchRx<BarTuiElem> {
+        self.spawn(|args| task(ctx, args))
+    }
+    fn fixed(&mut self, elem: tui::StackItem) -> WatchRx<BarTuiElem> {
+        let (tx, rx) = watch_chan(BarTuiElem::Hide);
+        tx.emit(BarTuiElem::Shared(elem));
+        rx
     }
 }
 
-struct WeakModule<M>(std::sync::Weak<M>);
-impl<M: Module> WeakModule<M> {
-    pub fn get(&mut self) -> Arc<M> {
-        if let Some(it) = self.0.upgrade() {
-            it
+pub async fn main2() {
+    let mut tasks = JoinSet::new();
+    let mut reload_tx = ReloadTx::new();
+
+    let bar_tx = WatchTx::new(Vec::new());
+    let (menu_tx, menu_rx) = unb_chan();
+    tasks.spawn(panels::run_manager(
+        bar_tx.subscribe(),
+        menu_rx,
+        reload_tx.clone(),
+    ));
+
+    let mut fac = BarModuleFactory {
+        menu_tx,
+        reload_tx: reload_tx.clone(),
+        tasks: JoinSet::new(),
+    };
+
+    let pulse = Arc::new(clients::pulse::connect(reload_tx.subscribe()));
+    let modules = [
+        fac.fixed(tui::StackItem::spacing(1)),
+        fac.spawn(hypr_module),
+        fac.fixed(tui::StackItem::new(
+            tui::Constr::Fill(1),
+            tui::Elem::empty(),
+        )),
+        fac.spawn(tray_module),
+        fac.fixed(tui::StackItem::spacing(3)),
+        fac.spawn_with(
+            PulseModuleCtx {
+                pulse: pulse.clone(),
+                device_kind: clients::pulse::PulseDeviceKind::Source,
+                muted_sym: tui::RawPrint::plain(" ").into(),
+                unmuted_sym: tui::RawPrint::center_symbol("", 2).into(),
+            },
+            pulse_module,
+        ),
+        fac.fixed(tui::StackItem::spacing(3)),
+        fac.spawn_with(
+            PulseModuleCtx {
+                pulse,
+                device_kind: clients::pulse::PulseDeviceKind::Sink,
+                muted_sym: tui::RawPrint::plain(" ").into(),
+                unmuted_sym: tui::RawPrint::plain(" ").into(),
+            },
+            pulse_module,
+        ),
+        fac.fixed(tui::StackItem::spacing(3)),
+        fac.spawn(ppd_module),
+        fac.spawn(energy_module),
+        fac.fixed(tui::StackItem::spacing(3)),
+        fac.spawn(time_module),
+    ];
+
+    bar_tx.emit(modules.into());
+
+    reload_tx.reload();
+
+    if let Some(res) = tasks.join_next().await {
+        res.ok_or_log();
+    }
+}
+
+async fn hypr_module(
+    ModuleArgs {
+        tui_tx, reload_rx, ..
+    }: ModuleArgs,
+) {
+    let hypr = Arc::new(clients::hypr::connect(reload_rx));
+
+    let mut basic_rx = hypr.basic_rx.clone();
+    basic_rx.mark_changed();
+
+    while let Ok(()) = basic_rx.changed().await {
+        let mut by_monitor = HashMap::new();
+        for ws in basic_rx.borrow_and_update().workspaces.iter() {
+            let Some(monitor) = ws.monitor.clone() else {
+                continue;
+            };
+            let wss = by_monitor.entry(monitor).or_insert_with(Vec::new);
+            wss.push(tui::StackItem::auto(
+                tui::Elem::from(tui::RawPrint::plain(&ws.name).styled(tui::Style {
+                    fg: ws.is_active.then_some(tui::Color::Green),
+                    ..Default::default()
+                })),
+                // TODO: Switch ws on lclick
+                // TODO: Show workspace info on rclick/hover
+            ));
+            wss.push(tui::StackItem::spacing(1));
+        }
+        let by_monitor = by_monitor
+            .into_iter()
+            .map(|(k, v)| (k, tui::StackItem::auto(tui::Stack::horizontal(v))))
+            .collect();
+
+        tui_tx.emit(BarTuiElem::ByMonitor(by_monitor));
+    }
+}
+async fn time_module(
+    ModuleArgs {
+        tui_tx,
+        mut reload_rx,
+        ..
+    }: ModuleArgs,
+) {
+    use chrono::Timelike;
+    use std::time::Duration;
+
+    let mut prev_minutes = 61;
+    loop {
+        let now = chrono::Local::now();
+        let minute = now.minute();
+        if prev_minutes != minute {
+            let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
+            tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(tui)));
+
+            prev_minutes = minute;
         } else {
-            let it = Arc::new(M::connect());
-            self.0 = Arc::downgrade(&it);
-            it
+            let seconds_until_minute = 60 - u64::from(now.second());
+            let timeout_ms = std::cmp::max(750 * seconds_until_minute, 100);
+
+            tokio::select! {
+                Some(()) = reload_rx.wait() => {}
+                () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {}
+            }
         }
     }
 }
-impl<M> Default for WeakModule<M> {
-    fn default() -> Self {
-        Self(Default::default())
+
+struct PulseModuleCtx {
+    pulse: Arc<clients::pulse::PulseClient>,
+    device_kind: clients::pulse::PulseDeviceKind,
+    muted_sym: tui::Elem,
+    unmuted_sym: tui::Elem,
+}
+async fn pulse_module(
+    PulseModuleCtx {
+        pulse,
+        device_kind,
+        muted_sym,
+        unmuted_sym,
+    }: PulseModuleCtx,
+    ModuleArgs { tui_tx, .. }: ModuleArgs,
+) {
+    use crate::clients::pulse::*;
+
+    let mut state_rx = pulse.state_rx.clone();
+
+    let on_interact = tui::InteractCallback::from_fn({
+        let pulse = pulse.clone();
+        move |interact| {
+            pulse.update_tx.emit(PulseUpdate {
+                target: device_kind,
+                kind: match interact.kind {
+                    tui::InteractKind::Click(tui::MouseButton::Left) => PulseUpdateKind::ToggleMute,
+                    tui::InteractKind::Click(tui::MouseButton::Right) => {
+                        PulseUpdateKind::ResetVolume
+                    }
+                    tui::InteractKind::Scroll(direction) => PulseUpdateKind::VolumeDelta(
+                        2 * match direction {
+                            tui::Direction::Up => 1,
+                            tui::Direction::Down => -1,
+                            tui::Direction::Left => -1,
+                            tui::Direction::Right => 1,
+                        },
+                    ),
+                    _ => return,
+                },
+            })
+        }
+    });
+
+    while let Ok(()) = state_rx.changed().await {
+        let state = state_rx.borrow_and_update();
+        let &PulseDeviceState { volume, muted, .. } = match device_kind {
+            PulseDeviceKind::Sink => &state.sink,
+            PulseDeviceKind::Source => &state.source,
+        };
+        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(
+            tui::Elem::from(tui::Stack::horizontal([
+                tui::StackItem::auto(if muted {
+                    muted_sym.clone()
+                } else {
+                    unmuted_sym.clone()
+                }),
+                tui::StackItem::auto(tui::RawPrint::plain(format!(
+                    "{:>3}%",
+                    (volume * 100.0).round() as u32
+                ))),
+            ]))
+            .on_interact(on_interact.clone()),
+        )));
+    }
+}
+async fn energy_module(
+    ModuleArgs {
+        tui_tx,
+        menu_tx,
+        reload_rx,
+        ..
+    }: ModuleArgs,
+) {
+    use crate::clients::upower::*;
+    let energy = Arc::new(clients::upower::connect(reload_rx));
+
+    let on_interact = {
+        let menu_tx = menu_tx.clone();
+
+        tui::InteractCallback::from_fn_ctx(energy.clone(), move |energy, interact| {
+            if let tui::InteractKind::Hover = interact.kind {
+                let text = {
+                    let lock = energy.state_rx.borrow();
+                    let display_time = |time: std::time::Duration| {
+                        let hours = time.as_secs() / 3600;
+                        let mins = (time.as_secs() / 60) % 60;
+                        format!("{hours}h {mins}min")
+                    };
+                    match lock.battery_state {
+                        BatteryState::Discharging | BatteryState::PendingDischarge => {
+                            format!("Battery empty in {}", display_time(lock.time_to_empty))
+                        }
+                        BatteryState::FullyCharged => "Battery full".to_owned(),
+                        BatteryState::Empty => "Battery empty".to_owned(),
+                        BatteryState::Unknown => "Battery state unknown".to_owned(),
+                        BatteryState::Charging | BatteryState::PendingCharge => {
+                            format!("Battery full in {}", display_time(lock.time_to_full))
+                        }
+                    }
+                };
+                menu_tx.emit(OpenMenu {
+                    monitor: interact.monitor,
+                    tui: tui::RawPrint::plain(text).into(),
+                    location: interact.location,
+                    menu_kind: MenuKind::Tooltip,
+                })
+            }
+        })
+    };
+
+    let mut state_rx = energy.state_rx.clone();
+    state_rx.mark_changed();
+    while let Ok(()) = state_rx.changed().await {
+        let state = state_rx.borrow_and_update().clone();
+        if !state.is_present {
+            tui_tx.emit(BarTuiElem::Hide);
+            continue;
+        }
+
+        // TODO: Time estimate tooltip
+        let percentage = state.percentage.round() as i64;
+        let sign = match state.battery_state {
+            BatteryState::Discharging | BatteryState::PendingDischarge => '-',
+            BatteryState::Charging | BatteryState::PendingCharge => '+',
+            BatteryState::FullyCharged | BatteryState::Unknown | BatteryState::Empty => '±',
+        };
+        let rate = format!("{sign}{:.1}W", state.energy_rate);
+        let energy = format!("{percentage:>3}% {rate:<6}");
+
+        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(
+            tui::Elem::from(tui::RawPrint::plain(energy)).on_interact(on_interact.clone()),
+        )));
+    }
+}
+async fn ppd_module(
+    ModuleArgs {
+        tui_tx,
+        menu_tx,
+        reload_rx,
+        ..
+    }: ModuleArgs,
+) {
+    let ppd = Arc::new(clients::ppd::connect(reload_rx));
+
+    let on_interact = tui::InteractCallback::from_fn({
+        let menu_tx = menu_tx.clone();
+        let ppd = ppd.clone();
+        move |interact| {
+            let profile = ppd.profile_rx.borrow().clone();
+            match interact.kind {
+                tui::InteractKind::Click(tui::MouseButton::Left) => {
+                    ppd.cycle_profile();
+                }
+                tui::InteractKind::Hover => menu_tx.emit(OpenMenu {
+                    monitor: interact.monitor,
+                    tui: tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
+                    location: interact.location,
+                    menu_kind: MenuKind::Tooltip,
+                }),
+                _ => (),
+            }
+        }
+    });
+
+    let mut profile_rx = ppd.profile_rx.clone();
+    while let Ok(()) = profile_rx.changed().await {
+        let Some(icon) = profile_rx
+            .borrow_and_update()
+            .as_deref()
+            .and_then(|profile| {
+                Some(match profile {
+                    "balanced" => tui::RawPrint::plain(" ").into(),
+                    "performance" => tui::RawPrint::center_symbol(" ", 2).into(),
+                    "power-saver" => tui::RawPrint::plain(" ").into(),
+                    _ => return None,
+                })
+            })
+        else {
+            tui_tx.emit(BarTuiElem::Hide);
+            continue;
+        };
+
+        let elem = tui::Elem::on_interact(icon, on_interact.clone());
+        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(elem)));
     }
 }
 
-#[derive(Default)]
-struct Modules {
-    hypr: WeakModule<modules::hypr::HyprModule>,
-    time: WeakModule<modules::time::TimeModule>,
-    pulse: WeakModule<modules::pulse::PulseModule>,
-    ppd: WeakModule<modules::ppd::PpdModule>,
-    energy: WeakModule<modules::upower::EnergyModule>,
-    tray: WeakModule<modules::tray::TrayModule>,
-    fixed: WeakModule<modules::fixed::FixedTuiModule>,
-}
+async fn tray_module(
+    ModuleArgs {
+        tui_tx,
+        menu_tx,
+        reload_rx,
+        ..
+    }: ModuleArgs,
+) {
+    use crate::clients::tray::*;
+    let tray = Arc::new(clients::tray::connect(reload_rx));
 
-pub async fn main() {
-    let mut tasks = JoinSet::new();
-    let bar_upd_tx;
-    {
-        let bar_upd_rx;
-        (bar_upd_tx, bar_upd_rx) = unb_chan();
-        tasks.spawn(panels::run_manager(bar_upd_rx));
+    let mk_interact_callback = |addr: Arc<str>| {
+        let tray = tray.clone();
+        let menu_tx = menu_tx.clone();
+        tui::InteractCallback::from_fn(move |interact| {
+            match interact.kind {
+                tui::InteractKind::Hover => {
+                    let items = tray.state_rx.borrow().items.clone();
+
+                    // FIXME: Handle more attrs
+                    let Some(system_tray::item::Tooltip {
+                        icon_name: _,
+                        icon_data: _,
+                        title,
+                        description,
+                    }) = items
+                        .get(&addr)
+                        .and_then(|item| item.tool_tip.as_ref())
+                        .with_context(|| format!("Unknown tray addr {addr}"))
+                        .ok_or_log()
+                    else {
+                        return;
+                    };
+
+                    let tui = tui::Stack::vertical([
+                        tui::StackItem::auto(tui::Stack::horizontal([
+                            tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::empty()),
+                            tui::StackItem::auto(tui::PlainLines::new(title.as_str()).styled(
+                                tui::Style {
+                                    modifier: tui::Modifier {
+                                        bold: true,
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                },
+                            )),
+                            tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::empty()),
+                        ])),
+                        tui::StackItem::auto(tui::PlainLines::new(description.as_str())),
+                    ]);
+                    menu_tx.emit(OpenMenu {
+                        monitor: interact.monitor,
+                        tui: tui.into(),
+                        location: interact.location,
+                        menu_kind: MenuKind::Tooltip,
+                    });
+                }
+                tui::InteractKind::Click(tui::MouseButton::Right) => {
+                    let Some(TrayMenuExt {
+                        menu_path,
+                        submenus,
+                        ..
+                    }) = tray
+                        .state_rx
+                        .borrow()
+                        .menus
+                        .get(&addr)
+                        .cloned()
+                        .with_context(|| format!("Unknown tray addr {addr}"))
+                        .ok_or_log()
+                    else {
+                        return;
+                    };
+
+                    let icb = {
+                        |menu_path, id| {
+                            let tray = tray.clone();
+                            let addr = addr.clone();
+                            let menu_path = Arc::clone(menu_path);
+                            tui::InteractCallback::from_fn(move |interact| {
+                                tray.menu_interact_tx.emit(TrayMenuInteract {
+                                    addr: addr.clone(),
+                                    menu_path: Arc::clone(&menu_path),
+                                    id,
+                                    kind: interact.kind,
+                                })
+                            })
+                        }
+                    };
+
+                    let tui = tui::Block {
+                        borders: tui::Borders::all(),
+                        border_style: tui::Style {
+                            fg: Some(tui::Color::DarkGrey),
+                            ..Default::default()
+                        },
+                        border_set: tui::LineSet::thick(),
+                        inner: Some(tray_menu_to_tui(
+                            0,
+                            &submenus,
+                            menu_path
+                                .as_ref()
+                                .map(|menu_path| |id| icb(menu_path, id))
+                                .as_ref(),
+                        )),
+                    };
+                    menu_tx.emit(OpenMenu {
+                        monitor: interact.monitor,
+                        tui: tui.into(),
+                        location: interact.location,
+                        menu_kind: MenuKind::Context,
+                    });
+                }
+                _ => (),
+            }
+        })
+    };
+
+    let mut state_rx = tray.state_rx.clone();
+    while state_rx.changed().await.is_ok() {
+        let items = state_rx.borrow_and_update().items.clone();
+        let mut parts = Vec::new();
+        for (addr, item) in items.iter() {
+            // FIXME: Handle the other options
+            // FIXME: Why are we showing all icons?
+            for system_tray::item::IconPixmap {
+                width,
+                height,
+                pixels,
+            } in item.icon_pixmap.as_deref().unwrap_or(&[])
+            {
+                let mut img = match image::RgbaImage::from_vec(
+                    width.cast_unsigned(),
+                    height.cast_unsigned(),
+                    pixels.clone(),
+                ) {
+                    Some(img) => img,
+                    None => {
+                        log::error!("Failed to load image from bytes");
+                        continue;
+                    }
+                };
+
+                // https://users.rust-lang.org/t/argb32-color-model/92061/4
+                for image::Rgba(pixel) in img.pixels_mut() {
+                    *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
+                }
+
+                parts.extend([
+                    tui::StackItem::auto(
+                        tui::Elem::from(tui::Image {
+                            img,
+                            sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                        })
+                        .on_interact(mk_interact_callback(addr.clone())),
+                    ),
+                    tui::StackItem::spacing(1),
+                ])
+            }
+        }
+        let tui = tui::Stack::horizontal(parts);
+        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(tui)));
     }
-
-    let mut ms = Modules::default();
-
-    bar_upd_tx.emit(BarMgrUpd::LoadModules(panels::LoadModules {
-        modules: [
-            mkstart(ms.fixed.get(), tui::StackItem::spacing(1)),
-            mkstart(ms.hypr.get(), ()),
-            mkstart(
-                ms.fixed.get(),
-                tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::empty()),
-            ),
-            mkstart(ms.tray.get(), ()),
-            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(
-                ms.pulse.get(),
-                modules::pulse::PulseConfig {
-                    device_kind: modules::pulse::PulseDeviceKind::Source,
-                    muted_sym: tui::RawPrint::plain(" ").into(),
-                    unmuted_sym: tui::RawPrint::plain(" ").into(),
-                },
-            ),
-            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(
-                ms.pulse.get(),
-                modules::pulse::PulseConfig {
-                    device_kind: modules::pulse::PulseDeviceKind::Sink,
-                    muted_sym: tui::RawPrint::plain(" ").into(),
-                    unmuted_sym: tui::RawPrint::center_symbol("", 2).into(),
-                },
-            ),
-            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(
-                ms.ppd.get(),
-                modules::ppd::PpdConfig {
-                    icons: FromIterator::<(String, tui::Elem)>::from_iter([
-                        ("balanced".into(), tui::RawPrint::plain(" ").into()),
-                        (
-                            "performance".into(),
-                            tui::RawPrint::center_symbol(" ", 2).into(),
-                        ),
-                        ("power-saver".into(), tui::RawPrint::plain(" ").into()),
-                    ]),
+    fn tray_menu_item_to_tui(
+        depth: u16,
+        item: &system_tray::menu::MenuItem,
+        on_interact: Option<&impl Fn(i32) -> tui::InteractCallback>,
+    ) -> Option<tui::Elem> {
+        use system_tray::menu::*;
+        let main_elem = match item {
+            MenuItem { visible: false, .. } => return None,
+            MenuItem {
+                visible: true,
+                menu_type: MenuType::Separator,
+                ..
+            } => tui::Block {
+                borders: tui::Borders {
+                    top: true,
                     ..Default::default()
                 },
-            ),
-            mkstart(ms.energy.get(), ()),
-            mkstart(ms.fixed.get(), tui::StackItem::spacing(3)),
-            mkstart(ms.time.get(), ()),
-            mkstart(ms.fixed.get(), tui::StackItem::spacing(1)),
-        ]
-        .into(),
-    }));
+                border_style: tui::Style {
+                    fg: Some(tui::Color::DarkGrey),
+                    ..Default::default()
+                },
+                border_set: tui::LineSet::normal(),
+                inner: None,
+            }
+            .into(),
 
-    if let Some(res) = tasks.join_next().await {
-        res.context("Task failed").ok_or_log();
+            MenuItem {
+                id,
+                menu_type: MenuType::Standard,
+                label: Some(label),
+                enabled: _,
+                visible: true,
+                icon_name: _,
+                icon_data,
+                shortcut: _,
+                toggle_type: _, // TODO: implement toggle
+                toggle_state: _,
+                children_display: _,
+                disposition: _, // TODO: what to do with this?
+                submenu: _,
+            } => {
+                let elem = tui::Elem::from(tui::Stack::horizontal([
+                    tui::StackItem::spacing(depth + 1),
+                    if let Some(icon) = icon_data
+                        && let Some(img) =
+                            image::load_from_memory_with_format(icon, image::ImageFormat::Png)
+                                .context("Systray icon has invalid png data")
+                                .ok_or_log()
+                    {
+                        let mut lines = label.lines();
+                        let first_line = lines.next().unwrap_or_default();
+                        tui::StackItem::auto(tui::Stack::vertical(Iterator::chain(
+                            std::iter::once(tui::StackItem::length(
+                                1,
+                                tui::Stack::horizontal([
+                                    tui::StackItem::auto(tui::Image {
+                                        img: img.into_rgba8(),
+                                        sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                                    }),
+                                    tui::StackItem::spacing(1),
+                                    tui::StackItem::auto(tui::PlainLines::new(first_line)),
+                                ]),
+                            )),
+                            lines.map(tui::RawPrint::plain).map(tui::StackItem::auto),
+                        )))
+                    } else {
+                        tui::StackItem::auto(tui::PlainLines::new(label))
+                    },
+                    tui::StackItem::spacing(1),
+                ]));
+
+                match on_interact {
+                    Some(it) => elem.on_interact(it(*id)),
+                    None => elem,
+                }
+            }
+
+            _ => {
+                log::error!("Unhandled menu item: {item:#?}");
+                return None;
+            }
+        };
+
+        Some(if item.submenu.is_empty() {
+            main_elem
+        } else {
+            tui::Stack::vertical([
+                tui::StackItem::auto(main_elem),
+                tui::StackItem::auto(tray_menu_to_tui(depth + 1, &item.submenu, on_interact)),
+            ])
+            .into()
+        })
+    }
+
+    fn tray_menu_to_tui(
+        depth: u16,
+        items: &[system_tray::menu::MenuItem],
+        on_interact: Option<&impl Fn(i32) -> tui::InteractCallback>,
+    ) -> tui::Elem {
+        tui::Stack::vertical(items.iter().filter_map(|item| {
+            Some(tui::StackItem {
+                constr: tui::Constr::Auto,
+                elem: tray_menu_item_to_tui(depth, item, on_interact)?,
+            })
+        }))
+        .into()
     }
 }

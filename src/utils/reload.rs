@@ -2,6 +2,7 @@ use crate::utils::{WatchRx, WatchTx};
 
 // TODO: use tokio::sync::Notify
 // TODO: Consider numbering reloads to deduplicate module backend reloads
+#[derive(Clone)]
 pub struct ReloadRx {
     rx: WatchRx<()>,
     // FIXME: Debounce
@@ -33,11 +34,6 @@ impl ReloadTx {
     pub fn subscribe(&self) -> ReloadRx {
         ReloadRx {
             rx: self.tx.subscribe(),
-        }
-    }
-    pub async fn reload_on(&mut self, rx: &mut ReloadRx) {
-        while let Some(()) = rx.wait().await {
-            self.reload();
         }
     }
 }
