@@ -7,7 +7,7 @@ use crate::{
     clients,
     panels::{self, BarTuiElem, MenuKind, OpenMenu},
     tui,
-    utils::{Emit, ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, unb_chan, watch_chan},
+    utils::{ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, unb_chan, watch_chan},
 };
 
 struct ModuleArgs {
@@ -45,7 +45,7 @@ impl BarModuleFactory {
     }
     fn fixed(&mut self, elem: tui::StackItem) -> WatchRx<BarTuiElem> {
         let (tx, rx) = watch_chan(BarTuiElem::Hide);
-        tx.emit(BarTuiElem::Shared(elem));
+        tx.send_replace(BarTuiElem::Shared(elem));
         rx
     }
 }
@@ -104,7 +104,7 @@ pub async fn main2() {
         fac.spawn(time_module),
     ];
 
-    bar_tx.emit(modules.into());
+    bar_tx.send_replace(modules.into());
 
     reload_tx.reload();
 
@@ -145,7 +145,7 @@ async fn hypr_module(
             .map(|(k, v)| (k, tui::StackItem::auto(tui::Stack::horizontal(v))))
             .collect();
 
-        tui_tx.emit(BarTuiElem::ByMonitor(by_monitor));
+        tui_tx.send_replace(BarTuiElem::ByMonitor(by_monitor));
     }
 }
 async fn time_module(
@@ -164,7 +164,7 @@ async fn time_module(
         let minute = now.minute();
         if prev_minutes != minute {
             let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
-            tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(tui)));
+            tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(tui)));
 
             prev_minutes = minute;
         } else {
@@ -201,24 +201,29 @@ async fn pulse_module(
     let on_interact = tui::InteractCallback::from_fn({
         let pulse = pulse.clone();
         move |interact| {
-            pulse.update_tx.emit(PulseUpdate {
-                target: device_kind,
-                kind: match interact.kind {
-                    tui::InteractKind::Click(tui::MouseButton::Left) => PulseUpdateKind::ToggleMute,
-                    tui::InteractKind::Click(tui::MouseButton::Right) => {
-                        PulseUpdateKind::ResetVolume
-                    }
-                    tui::InteractKind::Scroll(direction) => PulseUpdateKind::VolumeDelta(
-                        2 * match direction {
-                            tui::Direction::Up => 1,
-                            tui::Direction::Down => -1,
-                            tui::Direction::Left => -1,
-                            tui::Direction::Right => 1,
-                        },
-                    ),
-                    _ => return,
-                },
-            })
+            pulse
+                .update_tx
+                .send(PulseUpdate {
+                    target: device_kind,
+                    kind: match interact.kind {
+                        tui::InteractKind::Click(tui::MouseButton::Left) => {
+                            PulseUpdateKind::ToggleMute
+                        }
+                        tui::InteractKind::Click(tui::MouseButton::Right) => {
+                            PulseUpdateKind::ResetVolume
+                        }
+                        tui::InteractKind::Scroll(direction) => PulseUpdateKind::VolumeDelta(
+                            2 * match direction {
+                                tui::Direction::Up => 1,
+                                tui::Direction::Down => -1,
+                                tui::Direction::Left => -1,
+                                tui::Direction::Right => 1,
+                            },
+                        ),
+                        _ => return,
+                    },
+                })
+                .ok_or_log();
         }
     });
 
@@ -228,7 +233,7 @@ async fn pulse_module(
             PulseDeviceKind::Sink => &state.sink,
             PulseDeviceKind::Source => &state.source,
         };
-        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(
+        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
             tui::Elem::from(tui::Stack::horizontal([
                 tui::StackItem::auto(if muted {
                     muted_sym.clone()
@@ -279,12 +284,14 @@ async fn energy_module(
                         }
                     }
                 };
-                menu_tx.emit(OpenMenu {
-                    monitor: interact.monitor,
-                    tui: tui::RawPrint::plain(text).into(),
-                    location: interact.location,
-                    menu_kind: MenuKind::Tooltip,
-                })
+                menu_tx
+                    .send(OpenMenu {
+                        monitor: interact.monitor,
+                        tui: tui::RawPrint::plain(text).into(),
+                        location: interact.location,
+                        menu_kind: MenuKind::Tooltip,
+                    })
+                    .ok_or_log();
             }
         })
     };
@@ -294,7 +301,7 @@ async fn energy_module(
     while let Ok(()) = state_rx.changed().await {
         let state = state_rx.borrow_and_update().clone();
         if !state.is_present {
-            tui_tx.emit(BarTuiElem::Hide);
+            tui_tx.send_replace(BarTuiElem::Hide);
             continue;
         }
 
@@ -308,7 +315,7 @@ async fn energy_module(
         let rate = format!("{sign}{:.1}W", state.energy_rate);
         let energy = format!("{percentage:>3}% {rate:<6}");
 
-        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(
+        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
             tui::Elem::from(tui::RawPrint::plain(energy)).on_interact(on_interact.clone()),
         )));
     }
@@ -332,12 +339,17 @@ async fn ppd_module(
                 tui::InteractKind::Click(tui::MouseButton::Left) => {
                     ppd.cycle_profile();
                 }
-                tui::InteractKind::Hover => menu_tx.emit(OpenMenu {
-                    monitor: interact.monitor,
-                    tui: tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
-                    location: interact.location,
-                    menu_kind: MenuKind::Tooltip,
-                }),
+                tui::InteractKind::Hover => {
+                    menu_tx
+                        .send(OpenMenu {
+                            monitor: interact.monitor,
+                            tui: tui::PlainLines::new(profile.as_deref().unwrap_or("No profile"))
+                                .into(),
+                            location: interact.location,
+                            menu_kind: MenuKind::Tooltip,
+                        })
+                        .ok_or_log();
+                }
                 _ => (),
             }
         }
@@ -357,12 +369,12 @@ async fn ppd_module(
                 })
             })
         else {
-            tui_tx.emit(BarTuiElem::Hide);
+            tui_tx.send_replace(BarTuiElem::Hide);
             continue;
         };
 
         let elem = tui::Elem::on_interact(icon, on_interact.clone());
-        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(elem)));
+        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(elem)));
     }
 }
 
@@ -416,12 +428,14 @@ async fn tray_module(
                         ])),
                         tui::StackItem::auto(tui::PlainLines::new(description.as_str())),
                     ]);
-                    menu_tx.emit(OpenMenu {
-                        monitor: interact.monitor,
-                        tui: tui.into(),
-                        location: interact.location,
-                        menu_kind: MenuKind::Tooltip,
-                    });
+                    menu_tx
+                        .send(OpenMenu {
+                            monitor: interact.monitor,
+                            tui: tui.into(),
+                            location: interact.location,
+                            menu_kind: MenuKind::Tooltip,
+                        })
+                        .ok_or_log();
                 }
                 tui::InteractKind::Click(tui::MouseButton::Right) => {
                     let Some(TrayMenuExt {
@@ -446,12 +460,14 @@ async fn tray_module(
                             let addr = addr.clone();
                             let menu_path = Arc::clone(menu_path);
                             tui::InteractCallback::from_fn(move |interact| {
-                                tray.menu_interact_tx.emit(TrayMenuInteract {
-                                    addr: addr.clone(),
-                                    menu_path: Arc::clone(&menu_path),
-                                    id,
-                                    kind: interact.kind,
-                                })
+                                tray.menu_interact_tx
+                                    .send(TrayMenuInteract {
+                                        addr: addr.clone(),
+                                        menu_path: Arc::clone(&menu_path),
+                                        id,
+                                        kind: interact.kind,
+                                    })
+                                    .ok_or_log();
                             })
                         }
                     };
@@ -472,12 +488,14 @@ async fn tray_module(
                                 .as_ref(),
                         )),
                     };
-                    menu_tx.emit(OpenMenu {
-                        monitor: interact.monitor,
-                        tui: tui.into(),
-                        location: interact.location,
-                        menu_kind: MenuKind::Context,
-                    });
+                    menu_tx
+                        .send(OpenMenu {
+                            monitor: interact.monitor,
+                            tui: tui.into(),
+                            location: interact.location,
+                            menu_kind: MenuKind::Context,
+                        })
+                        .ok_or_log();
                 }
                 _ => (),
             }
@@ -527,7 +545,7 @@ async fn tray_module(
             }
         }
         let tui = tui::Stack::horizontal(parts);
-        tui_tx.emit(BarTuiElem::Shared(tui::StackItem::auto(tui)));
+        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(tui)));
     }
     fn tray_menu_item_to_tui(
         depth: u16,

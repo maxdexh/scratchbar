@@ -58,7 +58,7 @@ async fn exit_signal() {
     }
     loop {
         let Some(quit) = tasks.join_next().await else {
-            return futures::future::pending().await;
+            return std::future::pending().await;
         };
         if utils::ResultExt::ok_or_log(quit) != Some(false) {
             break;

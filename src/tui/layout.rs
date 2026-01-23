@@ -136,7 +136,7 @@ impl RenderedLayout {
             kind.clone(),
             cb.cloned().map(move |cb| {
                 move || {
-                    cb.0.emit(InteractData {
+                    cb.0(InteractData {
                         location,
                         monitor,
                         kind,

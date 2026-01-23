@@ -2,8 +2,6 @@ use tokio_util::sync::CancellationToken;
 
 mod reload;
 pub use reload::*;
-mod emit;
-pub use emit::*;
 mod channels;
 pub use channels::*;
 

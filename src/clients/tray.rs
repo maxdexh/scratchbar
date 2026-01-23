@@ -1,18 +1,16 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Context;
+use futures::StreamExt as _;
 use futures::{FutureExt, Stream};
 use system_tray::item::StatusNotifierItem;
 use tokio::task::JoinSet;
-use tokio_stream::StreamExt as _;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::utils::WatchTx;
 use crate::{
     tui,
-    utils::{
-        Emit, ReloadRx, ResultExt, SharedEmit, UnbTx, WatchRx, lossy_broadcast, unb_chan,
-        watch_chan,
-    },
+    utils::{ReloadRx, ResultExt, UnbTx, WatchRx, unb_chan, watch_chan},
 };
 
 #[derive(Debug, Clone)]
@@ -55,7 +53,7 @@ pub fn connect(reload_rx: ReloadRx) -> TrayClient {
     }
 }
 async fn run_bg(
-    state_tx: impl SharedEmit<TrayState>,
+    state_tx: WatchTx<TrayState>,
     menu_interact_rx: impl Stream<Item = TrayMenuInteract> + 'static + Send,
     mut reload_rx: ReloadRx,
 ) {
@@ -79,12 +77,12 @@ async fn run_bg(
         let (tx, rx) = unb_chan();
 
         // Minimize lagged events
-        let event_rx = lossy_broadcast(client.subscribe());
+        let event_rx = client.subscribe();
         tasks.spawn(async move {
             tokio::pin!(event_rx);
-            while let Some(ev) = event_rx.next().await {
-                tx.emit(ev);
-            }
+            while let Ok(ev) = event_rx.recv().await
+                && tx.send(ev).is_ok()
+            {}
         });
 
         tasks.spawn(run_state_fetcher(client.items(), rx, state_tx, reload_rx));
@@ -98,7 +96,7 @@ async fn run_bg(
 async fn run_state_fetcher(
     state_mutex: Arc<std::sync::Mutex<system_tray::data::BaseMap>>,
     client_rx: impl Stream<Item = system_tray::client::Event>,
-    state_tx: impl SharedEmit<TrayState>,
+    state_tx: WatchTx<TrayState>,
     mut reload_rx: ReloadRx,
 ) {
     let fetch_blocking = move || {
@@ -166,7 +164,7 @@ async fn run_state_fetcher(
                 false
             }
         });
-        state_tx.emit(TrayState { items, menus })
+        state_tx.send_replace(TrayState { items, menus });
     }
 }
 async fn run_menu_interaction(

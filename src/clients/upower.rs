@@ -327,6 +327,7 @@ async fn run_bg(state_tx: WatchTx<UpowerState>, mut reload_rx: ReloadRx) {
             .ok_or_log()?;
 
         let prop_change_rx = device_proxy.receive_all_signals().await.ok_or_log()?;
+
         let main_fut = futures::StreamExt::for_each_concurrent(prop_change_rx, 10, async |msg| {
             let header = msg.header();
             let Some(member) = header.member() else {

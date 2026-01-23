@@ -6,16 +6,14 @@ use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures::Stream;
+use futures::StreamExt;
 use tokio::task::JoinSet;
-use tokio_stream::StreamExt;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
     monitors::MonitorInfo,
     tui,
-    utils::{
-        CancelDropGuard, Emit, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, unb_chan, watch_chan,
-    },
+    utils::{CancelDropGuard, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, unb_chan, watch_chan},
 };
 
 // FIXME: Add to args of run_manager
@@ -68,9 +66,8 @@ pub async fn run_manager(
 ) {
     tokio::pin!(menu_rx);
     let mut monitors = HashMap::<_, (_, CancelDropGuard)>::new();
-    let (monitor_tx, mut monitor_rx) = unb_chan();
 
-    crate::monitors::connect(monitor_tx.clone());
+    let mut monitor_rx = crate::monitors::connect();
 
     loop {
         tokio::select! {
@@ -96,7 +93,7 @@ pub async fn run_manager(
                 let Some((menu_tx, _)) = monitors.get(&menu.monitor) else {
                     continue;
                 };
-                menu_tx.emit(menu);
+                menu_tx.send(menu).ok_or_log();
             }
         }
     }
@@ -254,20 +251,24 @@ async fn run_monitor(
                     vec![("BAR_MENU_WATCHER_SOCK", watcher_sock_path)],
                 )
                 .await?;
-                menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
-                    "resize-os-window".into(),
-                    "--action=hide".into(),
-                ]));
+                menu.term_upd_tx
+                    .send(TermUpdate::RemoteControl(vec![
+                        "resize-os-window".into(),
+                        "--action=hide".into(),
+                    ]))
+                    .ok_or_log();
                 if VERTICAL_PADDING {
                     // HACK: For some reason, using half font height padding at top and bottom
                     // shrinks the height by 2 cells. This way of doing it only works assuming
                     // that we do not have more than 1 pixel to spare for the padding and it
                     // can only be used for vertical padding of 1 cell in total.
-                    menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
-                        "set-spacing".into(),
-                        "padding-top=1".into(),
-                        "padding-bottom=1".into(),
-                    ]));
+                    menu.term_upd_tx
+                        .send(TermUpdate::RemoteControl(vec![
+                            "set-spacing".into(),
+                            "padding-top=1".into(),
+                            "padding-bottom=1".into(),
+                        ]))
+                        .ok_or_log();
                 }
 
                 let (s, _) = watcher_sock.accept().await?;
@@ -295,7 +296,7 @@ async fn run_monitor(
                         }
                     };
 
-                    upd_tx.emit(parsed);
+                    upd_tx.send(parsed).ok_or_log();
                 }
             }
         });
@@ -308,28 +309,21 @@ async fn run_monitor(
                 for it in current_bar.iter_mut() {
                     it.mark_changed();
                 }
+                let mut tasks = JoinSet::new();
 
-                {
-                    let cleared =
-                        std::iter::repeat_n(BarTuiElem::Hide, current_bar.len()).collect();
-                    bar_tui_tx.send_if_modified(|tui| {
-                        *tui = cleared;
-                        false
-                    });
-                }
+                bar_tui_tx.send_if_modified(|tui| {
+                    *tui = std::iter::repeat_n(BarTuiElem::Hide, current_bar.len()).collect();
+                    false
+                });
 
-                let mut bar_changed = tokio_stream::StreamMap::new();
+                let (bar_changed_tx, mut bar_changed_rx) = unb_chan();
                 for (i, mut rx) in current_bar.into_iter().enumerate() {
-                    bar_changed.insert(
-                        i,
-                        Box::pin(crate::utils::stream_from_fn(async move || {
-                            let Ok(()) = rx.changed().await else {
-                                return None;
-                            };
-
-                            Some(rx.borrow_and_update().clone())
-                        })),
-                    );
+                    let bar_changed_tx = bar_changed_tx.clone();
+                    tasks.spawn(async move {
+                        while let Ok(()) = rx.changed().await {
+                            _ = bar_changed_tx.send((i, rx.borrow_and_update().clone()));
+                        }
+                    });
                 }
 
                 loop {
@@ -338,8 +332,13 @@ async fn run_monitor(
                             res?;
                             break; // restart the listener
                         }
-                        Some((i, elem)) = bar_changed.next() => {
-                            bar_tui_tx.send_modify(|tui| tui[i] = elem);
+                        Some((i, elem)) = bar_changed_rx.next() => {
+                            bar_tui_tx.send_modify(|tui| {
+                                tui[i] = elem;
+                                while let Ok((i, elem)) = bar_changed_rx.inner.try_recv() {
+                                    tui[i] = elem;
+                                }
+                            });
                         }
                     }
                 }
@@ -389,8 +388,8 @@ async fn run_monitor(
                     };
                     bar.layout = layout;
 
-                    bar.term_upd_tx.emit(TermUpdate::Print(buf));
-                    bar.term_upd_tx.emit(TermUpdate::Flush);
+                    bar.term_upd_tx.send(TermUpdate::Print(buf)).ok_or_log();
+                    bar.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
                 }
                 Upd::Term(term_kind, ev) => match ev {
                     TermEvent::Crossterm(ev) => match ev {
@@ -525,22 +524,26 @@ async fn run_monitor(
                     let margin_left = (f64::from(mleft) / scale) as u32;
                     let margin_right = (f64::from(mright) / scale) as u32;
 
-                    menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
-                        "resize-os-window".into(),
-                        "--incremental".into(),
-                        "--action=os-panel".into(),
-                        format!("margin-left={margin_left}").into(),
-                        format!("margin-right={margin_right}").into(),
-                        format!("lines={lines}").into(),
-                    ]));
+                    menu.term_upd_tx
+                        .send(TermUpdate::RemoteControl(vec![
+                            "resize-os-window".into(),
+                            "--incremental".into(),
+                            "--action=os-panel".into(),
+                            format!("margin-left={margin_left}").into(),
+                            format!("margin-right={margin_right}").into(),
+                            format!("lines={lines}").into(),
+                        ]))
+                        .ok_or_log();
                 }
 
                 // TODO: be smarter about when to run this
                 let action = if show_menu.is_some() { "show" } else { "hide" };
-                menu.term_upd_tx.emit(TermUpdate::RemoteControl(vec![
-                    "resize-os-window".into(),
-                    format!("--action={}", action).into(),
-                ]));
+                menu.term_upd_tx
+                    .send(TermUpdate::RemoteControl(vec![
+                        "resize-os-window".into(),
+                        format!("--action={}", action).into(),
+                    ]))
+                    .ok_or_log();
             }
 
             if let Some(ShowMenu {
@@ -575,8 +578,8 @@ async fn run_monitor(
                     .ok_or_log()
                 {
                     menu.layout = layout;
-                    menu.term_upd_tx.emit(TermUpdate::Print(buf));
-                    menu.term_upd_tx.emit(TermUpdate::Flush);
+                    menu.term_upd_tx.send(TermUpdate::Print(buf)).ok_or_log();
+                    menu.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
                 }
             }
         }

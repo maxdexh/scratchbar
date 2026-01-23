@@ -5,6 +5,7 @@ use libpulse_binding::{
     time::MicroSeconds, volume::Volume,
 };
 
+use futures::StreamExt as _;
 use pulse::{
     context::{
         Context, FlagSet, State,
@@ -15,7 +16,6 @@ use pulse::{
     volume::ChannelVolumes,
 };
 use tokio::task::JoinSet;
-use tokio_stream::StreamExt as _;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use std::{
@@ -25,7 +25,7 @@ use std::{
 };
 
 use crate::utils::{
-    CancelDropGuard, ReloadRx, ResultExt, SharedEmit, UnbTx, WatchRx, unb_chan, watch_chan,
+    CancelDropGuard, ReloadRx, ResultExt, UnbTx, WatchRx, WatchTx, unb_chan, watch_chan,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -69,7 +69,7 @@ fn handle_iterate_result(res: IterateResult) -> anyhow::Result<()> {
 }
 
 fn run_blocking(
-    tx: impl SharedEmit<PulseState>,
+    tx: WatchTx<PulseState>,
     cancel: CancellationToken,
     awaiting_reload: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
@@ -110,7 +110,7 @@ fn run_blocking(
     fn update_and_send(
         kind: PulseDeviceKind,
         state: Rc<RefCell<PulseState>>,
-        tx: Rc<impl SharedEmit<PulseState>>,
+        tx: Rc<WatchTx<PulseState>>,
         context: &RefCell<Context>,
     ) {
         let name = {
@@ -126,7 +126,7 @@ fn run_blocking(
         };
 
         let doit = move |volume: &ChannelVolumes, muted: bool| {
-            tx.emit({
+            tx.send_replace({
                 let mut state = state.borrow_mut();
                 let dstate = match kind {
                     PulseDeviceKind::Sink => &mut state.sink,
@@ -303,7 +303,7 @@ pub fn connect(reload_rx: ReloadRx) -> PulseClient {
 }
 
 async fn run_bg(
-    state_tx: impl SharedEmit<PulseState>,
+    state_tx: WatchTx<PulseState>,
     update_rx: impl Stream<Item = PulseUpdate> + 'static + Send,
     mut reload_rx: ReloadRx,
 ) {
@@ -317,9 +317,9 @@ async fn run_bg(
         let cancel = auto_cancel.inner.clone();
         // FIXME: Rerun on failure
         std::thread::spawn(|| {
-            _ = run_blocking(state_tx, cancel, awaiting_reload)
+            run_blocking(state_tx, cancel, awaiting_reload)
                 .context("PulseAudio client has failed")
-                .ok_or_log()
+                .ok_or_log();
         });
     }
 

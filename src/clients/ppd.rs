@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use futures::StreamExt as _;
 use tokio::sync::Semaphore;
-use tokio_stream::StreamExt as _;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::{ReloadRx, ResultExt, SharedEmit, WatchRx, watch_chan};
+use crate::utils::{ReloadRx, ResultExt, WatchRx, WatchTx, watch_chan};
 
 mod dbus {
     use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ impl PpdClient {
 
 async fn run_bg(
     cycle_rx: Arc<Semaphore>,
-    profile_tx: impl SharedEmit<Option<Arc<str>>>,
+    profile_tx: WatchTx<Option<Arc<str>>>,
     mut reload_rx: ReloadRx,
 ) {
     let Some(connection) = zbus::Connection::system().await.ok_or_log() else {
@@ -75,7 +75,7 @@ async fn run_bg(
             };
 
             let profile = proxy.active_profile().await.ok_or_log();
-            profile_tx.emit(profile.map(Into::into));
+            profile_tx.send_replace(profile.map(Into::into));
         }
     };
 
@@ -91,11 +91,9 @@ async fn run_bg(
                 steps += 1;
             }
 
-            let Some((profiles, cur)) =
-                futures::future::try_join(proxy.profiles(), proxy.active_profile())
-                    .await
-                    .context("Failed to get ppd profiles")
-                    .ok_or_log()
+            let Some((profiles, cur)) = tokio::try_join!(proxy.profiles(), proxy.active_profile())
+                .context("Failed to get ppd profiles")
+                .ok_or_log()
             else {
                 continue;
             };

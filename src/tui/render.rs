@@ -286,10 +286,6 @@ impl Render for Block {
         if let Some(inner) = &self.inner {
             let min_size = self.calc_min_size(ctx.sizing);
             log::debug!("{min_size:?} {area:?}");
-            //if min_size.x > area.size.x || min_size.y > area.size.y {
-            //    log::error!("Not rendering borders of block elem because area is too small");
-            //    return inner.render2(ctx, area);
-            //}
 
             inner.render(
                 ctx,
@@ -394,26 +390,8 @@ impl Block {
     }
 }
 
-struct DisplayFn<F: Fn(&mut fmt::Formatter) -> fmt::Result>(F);
-impl<F> fmt::Display for DisplayFn<F>
-where
-    F: Fn(&mut fmt::Formatter) -> fmt::Result,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0(f)
-    }
-}
-impl<F> From<DisplayFn<F>> for String
-where
-    F: Fn(&mut fmt::Formatter) -> fmt::Result,
-{
-    fn from(value: DisplayFn<F>) -> Self {
-        value.to_string()
-    }
-}
-
 impl Style {
-    pub fn apply(self, d: impl std::fmt::Display) -> impl std::fmt::Display + Into<String> {
+    pub fn apply(self, d: impl std::fmt::Display) -> impl std::fmt::Display {
         use crossterm::style::{StyledContent, Stylize};
 
         let Self {
@@ -460,13 +438,13 @@ impl Style {
         if let Some(col) = underline_color {
             styled = styled.underline(col);
         }
-        DisplayFn(move |f| write!(f, "{styled}"))
+        styled
     }
 }
 impl KittyTextSize {
-    pub fn apply(self, inner: impl std::fmt::Display) -> impl std::fmt::Display + Into<String> {
+    pub fn apply(self, inner: impl std::fmt::Display) -> impl std::fmt::Display {
         let Self { s, w, n, d, v, h } = self;
-        DisplayFn(move |f: &mut std::fmt::Formatter| {
+        fmt::from_fn(move |f: &mut std::fmt::Formatter| {
             write!(f, "\x1b]66;s={}", s.unwrap_or(1))?;
             if let Some(w) = w {
                 write!(f, ":w={w}")?;

@@ -4,15 +4,14 @@ use std::{
 };
 
 use anyhow::Context as _;
-use futures::Stream;
+use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
-use tokio_stream::StreamExt as _;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
     tui,
-    utils::{CancelDropGuard, Emit as _, ResultExt as _, SharedEmit, unb_chan},
+    utils::{CancelDropGuard, ResultExt as _, UnbTx, unb_chan},
 };
 
 const SOCK_PATH_VAR: &str = "BAR_TERM_INSTANCE_SOCK_PATH";
@@ -39,7 +38,7 @@ pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
     upd_rx: impl Stream<Item = TermUpdate> + 'static + Send,
     extra_args: impl IntoIterator<Item: AsRef<OsStr>>,
     extra_envs: impl IntoIterator<Item = (AK, AV)>,
-    term_ev_tx: impl SharedEmit<TermEvent>,
+    term_ev_tx: UnbTx<TermEvent>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let tmpdir = tempfile::TempDir::new()?;
@@ -107,7 +106,7 @@ pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
 }
 async fn run_term_inst_mgr(
     socket: tokio::net::UnixListener,
-    ev_tx: impl SharedEmit<TermEvent>,
+    ev_tx: UnbTx<TermEvent>,
     updates: impl Stream<Item = TermUpdate> + Send + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -124,7 +123,8 @@ async fn run_term_inst_mgr(
     let (read_half, write_half) = socket.into_split();
 
     tasks.spawn(
-        read_cobs_sock::<TermEvent>(read_half, ev_tx).with_cancellation_token_owned(cancel.clone()),
+        read_cobs_sock::<TermEvent>(read_half, move |x| _ = ev_tx.send(x))
+            .with_cancellation_token_owned(cancel.clone()),
     );
     tasks.spawn(
         write_cobs_sock::<TermUpdate>(write_half, updates)
@@ -158,7 +158,7 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         (ev_tx, ev_rx) = unb_chan::<TermEvent>();
         (upd_tx, upd_rx) = std::sync::mpsc::channel::<TermUpdate>();
 
-        tasks.spawn(read_cobs_sock(read, upd_tx));
+        tasks.spawn(read_cobs_sock(read, move |x| _ = upd_tx.send(x)));
         tasks.spawn(write_cobs_sock(write, ev_rx));
     }
 
@@ -174,26 +174,27 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         anyhow::bail!("Terminal reported window size of 0. Do not start as hidden!");
     };
 
-    if let Err(err) = ev_tx.try_emit(TermEvent::Sizes(init_sizes)) {
-        return Err(err).context("Failed to send initial font size while starting panel. Exiting.");
-    }
+    ev_tx
+        .send(TermEvent::Sizes(init_sizes))
+        .context("Failed to send initial font size while starting panel. Exiting.")?;
 
     tasks.spawn(async move {
-        let mut events = crossterm::event::EventStream::new()
-            .filter_map(|res| res.context("Crossterm error").ok_or_log());
+        let events = crossterm::event::EventStream::new()
+            .filter_map(async |res| res.context("Crossterm error").ok_or_log());
+        tokio::pin!(events);
         while let Some(ev) = events.next().await {
             if let crossterm::event::Event::Resize(_, _) = &ev
                 && let Some(sizes) = tui::Sizes::query().ok_or_log()
             {
                 if let Some(sizes) = sizes {
-                    ev_tx.emit(TermEvent::Sizes(sizes));
+                    _ = ev_tx.send(TermEvent::Sizes(sizes));
                 } else {
                     log::warn!(
                         "Terminal reported window size of 0 (this should only happen when hidden)"
                     );
                 }
             }
-            ev_tx.emit(TermEvent::Crossterm(ev));
+            _ = ev_tx.send(TermEvent::Crossterm(ev));
         }
     });
 
@@ -269,7 +270,7 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
 
 async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
     read: tokio::net::unix::OwnedReadHalf,
-    tx: impl SharedEmit<T>,
+    tx: impl Fn(T),
 ) {
     use tokio::io::AsyncBufReadExt as _;
     let mut read = tokio::io::BufReader::new(read);
@@ -292,7 +293,7 @@ async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
                 );
             }
             Ok(ev) => {
-                tx.emit(ev);
+                tx(ev);
             }
         }
 

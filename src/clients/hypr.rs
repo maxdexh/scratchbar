@@ -1,12 +1,12 @@
 use crate::data::{BasicDesktopState, BasicWorkspace};
-use crate::utils::ResultExt;
-use crate::utils::{ReloadRx, SharedEmit, WatchRx, watch_chan};
+use crate::utils::{ReloadRx, WatchRx, watch_chan};
+use crate::utils::{ResultExt, WatchTx};
 use anyhow::Context;
+use futures::StreamExt;
 use hyprland::data::*;
 use hyprland::shared::{HyprData, HyprDataVec};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 use tokio_util::task::AbortOnDropHandle;
 
 // TODO: Detailed state (for menu), including clients
@@ -16,9 +16,9 @@ pub struct HyprClient {
     _background: AbortOnDropHandle<()>,
 }
 
-async fn run_bg(basic_tx: impl SharedEmit<BasicDesktopState>, mut reload_rx: ReloadRx) {
+async fn run_bg(basic_tx: WatchTx<BasicDesktopState>, mut reload_rx: ReloadRx) {
     let ev_rx = hyprland::event_listener::EventStream::new()
-        .filter_map(|res| res.context("Hyprland error").ok_or_log());
+        .filter_map(async |res| res.context("Hyprland error").ok_or_log());
     tokio::pin!(ev_rx);
 
     let mut workspaces = Default::default();
@@ -106,7 +106,7 @@ async fn run_bg(basic_tx: impl SharedEmit<BasicDesktopState>, mut reload_rx: Rel
             .collect();
 
         workspaces.sort_unstable_by(|w1, w2| w1.name.cmp(&w2.name));
-        basic_tx.emit(BasicDesktopState { workspaces });
+        basic_tx.send_replace(BasicDesktopState { workspaces });
     }
 }
 

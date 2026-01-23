@@ -5,8 +5,6 @@ pub use layout::*;
 
 use std::{fmt, sync::Arc};
 
-use crate::utils::SharedEmit;
-
 #[derive(Default, Debug, Clone)]
 enum ElemKind {
     Print(RawPrint),
@@ -68,10 +66,10 @@ impl From<Arc<Elem>> for Elem {
         }
     }
 }
-impl<D: Into<String>> From<RawPrint<D>> for Elem {
+impl<D: fmt::Display> From<RawPrint<D>> for Elem {
     fn from(value: RawPrint<D>) -> Self {
         Self {
-            kind: ElemKind::Print(value.map(Into::into)),
+            kind: ElemKind::Print(value.map(|it| it.to_string())),
             ..Default::default()
         }
     }
@@ -114,7 +112,7 @@ impl<D> RawPrint<D> {
         }
     }
 
-    pub fn center_symbol(sym: D, width: u16) -> RawPrint<impl fmt::Display + Into<String>>
+    pub fn center_symbol(sym: D, width: u16) -> RawPrint<impl fmt::Display>
     where
         D: fmt::Display,
     {
@@ -124,7 +122,7 @@ impl<D> RawPrint<D> {
         }
     }
 
-    pub fn styled(self, style: Style) -> RawPrint<impl fmt::Display + Into<String>>
+    pub fn styled(self, style: Style) -> RawPrint<impl fmt::Display>
     where
         D: fmt::Display,
     {
@@ -162,7 +160,7 @@ impl<'a> PlainLines<'a> {
 }
 
 #[derive(Clone)]
-pub struct InteractCallback(Arc<dyn SharedEmit<InteractData>>);
+pub struct InteractCallback(Arc<dyn Fn(InteractData) + 'static + Send + Sync>);
 impl fmt::Debug for InteractCallback {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&std::any::Any::type_id(&self.0), f)
@@ -170,19 +168,13 @@ impl fmt::Debug for InteractCallback {
 }
 impl InteractCallback {
     pub fn from_fn(callback: impl Fn(InteractData) + 'static + Send + Sync) -> Self {
-        Self::from_emit(move |it| {
-            callback(it);
-            Ok(())
-        })
+        Self(Arc::new(callback))
     }
     pub fn from_fn_ctx<C: 'static + Send + Sync>(
         ctx: C,
         callback: impl Fn(&C, InteractData) + 'static + Send + Sync,
     ) -> Self {
         Self::from_fn(move |it| callback(&ctx, it))
-    }
-    pub fn from_emit(emit: impl SharedEmit<InteractData>) -> Self {
-        Self(Arc::new(emit))
     }
 }
 

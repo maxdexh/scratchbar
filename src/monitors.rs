@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::utils::SharedEmit;
+use futures::Stream;
+
+use crate::utils::unb_chan;
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct MonitorInfo {
@@ -104,14 +106,18 @@ impl State {
     }
 }
 
-pub fn connect(tx: impl SharedEmit<MonitorEvent>) {
+// FIXME: Use a watch channel instead
+pub fn connect() -> impl Stream<Item = MonitorEvent> {
+    let (tx, rx) = unb_chan();
     std::thread::spawn(move || {
         let mut state = State::default();
         loop {
             match state.refresh() {
                 Ok(ev) => {
-                    if let Some(ev) = ev {
-                        tx.emit(ev)
+                    if let Some(ev) = ev
+                        && tx.send(ev).is_err()
+                    {
+                        break;
                     }
                 }
                 Err(err) => {
@@ -121,4 +127,5 @@ pub fn connect(tx: impl SharedEmit<MonitorEvent>) {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
+    rx
 }
