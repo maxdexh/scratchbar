@@ -232,7 +232,7 @@ async fn time_module(
             _ = menu_tx.send(OpenMenu {
                 monitor: interact.monitor,
                 tui: tui::Stack::vertical(parts).into(),
-                location: interact.location,
+                pix_location: interact.pix_location,
                 menu_kind: MenuKind::Tooltip,
             });
         }
@@ -373,7 +373,7 @@ async fn energy_module(
                     .send(OpenMenu {
                         monitor: interact.monitor,
                         tui: tui::RawPrint::plain(text).into(),
-                        location: interact.location,
+                        pix_location: interact.pix_location,
                         menu_kind: MenuKind::Tooltip,
                     })
                     .ok_or_log();
@@ -430,7 +430,7 @@ async fn ppd_module(
                             monitor: interact.monitor,
                             tui: tui::PlainLines::new(profile.as_deref().unwrap_or("No profile"))
                                 .into(),
-                            location: interact.location,
+                            pix_location: interact.pix_location,
                             menu_kind: MenuKind::Tooltip,
                         })
                         .ok_or_log();
@@ -517,7 +517,7 @@ async fn tray_module(
                         .send(OpenMenu {
                             monitor: interact.monitor,
                             tui: tui.into(),
-                            location: interact.location,
+                            pix_location: interact.pix_location,
                             menu_kind: MenuKind::Tooltip,
                         })
                         .ok_or_log();
@@ -577,7 +577,7 @@ async fn tray_module(
                         .send(OpenMenu {
                             monitor: interact.monitor,
                             tui: tui.into(),
-                            location: interact.location,
+                            pix_location: interact.pix_location,
                             menu_kind: MenuKind::Context,
                         })
                         .ok_or_log();

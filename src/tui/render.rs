@@ -13,7 +13,7 @@ pub struct RenderCtx<'a, W> {
     pub writer: W,
     pub layout: &'a mut RenderedLayout,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SizingArgs {
     pub font_size: Vec2<u16>,
 }
@@ -32,7 +32,7 @@ pub fn render(
         crossterm::terminal::BeginSynchronizedUpdate,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
     )?;
-    let mut layout = RenderedLayout::default();
+    let mut layout = RenderedLayout::new();
     elem.render(
         &mut RenderCtx {
             sizing,

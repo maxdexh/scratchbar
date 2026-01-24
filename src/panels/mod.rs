@@ -27,7 +27,7 @@ const HORIZONTAL_PADDING: u16 = 4;
 pub struct OpenMenu {
     pub monitor: Arc<str>,
     pub tui: tui::Elem,
-    pub location: tui::Vec2<u32>,
+    pub pix_location: tui::Vec2<u32>,
     pub menu_kind: MenuKind,
 }
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +111,7 @@ async fn run_monitor(
         term_ev_rx: UnbRx<TermEvent>,
         term_upd_tx: UnbTx<TermUpdate>,
         sizes: tui::Sizes,
-        layout: tui::RenderedLayout,
+        layout: Option<tui::RenderedLayout>,
     }
     #[derive(Debug, Clone, Copy)]
     enum TermKind {
@@ -383,7 +383,7 @@ async fn run_monitor(
                     .ok_or_log() else {
                         continue;
                     };
-                    bar.layout = layout;
+                    bar.layout = Some(layout);
 
                     bar.term_upd_tx.send(TermUpdate::Print(buf)).ok_or_log();
                     bar.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
@@ -391,13 +391,15 @@ async fn run_monitor(
                 Upd::Term(term_kind, ev) => match ev {
                     TermEvent::Crossterm(ev) => match ev {
                         crossterm::event::Event::Mouse(ev) => {
-                            if let Some((interact, callback)) = bar.layout.interpret_mouse_event(
-                                ev,
-                                bar.sizes.font_size(),
-                                monitor.name.clone(),
-                            ) {
+                            if let Some((interact, callback)) = bar.layout.as_ref().and_then(|it| {
+                                it.interpret_mouse_event(
+                                    ev,
+                                    bar.sizes.font_size(),
+                                    monitor.name.clone(),
+                                )
+                            }) {
                                 if let Some(callback) = callback {
-                                    tokio::task::spawn_blocking(move || callback(interact));
+                                    tokio::task::spawn_blocking(move || callback.call(interact));
                                 } else if matches!(term_kind, TermKind::Bar) {
                                     let hide = match interact.kind {
                                         tui::InteractKind::Hover => {
@@ -439,7 +441,7 @@ async fn run_monitor(
                 },
                 Upd::OpenMenu(OpenMenu {
                     tui,
-                    location,
+                    pix_location: location,
                     menu_kind,
                     monitor: _,
                 }) => {
@@ -564,7 +566,7 @@ async fn run_monitor(
                 .context("Failed to draw menu")
                 .ok_or_log()
                 {
-                    menu.layout = layout;
+                    menu.layout = Some(layout);
                     menu.term_upd_tx.send(TermUpdate::Print(buf)).ok_or_log();
                     menu.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
                 }

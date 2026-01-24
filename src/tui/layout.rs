@@ -65,24 +65,28 @@ impl Axis {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RenderedLayout {
     widgets: Vec<(Area, InteractCallback)>,
 }
+
 impl RenderedLayout {
+    pub fn new() -> Self {
+        Self {
+            widgets: Default::default(),
+        }
+    }
     pub fn insert(&mut self, rect: Area, widget: InteractCallback) {
         self.widgets.push((rect, widget));
     }
 
+    // FIXME: Find smallest area that contains location
     pub fn interpret_mouse_event(
-        &mut self,
+        &self,
         event: crossterm::event::MouseEvent,
         font_size: Vec2<u16>,
         monitor: Arc<str>,
-    ) -> Option<(
-        InteractData,
-        Option<impl Fn(InteractData) + 'static + Send + Sync>,
-    )> {
+    ) -> Option<(InteractData, Option<InteractCallback>)> {
         use crossterm::event::*;
 
         let MouseEvent {
@@ -136,12 +140,12 @@ impl RenderedLayout {
 
         Some((
             InteractData {
-                location,
+                pix_location: location,
                 monitor,
                 kind,
                 _p: (),
             },
-            cb.cloned().map(|cb| move |interact| cb.0(interact)),
+            cb.cloned(),
         ))
     }
 }
