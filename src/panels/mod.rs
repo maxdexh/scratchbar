@@ -177,107 +177,106 @@ async fn run_monitor(
             .map_err(anyhow::Error::from)
             .flatten()?;
 
-        let (mut bar, (mut menu, mut watcher_stream)) = futures::future::try_join(
-            async {
-                init_term(
-                    format!("BAR@{}", monitor.name),
-                    vec![
-                        format!("--output-name={}", monitor.name).into(),
-                        // Allow logging to $KITTY_STDIO_FORWARDED
-                        "-o=forward_stdio=yes".into(),
-                        // Do not use the system's kitty.conf
-                        "--config=NONE".into(),
-                        // Basic look of the bar
-                        "-o=foreground=white".into(),
-                        "-o=background=black".into(),
-                        // location of the bar
-                        format!("--edge={}", crate::panels::EDGE).into(),
-                        // disable hiding the mouse
-                        "-o=mouse_hide_wait=0".into(),
-                    ],
-                    vec![],
-                )
-                .await
-            },
-            async {
-                let menu = init_term(
-                    format!("MENU@{}", monitor.name),
-                    vec![
-                        {
-                            let mut arg = OsString::from("-o=watcher=");
-                            arg.push(watcher_py);
-                            arg
-                        },
-                        format!("--output-name={}", monitor.name).into(),
-                        // Configure remote control via socket
-                        "-o=allow_remote_control=socket-only".into(),
-                        "--listen-on=unix:/tmp/kitty-bar-menu-panel.sock".into(),
-                        // Allow logging to $KITTY_STDIO_FORWARDED
-                        "-o=forward_stdio=yes".into(),
-                        // Do not use the system's kitty.conf
-                        "--config=NONE".into(),
-                        // Basic look of the menu
-                        "-o=background_opacity=0.85".into(),
-                        "-o=background=black".into(),
-                        "-o=foreground=white".into(),
-                        // Center within leftover pixels if cell size does not divide window size.
-                        "-o=placement_strategy=center".into(),
-                        // location of the menu
-                        "--edge=top".into(),
-                        // disable hiding the mouse
-                        "-o=mouse_hide_wait=0".into(),
-                        // Window behavior of the menu panel. Makes panel
-                        // act as an overlay on top of other windows.
-                        // We do not want tilers to dedicate space to it.
-                        // Taken from the args that quick-access-terminal uses.
-                        "--exclusive-zone=0".into(),
-                        "--override-exclusive-zone".into(),
-                        "--layer=overlay".into(),
-                        // Focus behavior of the panel. Since we cannot tell from
-                        // mouse events alone when the cursor leaves the panel
-                        // (since terminal mouse capture only gives us mouse
-                        // events inside the panel), we need external support for
-                        // hiding it automatically. We use a watcher to be able
-                        // to reset the menu state when this happens.
-                        "--focus-policy=on-demand".into(),
-                        "--hide-on-focus-loss".into(),
-                        // Since we control resizes from the program and not from
-                        // a somewhat continuous drag-resize, debouncing between
-                        // resize and reloads is completely inappropriate and
-                        // just results in a larger delay between resize and
-                        // the old menu content being replaced with the new one.
-                        "-o=resize_debounce_time=0 0".into(),
-                        // TODO: Mess with repaint_delay, input_delay
-                    ],
-                    vec![("BAR_MENU_WATCHER_SOCK", watcher_sock_path)],
-                )
-                .await?;
+        let bar_fut = init_term(
+            format!("BAR@{}", monitor.name),
+            vec![
+                format!("--output-name={}", monitor.name).into(),
+                // Allow logging to $KITTY_STDIO_FORWARDED
+                "-o=forward_stdio=yes".into(),
+                // Do not use the system's kitty.conf
+                "--config=NONE".into(),
+                // Basic look of the bar
+                "-o=foreground=white".into(),
+                "-o=background=black".into(),
+                // location of the bar
+                format!("--edge={}", crate::panels::EDGE).into(),
+                // disable hiding the mouse
+                "-o=mouse_hide_wait=0".into(),
+            ],
+            vec![],
+        );
+
+        let menu_fut = async {
+            let menu = init_term(
+                format!("MENU@{}", monitor.name),
+                vec![
+                    {
+                        let mut arg = OsString::from("-o=watcher=");
+                        arg.push(watcher_py);
+                        arg
+                    },
+                    format!("--output-name={}", monitor.name).into(),
+                    // Configure remote control via socket
+                    "-o=allow_remote_control=socket-only".into(),
+                    "--listen-on=unix:/tmp/kitty-bar-menu-panel.sock".into(),
+                    // Allow logging to $KITTY_STDIO_FORWARDED
+                    "-o=forward_stdio=yes".into(),
+                    // Do not use the system's kitty.conf
+                    "--config=NONE".into(),
+                    // Basic look of the menu
+                    "-o=background_opacity=0.85".into(),
+                    "-o=background=black".into(),
+                    "-o=foreground=white".into(),
+                    // Center within leftover pixels if cell size does not divide window size.
+                    "-o=placement_strategy=center".into(),
+                    // location of the menu
+                    "--edge=top".into(),
+                    // disable hiding the mouse
+                    "-o=mouse_hide_wait=0".into(),
+                    // Window behavior of the menu panel. Makes panel
+                    // act as an overlay on top of other windows.
+                    // We do not want tilers to dedicate space to it.
+                    // Taken from the args that quick-access-terminal uses.
+                    "--exclusive-zone=0".into(),
+                    "--override-exclusive-zone".into(),
+                    "--layer=overlay".into(),
+                    // Focus behavior of the panel. Since we cannot tell from
+                    // mouse events alone when the cursor leaves the panel
+                    // (since terminal mouse capture only gives us mouse
+                    // events inside the panel), we need external support for
+                    // hiding it automatically. We use a watcher to be able
+                    // to reset the menu state when this happens.
+                    "--focus-policy=on-demand".into(),
+                    "--hide-on-focus-loss".into(),
+                    // Since we control resizes from the program and not from
+                    // a somewhat continuous drag-resize, debouncing between
+                    // resize and reloads is completely inappropriate and
+                    // just results in a larger delay between resize and
+                    // the old menu content being replaced with the new one.
+                    "-o=resize_debounce_time=0 0".into(),
+                    // TODO: Mess with repaint_delay, input_delay
+                ],
+                vec![("BAR_MENU_WATCHER_SOCK", watcher_sock_path)],
+            )
+            .await?;
+            menu.term_upd_tx
+                .send(TermUpdate::RemoteControl(vec![
+                    "resize-os-window".into(),
+                    "--action=hide".into(),
+                ]))
+                .ok_or_log();
+            if VERTICAL_PADDING {
+                // HACK: For some reason, using half font height padding at top and bottom
+                // shrinks the height by 2 cells. This way of doing it only works assuming
+                // that we do not have more than 1 pixel to spare for the padding and it
+                // can only be used for vertical padding of 1 cell in total.
                 menu.term_upd_tx
                     .send(TermUpdate::RemoteControl(vec![
-                        "resize-os-window".into(),
-                        "--action=hide".into(),
+                        "set-spacing".into(),
+                        "padding-top=1".into(),
+                        "padding-bottom=1".into(),
                     ]))
                     .ok_or_log();
-                if VERTICAL_PADDING {
-                    // HACK: For some reason, using half font height padding at top and bottom
-                    // shrinks the height by 2 cells. This way of doing it only works assuming
-                    // that we do not have more than 1 pixel to spare for the padding and it
-                    // can only be used for vertical padding of 1 cell in total.
-                    menu.term_upd_tx
-                        .send(TermUpdate::RemoteControl(vec![
-                            "set-spacing".into(),
-                            "padding-top=1".into(),
-                            "padding-bottom=1".into(),
-                        ]))
-                        .ok_or_log();
-                }
+            }
 
-                let (s, _) = watcher_sock.accept().await?;
-                anyhow::Ok((menu, s))
-            },
-        )
-        .timeout(Duration::from_secs(10))
-        .await??;
+            let (s, _) = watcher_sock.accept().await?;
+            anyhow::Ok((menu, s))
+        };
+
+        let (mut bar, (mut menu, mut watcher_stream)) =
+            async { tokio::try_join!(bar_fut, menu_fut) }
+                .timeout(Duration::from_secs(10))
+                .await??;
 
         subtasks.spawn({
             let upd_tx = intern_upd_tx.clone();
