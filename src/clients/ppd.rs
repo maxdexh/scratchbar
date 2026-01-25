@@ -86,7 +86,7 @@ async fn run_bg(
             };
             perm.forget();
             let mut steps = 1;
-            while let Ok(perm) = cycle_rx.try_acquire() {
+            while let Some(perm) = cycle_rx.try_acquire().ok_or_debug() {
                 perm.forget();
                 steps += 1;
             }

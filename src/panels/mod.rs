@@ -105,6 +105,8 @@ async fn run_monitor(
     menu_rx: impl Stream<Item = OpenMenu>,
     mut reload_tx: ReloadTx,
 ) {
+    log::debug!("Starting panel manager for monitor {monitor:?}");
+
     let _auto_cancel = CancelDropGuard::from(cancel_monitor.clone());
     tokio::pin!(menu_rx);
 
@@ -304,11 +306,8 @@ async fn run_monitor(
         let mut bar_rx = bar_rx.clone();
         subtasks.spawn(async move {
             loop {
-                let mut current_bar = bar_rx.borrow_and_update().clone();
-                for it in current_bar.iter_mut() {
-                    it.mark_changed();
-                }
-                let mut tasks = JoinSet::new();
+                let current_bar = bar_rx.borrow_and_update().clone();
+                let mut listeners = JoinSet::new();
 
                 bar_tui_tx.send_if_modified(|tui| {
                     *tui = std::iter::repeat_n(BarTuiElem::Hide, current_bar.len()).collect();
@@ -317,10 +316,18 @@ async fn run_monitor(
 
                 let (bar_changed_tx, mut bar_changed_rx) = unb_chan();
                 for (i, mut rx) in current_bar.into_iter().enumerate() {
+                    rx.mark_changed();
                     let bar_changed_tx = bar_changed_tx.clone();
-                    tasks.spawn(async move {
-                        while let Ok(()) = rx.changed().await {
-                            _ = bar_changed_tx.send((i, rx.borrow_and_update().clone()));
+                    listeners.spawn(async move {
+                        loop {
+                            bar_changed_tx
+                                .send((i, rx.borrow_and_update().clone()))
+                                .ok_or_debug();
+
+                            if rx.changed().await.is_err() {
+                                log::trace!("Freezing bar part {i} as constant because its tui channel was closed");
+                                break; // stop listening
+                            }
                         }
                     });
                 }
@@ -329,9 +336,11 @@ async fn run_monitor(
                     tokio::select! {
                         res = bar_rx.changed() => {
                             res?;
-                            break; // restart the listener
+                            break; // restart all listeners
                         }
                         Some((i, elem)) = bar_changed_rx.next() => {
+                            // Bundle together changes in 50ms windows
+                            tokio::time::sleep(Duration::from_millis(50)).await;
                             bar_tui_tx.send_modify(|tui| {
                                 tui[i] = elem;
                                 while let Ok((i, elem)) = bar_changed_rx.inner.try_recv() {
@@ -395,8 +404,8 @@ async fn run_monitor(
                     };
                     bar.layout = Some(layout);
 
-                    bar.term_upd_tx.send(TermUpdate::Print(buf)).ok_or_log();
-                    bar.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
+                    bar.term_upd_tx.send(TermUpdate::Print(buf)).ok_or_debug();
+                    bar.term_upd_tx.send(TermUpdate::Flush).ok_or_debug();
                 }
                 Upd::Term(term_kind, ev) => match ev {
                     TermEvent::Crossterm(ev) => match ev {
@@ -598,4 +607,5 @@ async fn run_monitor(
         }
         tokio::time::sleep(RETRY_TIME).await;
     }
+    log::debug!("Exiting panel manager for monitor {monitor:?}");
 }

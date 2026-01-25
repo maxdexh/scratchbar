@@ -9,6 +9,9 @@ pub trait ResultExt {
     type Ok;
     #[track_caller]
     fn ok_or_log(self) -> Option<Self::Ok>;
+
+    #[track_caller]
+    fn ok_or_debug(self) -> Option<Self::Ok>;
 }
 impl<T, E: Into<anyhow::Error>> ResultExt for Result<T, E> {
     type Ok = T;
@@ -18,6 +21,17 @@ impl<T, E: Into<anyhow::Error>> ResultExt for Result<T, E> {
             Ok(val) => Some(val),
             Err(err) => {
                 log::error!("{:?}", err.into());
+                None
+            }
+        }
+    }
+
+    #[track_caller]
+    fn ok_or_debug(self) -> Option<T> {
+        match self {
+            Ok(val) => Some(val),
+            Err(err) => {
+                log::debug!("{:?}", err.into());
                 None
             }
         }

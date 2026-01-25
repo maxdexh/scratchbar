@@ -123,7 +123,7 @@ async fn hypr_module(
     let mut basic_rx = hypr.basic_rx.clone();
     basic_rx.mark_changed();
 
-    while let Ok(()) = basic_rx.changed().await {
+    while let Some(()) = basic_rx.changed().await.ok_or_debug() {
         let mut by_monitor = HashMap::new();
         for ws in basic_rx.borrow_and_update().workspaces.iter() {
             let Some(monitor) = ws.monitor.clone() else {
@@ -229,12 +229,14 @@ async fn time_module(
                 let line = tui::Stack::horizontal(line);
                 parts.push(tui::StackItem::auto(line));
             }
-            _ = menu_tx.send(OpenMenu {
-                monitor: interact.monitor,
-                tui: tui::Stack::vertical(parts).into(),
-                pix_location: interact.pix_location,
-                menu_kind: MenuKind::Tooltip,
-            });
+            menu_tx
+                .send(OpenMenu {
+                    monitor: interact.monitor,
+                    tui: tui::Stack::vertical(parts).into(),
+                    pix_location: interact.pix_location,
+                    menu_kind: MenuKind::Tooltip,
+                })
+                .ok_or_debug();
         }
         _ => {
             //
@@ -312,7 +314,7 @@ async fn pulse_module(
         }
     });
 
-    while let Ok(()) = state_rx.changed().await {
+    while let Some(()) = state_rx.changed().await.ok_or_debug() {
         let state = state_rx.borrow_and_update();
         let &PulseDeviceState { volume, muted, .. } = match device_kind {
             PulseDeviceKind::Sink => &state.sink,
@@ -383,7 +385,7 @@ async fn energy_module(
 
     let mut state_rx = energy.state_rx.clone();
     state_rx.mark_changed();
-    while let Ok(()) = state_rx.changed().await {
+    while let Some(()) = state_rx.changed().await.ok_or_debug() {
         let state = state_rx.borrow_and_update().clone();
         if !state.is_present {
             tui_tx.send_replace(BarTuiElem::Hide);
@@ -441,7 +443,7 @@ async fn ppd_module(
     });
 
     let mut profile_rx = ppd.profile_rx.clone();
-    while let Ok(()) = profile_rx.changed().await {
+    while let Some(()) = profile_rx.changed().await.ok_or_debug() {
         let Some(icon) = profile_rx
             .borrow_and_update()
             .as_deref()

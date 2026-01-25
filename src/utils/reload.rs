@@ -27,9 +27,8 @@ impl ReloadTx {
             tx: WatchTx::new(()),
         }
     }
-    // TODO: Return Option<()>
     pub fn reload(&mut self) {
-        _ = self.tx.send(());
+        self.tx.send_replace(());
     }
     pub fn subscribe(&self) -> ReloadRx {
         ReloadRx {

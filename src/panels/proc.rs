@@ -131,7 +131,9 @@ async fn run_term_inst_mgr(
 
     tasks.spawn(read_cobs_sock::<TermEvent>(
         read_half,
-        move |x| _ = ev_tx.send(x),
+        move |x| {
+            ev_tx.send(x).ok_or_debug();
+        },
         cancel.clone(),
     ));
     tasks.spawn(write_cobs_sock::<TermUpdate>(
@@ -170,7 +172,9 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
 
         tasks.spawn(read_cobs_sock(
             read,
-            move |x| _ = upd_tx.send(x),
+            move |x| {
+                upd_tx.send(x).ok_or_debug();
+            },
             cancel.clone(),
         ));
         tasks.spawn(write_cobs_sock(write, ev_rx, cancel.clone()));
@@ -201,14 +205,14 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
                 && let Some(sizes) = tui::Sizes::query().ok_or_log()
             {
                 if let Some(sizes) = sizes {
-                    _ = ev_tx.send(TermEvent::Sizes(sizes));
+                    ev_tx.send(TermEvent::Sizes(sizes)).ok_or_debug();
                 } else {
                     log::debug!(
                         "Terminal reported window size of 0 (this is expected if the terminal is hidden)"
                     );
                 }
             }
-            _ = ev_tx.send(TermEvent::Crossterm(ev));
+            ev_tx.send(TermEvent::Crossterm(ev)).ok_or_debug();
         }
     });
 
