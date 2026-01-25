@@ -1,5 +1,6 @@
 use std::{
     ffi::{OsStr, OsString},
+    sync::atomic::AtomicU64,
     time::Duration,
 };
 
@@ -24,13 +25,17 @@ pub enum TermUpdate {
     Flush,
     RemoteControl(Vec<OsString>),
     Shell(OsString, Vec<OsString>), // TODO: Envs
-    Shutdown,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum TermEvent {
     Crossterm(crossterm::event::Event),
     Sizes(tui::Sizes),
+}
+
+fn get_log_inst_counter() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
@@ -51,7 +56,10 @@ pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
         .arg(PANEL_PROC_ARG)
         .envs(extra_envs)
         .env(SOCK_PATH_VAR, sock_path)
-        .env(PROC_LOG_NAME_VAR, log_name)
+        .env(
+            PROC_LOG_NAME_VAR,
+            format!("(T{}){log_name}", get_log_inst_counter()),
+        )
         .kill_on_drop(true)
         .stdout(std::io::stderr())
         .spawn()?;
@@ -76,12 +84,11 @@ pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
             }
         };
         cancel.cancel();
-
-        // Allow the manager to send the shutdown to the child before
-        // deleting its socket and aborting its task.
-        let child_res = child.wait().timeout(Duration::from_secs(10)).await;
         drop(mgr);
         drop(tmpdir);
+
+        // Child should exit by itself because the socket connection is closed.
+        let child_res = child.wait().timeout(Duration::from_secs(10)).await;
 
         match (|| anyhow::Ok(child_res??))()
             .context("Terminal instance failed to exit after shutdown")
@@ -111,7 +118,7 @@ async fn run_term_inst_mgr(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let _auto_cancel = CancelDropGuard::from(cancel.clone());
-    let mut tasks = JoinSet::<Option<()>>::new();
+    let mut tasks = JoinSet::<()>::new();
     // TODO: Await stream
 
     let (socket, _) = socket
@@ -122,14 +129,16 @@ async fn run_term_inst_mgr(
         .context("Failed to accept socket connection")?;
     let (read_half, write_half) = socket.into_split();
 
-    tasks.spawn(
-        read_cobs_sock::<TermEvent>(read_half, move |x| _ = ev_tx.send(x))
-            .with_cancellation_token_owned(cancel.clone()),
-    );
-    tasks.spawn(
-        write_cobs_sock::<TermUpdate>(write_half, updates)
-            .with_cancellation_token_owned(cancel.clone()),
-    );
+    tasks.spawn(read_cobs_sock::<TermEvent>(
+        read_half,
+        move |x| _ = ev_tx.send(x),
+        cancel.clone(),
+    ));
+    tasks.spawn(write_cobs_sock::<TermUpdate>(
+        write_half,
+        updates,
+        cancel.clone(),
+    ));
 
     if let Some(Err(err)) = tasks.join_next().await {
         log::error!("Error with task: {err}");
@@ -146,6 +155,7 @@ pub async fn term_proc_main() {
 
 async fn term_proc_main_inner() -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
+    let cancel = CancellationToken::new();
     let (ev_tx, upd_rx);
     {
         let socket = std::env::var_os(SOCK_PATH_VAR).context("Missing socket path env var")?;
@@ -158,8 +168,12 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         (ev_tx, ev_rx) = unb_chan::<TermEvent>();
         (upd_tx, upd_rx) = std::sync::mpsc::channel::<TermUpdate>();
 
-        tasks.spawn(read_cobs_sock(read, move |x| _ = upd_tx.send(x)));
-        tasks.spawn(write_cobs_sock(write, ev_rx));
+        tasks.spawn(read_cobs_sock(
+            read,
+            move |x| _ = upd_tx.send(x),
+            cancel.clone(),
+        ));
+        tasks.spawn(write_cobs_sock(write, ev_rx, cancel.clone()));
     }
 
     crossterm::execute!(
@@ -189,8 +203,8 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
                 if let Some(sizes) = sizes {
                     _ = ev_tx.send(TermEvent::Sizes(sizes));
                 } else {
-                    log::warn!(
-                        "Terminal reported window size of 0 (this should only happen when hidden)"
+                    log::debug!(
+                        "Terminal reported window size of 0 (this is expected if the terminal is hidden)"
                     );
                 }
             }
@@ -218,15 +232,15 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         }
     }
 
-    let cancel_blocking = CancellationToken::new();
-    let cancel_blocking_clone = cancel_blocking.clone();
+    let cancel_blocking = cancel.clone();
     std::thread::spawn(move || {
-        let _auto_cancel = cancel_blocking_clone.drop_guard();
+        let auto_cancel = CancelDropGuard::from(cancel_blocking);
         use std::io::Write as _;
         let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
-        while let Ok(upd) = upd_rx.recv() {
+        while !auto_cancel.inner.is_cancelled()
+            && let Ok(upd) = upd_rx.recv()
+        {
             match upd {
-                TermUpdate::Shutdown => break,
                 TermUpdate::Print(bytes) => {
                     stdout
                         .write_all(&bytes)
@@ -262,7 +276,7 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         Some(res) = tasks.join_next() => {
             res.ok_or_log();
         }
-        () = cancel_blocking.cancelled() => {}
+        () = cancel.cancelled() => {}
     }
 
     Ok(())
@@ -271,55 +285,67 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
 async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
     read: tokio::net::unix::OwnedReadHalf,
     tx: impl Fn(T),
+    cancel: CancellationToken,
 ) {
-    use tokio::io::AsyncBufReadExt as _;
-    let mut read = tokio::io::BufReader::new(read);
-    loop {
-        let mut buf = Vec::new();
-        match read.read_until(0, &mut buf).await {
-            Ok(0) => break,
-            Err(err) => {
-                log::error!("Failed to read event socket: {err}");
-                break;
+    let auto_cancel = CancelDropGuard::from(cancel);
+    async {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut read = tokio::io::BufReader::new(read);
+        loop {
+            let mut buf = Vec::new();
+            match read.read_until(0, &mut buf).await {
+                Ok(0) => break,
+                Err(err) => {
+                    log::error!("Failed to read event socket: {err}");
+                    break;
+                }
+                Ok(n) => log::trace!("Received {n} bytes"),
             }
-            Ok(n) => log::trace!("Received {n} bytes"),
-        }
 
-        match postcard::from_bytes_cobs(&mut buf) {
-            Err(err) => {
-                log::error!(
-                    "Failed to deserialize {} from socket: {err}",
-                    std::any::type_name::<T>()
-                );
+            match postcard::from_bytes_cobs(&mut buf) {
+                Err(err) => {
+                    log::error!(
+                        "Failed to deserialize {} from socket: {err}",
+                        std::any::type_name::<T>()
+                    );
+                }
+                Ok(ev) => {
+                    tx(ev);
+                }
             }
-            Ok(ev) => {
-                tx(ev);
-            }
-        }
 
-        buf.clear();
+            buf.clear();
+        }
     }
+    .with_cancellation_token(&auto_cancel.inner)
+    .await;
 }
 
 async fn write_cobs_sock<T: serde::Serialize>(
     mut write: tokio::net::unix::OwnedWriteHalf,
     stream: impl Stream<Item = T>,
+    cancel: CancellationToken,
 ) {
-    use tokio::io::AsyncWriteExt as _;
-    tokio::pin!(stream);
-    while let Some(item) = stream.next().await {
-        let Ok(buf) = postcard::to_stdvec_cobs(&item)
-            .map_err(|err| log::error!("Failed to serialize update: {err}"))
-        else {
-            continue;
-        };
+    let auto_cancel = CancelDropGuard::from(cancel);
+    async {
+        use tokio::io::AsyncWriteExt as _;
+        tokio::pin!(stream);
+        while let Some(item) = stream.next().await {
+            let Ok(buf) = postcard::to_stdvec_cobs(&item)
+                .map_err(|err| log::error!("Failed to serialize update: {err}"))
+            else {
+                continue;
+            };
 
-        if let Err(err) = write.write_all(&buf).await {
-            log::error!(
-                "Failed to write {} to socket: {err}",
-                std::any::type_name::<T>()
-            );
-            break;
+            if let Err(err) = write.write_all(&buf).await {
+                log::error!(
+                    "Failed to write {} to socket: {err}",
+                    std::any::type_name::<T>()
+                );
+                break;
+            }
         }
     }
+    .with_cancellation_token(&auto_cancel.inner)
+    .await;
 }

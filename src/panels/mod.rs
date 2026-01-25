@@ -97,6 +97,7 @@ pub async fn run_manager(
     }
 }
 
+// FIXME: Split this function
 async fn run_monitor(
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
@@ -125,7 +126,7 @@ async fn run_monitor(
         OpenMenu(OpenMenu),
     }
 
-    let mut try_run = async || -> anyhow::Result<std::convert::Infallible> {
+    let mut try_run = async || -> anyhow::Result<()> {
         let cancel = cancel_monitor.child_token();
         let _auto_cancel = CancelDropGuard::from(cancel.clone());
         let mut subtasks = JoinSet::<anyhow::Result<std::convert::Infallible>>::new();
@@ -362,7 +363,16 @@ async fn run_monitor(
                 Some(upd) = intern_upd_rx.next() => upd,
                 Some(menu) = menu_rx.next() => Upd::OpenMenu(menu),
                 Ok(()) = bar_tui_rx.changed() => Upd::BarTui,
-                Some(res) = subtasks.join_next() => return res?,
+                Some(res) = subtasks.join_next() => match res {
+                    Err(join_err) => {
+                        if join_err.is_cancelled() {
+                            return Ok(());
+                        }
+                        return Err(join_err).context("Failure joining instance task");
+                    },
+                    Ok(Err(task_err)) => return Err(task_err).context("Failure running instance task"),
+                },
+                () = cancel.cancelled() => return Ok(()),
             };
             match upd {
                 Upd::BarTui => {
@@ -574,16 +584,18 @@ async fn run_monitor(
         }
     };
 
+    const RETRY_TIME: Duration = Duration::from_secs(5);
     loop {
-        try_run()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to run panels for monitor {}. Retrying in 30s",
-                    monitor.name
-                )
-            })
-            .ok_or_log();
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        let res = try_run().await.with_context(|| {
+            format!(
+                "Failed to run panels for monitor {}. Retrying in {}s",
+                monitor.name,
+                RETRY_TIME.as_secs()
+            )
+        });
+        if let Some(()) = res.ok_or_log() {
+            break;
+        }
+        tokio::time::sleep(RETRY_TIME).await;
     }
 }

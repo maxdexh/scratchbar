@@ -26,7 +26,7 @@ async fn main_inner() {
             let Some(name) = std::env::var(proc::PROC_LOG_NAME_VAR).ok_or_log() else {
                 return;
             };
-            log::info!("Term process {name:?} started");
+            log::info!("Term process {name} started");
             init_logger(ProcKindForLogger::Panel(name.clone()));
             crate::panels::proc::term_proc_main().await
         }

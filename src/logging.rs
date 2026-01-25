@@ -14,7 +14,7 @@ impl std::fmt::Display for ProcKindForLogger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Controller => write!(f, "CONTROLLER"),
-            Self::Panel(id) => write!(f, "{id:?}"),
+            Self::Panel(id) => write!(f, "{id}"),
         }
     }
 }
