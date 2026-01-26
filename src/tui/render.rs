@@ -46,6 +46,7 @@ pub fn render(
          }| RenderedLayout {
             widgets: Default::default(),
             last_hover,
+            // FIXME: This should be determined during the render
             last_hover_id,
         },
     );

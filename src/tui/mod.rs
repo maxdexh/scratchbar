@@ -84,8 +84,8 @@ impl From<Block> for Elem {
         }
     }
 }
-impl From<Arc<Elem>> for Elem {
-    fn from(value: Arc<Elem>) -> Self {
+impl From<Arc<Self>> for Elem {
+    fn from(value: Arc<Self>) -> Self {
         Self {
             kind: ElemKind::Shared(value),
             ..Default::default()

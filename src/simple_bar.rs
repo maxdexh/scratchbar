@@ -300,6 +300,8 @@ async fn pulse_module(
             PulseDeviceKind::Sink => &state.sink,
             PulseDeviceKind::Source => &state.source,
         };
+        drop(state);
+
         tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
             tui::Elem::from(tui::Stack::horizontal([
                 tui::StackItem::auto(if muted {

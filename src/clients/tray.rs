@@ -8,9 +8,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::run_or_retry;
-use crate::utils::{ReloadRx, ResultExt, UnbTx, WatchRx, unb_chan, watch_chan};
-use crate::utils::{ReloadTx, WatchTx};
+use crate::utils::{
+    ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, run_or_retry, unb_chan, watch_chan,
+};
 
 #[derive(Debug, Default)]
 pub struct TrayState {

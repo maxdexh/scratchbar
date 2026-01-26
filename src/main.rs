@@ -40,17 +40,17 @@ async fn main_inner() {
 }
 
 async fn exit_signal() {
-    use tokio::signal::unix::SignalKind;
+    type SK = tokio::signal::unix::SignalKind;
     let mut tasks = tokio::task::JoinSet::new();
     for kind in [
-        SignalKind::interrupt(),
-        SignalKind::quit(),
-        SignalKind::alarm(),
-        SignalKind::hangup(),
-        SignalKind::pipe(),
-        SignalKind::terminate(),
-        SignalKind::user_defined1(),
-        SignalKind::user_defined2(),
+        SK::interrupt(),
+        SK::quit(),
+        SK::alarm(),
+        SK::hangup(),
+        SK::pipe(),
+        SK::terminate(),
+        SK::user_defined1(),
+        SK::user_defined2(),
     ] {
         if let Some(mut signal) = utils::ResultExt::ok_or_log(tokio::signal::unix::signal(kind)) {
             tasks.spawn(async move {

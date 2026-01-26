@@ -65,8 +65,8 @@ impl<T, R> Callback<T, R> {
         (self.0.inner)(arg)
     }
 }
-impl<T, R> From<&Callback<T, R>> for Callback<T, R> {
-    fn from(value: &Callback<T, R>) -> Self {
+impl<T, R> From<&Self> for Callback<T, R> {
+    fn from(value: &Self) -> Self {
         value.clone()
     }
 }

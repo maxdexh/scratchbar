@@ -46,6 +46,7 @@ pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
     term_ev_tx: UnbTx<TermEvent>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    // FIXME: delete immediately after establishing connection
     let tmpdir = tempfile::TempDir::new()?;
     let sock_path = tmpdir.path().join("term-updates.sock");
     let socket = tokio::net::UnixListener::bind(&sock_path)?;
@@ -64,7 +65,7 @@ pub fn spawn_generic_panel<AK: AsRef<OsStr>, AV: AsRef<OsStr>>(
         .stdout(std::io::stderr())
         .spawn()?;
 
-    // TODO: Consider removing spawn?
+    // FIXME: Spawn in a joinset
     tokio::spawn(async move {
         let mut mgr = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(run_term_inst_mgr(
             socket,
