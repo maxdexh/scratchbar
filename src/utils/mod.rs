@@ -4,6 +4,8 @@ mod reload;
 pub use reload::*;
 mod channels;
 pub use channels::*;
+mod callback;
+pub use callback::*;
 
 pub trait ResultExt {
     type Ok;

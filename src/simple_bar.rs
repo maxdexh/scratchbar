@@ -482,23 +482,36 @@ async fn tray_module(
                     .with_context(|| format!("Unknown tray addr {addr}"))
                     .ok_or_log()?;
 
-                let icb = {
-                    |menu_path, id| {
-                        let tray = tray.clone();
-                        let addr = addr.clone();
-                        let menu_path = Arc::clone(menu_path);
-                        tui::InteractCallback::from_fn(move |interact| {
-                            tray.menu_interact_tx
-                                .send(TrayMenuInteract {
-                                    addr: addr.clone(),
-                                    menu_path: Arc::clone(&menu_path),
-                                    id,
-                                    kind: interact.kind,
-                                })
-                                .ok_or_log();
-                            None
-                        })
-                    }
+                let icb = |menu_path: &Arc<str>, id| {
+                    let tray = tray.clone();
+                    let addr = addr.clone();
+                    let menu_path = menu_path.clone();
+                    tui::InteractCallback::from_fn(move |interact| {
+                        if let tui::InteractKind::Click(tui::MouseButton::Left) = interact.kind {
+                            let addr = addr.clone();
+                            let menu_path = menu_path.clone();
+                            tray.client_sched_tx
+                                .send(ClientCallback::from_fn(move |client| {
+                                    let addr = addr.clone();
+                                    let menu_path = Arc::clone(&menu_path);
+                                    tokio::spawn(async move {
+                                        client
+                                            .activate(
+                                                system_tray::client::ActivateRequest::MenuItem {
+                                                    address: str::to_owned(&addr),
+                                                    menu_path: str::to_owned(&menu_path),
+                                                    submenu_id: id,
+                                                },
+                                            )
+                                            .await
+                                            .context("Failed to send ActivateRequest")
+                                            .ok_or_log();
+                                    });
+                                }))
+                                .ok_or_debug();
+                        }
+                        None
+                    })
                 };
 
                 let tui = tui::Block {

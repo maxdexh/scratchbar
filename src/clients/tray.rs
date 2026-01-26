@@ -1,25 +1,16 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Context;
+use futures::Stream;
 use futures::StreamExt as _;
-use futures::{FutureExt, Stream};
 use system_tray::item::StatusNotifierItem;
+use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::WatchTx;
-use crate::{
-    tui,
-    utils::{ReloadRx, ResultExt, UnbTx, WatchRx, unb_chan, watch_chan},
-};
-
-#[derive(Debug, Clone)]
-pub struct TrayMenuInteract {
-    pub addr: Arc<str>,
-    pub menu_path: Arc<str>,
-    pub id: i32,
-    pub kind: tui::InteractKind,
-}
+use crate::utils::Callback;
+use crate::utils::{ReloadRx, ResultExt, UnbTx, WatchRx, unb_chan, watch_chan};
+use crate::utils::{ReloadTx, WatchTx};
 
 #[derive(Debug, Default)]
 pub struct TrayState {
@@ -34,27 +25,28 @@ pub struct TrayMenuExt {
     pub submenus: Vec<system_tray::menu::MenuItem>,
 }
 
+pub type ClientCallback = Callback<Arc<system_tray::client::Client>, ()>;
 pub struct TrayClient {
     pub state_rx: WatchRx<TrayState>,
-    pub menu_interact_tx: UnbTx<TrayMenuInteract>,
+    pub client_sched_tx: UnbTx<ClientCallback>,
     _background: AbortOnDropHandle<()>,
 }
 pub fn connect(reload_rx: ReloadRx) -> TrayClient {
     let (state_tx, state_rx) = watch_chan(Default::default());
-    let (menu_interact_tx, menu_interact_rx) = unb_chan();
+    let (client_sched_tx, client_sched_rx) = unb_chan();
     TrayClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(
             state_tx,
-            menu_interact_rx,
+            client_sched_rx,
             reload_rx,
         ))),
         state_rx,
-        menu_interact_tx,
+        client_sched_tx,
     }
 }
 async fn run_bg(
     state_tx: WatchTx<TrayState>,
-    menu_interact_rx: impl Stream<Item = TrayMenuInteract> + 'static + Send,
+    client_sched_rx: impl Stream<Item = ClientCallback> + Send + 'static,
     mut reload_rx: ReloadRx,
 ) {
     let client = loop {
@@ -74,24 +66,42 @@ async fn run_bg(
     let mut tasks = JoinSet::<()>::new();
 
     {
-        let (tx, rx) = unb_chan();
+        let mut event_reload_tx = ReloadTx::new();
+        let event_reload_rx = event_reload_tx.subscribe();
 
         // Minimize lagged events
         let mut event_rx = client.subscribe();
         tasks.spawn(async move {
-            while match event_rx.recv().await {
-                Ok(ev) => tx.send(ev).is_ok(),
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    log::warn!("Lagged {n} events from system-tray client");
-                    true
+            loop {
+                if let Err(broadcast::error::RecvError::Closed) = event_rx.recv().await {
+                    return;
                 }
-            } {}
+
+                let debounce = tokio::time::sleep(Duration::from_millis(50));
+                tokio::pin!(debounce);
+                loop {
+                    tokio::select! {
+                        res = event_rx.recv() => {
+                            if let Err(broadcast::error::RecvError::Closed) = res {
+                                return;
+                            }
+                        }
+                        () = &mut debounce => break,
+                    }
+                }
+
+                event_reload_tx.reload();
+            }
         });
 
-        tasks.spawn(run_state_fetcher(client.items(), rx, state_tx, reload_rx));
+        tasks.spawn(run_state_fetcher(
+            client.items(),
+            event_reload_rx,
+            state_tx,
+            reload_rx,
+        ));
     }
-    tasks.spawn(run_menu_interaction(client, menu_interact_rx));
+    tasks.spawn(run_client_sched(client, client_sched_rx));
 
     if let Some(res @ Err(_)) = tasks.join_next().await {
         res.context("Systray module failed").ok_or_log();
@@ -99,7 +109,7 @@ async fn run_bg(
 }
 async fn run_state_fetcher(
     state_mutex: Arc<std::sync::Mutex<system_tray::data::BaseMap>>,
-    client_rx: impl Stream<Item = system_tray::client::Event>,
+    mut event_reload_rx: ReloadRx,
     state_tx: WatchTx<TrayState>,
     mut reload_rx: ReloadRx,
 ) {
@@ -116,7 +126,7 @@ async fn run_state_fetcher(
                     addr.clone(),
                     TrayMenuExt {
                         id: menu.id,
-                        menu_path: None,
+                        menu_path: item.menu.as_deref().map(Into::into),
                         submenus: menu.submenus.clone(),
                     },
                 );
@@ -131,76 +141,29 @@ async fn run_state_fetcher(
             .ok_or_log()
     };
 
-    let mut menu_paths = HashMap::new();
+    //let mut menu_paths = HashMap::new();
 
-    tokio::pin!(client_rx);
     loop {
-        let mut ev_opt = tokio::select! {
-            ev = client_rx.next() => {
-                if ev.is_none() {
-                    log::warn!("Systray client disconnected");
-                    break
-                }
-                ev
-            }
-            Some(()) = reload_rx.wait() => None,
-        };
-        while let Some(ev) = ev_opt {
-            if let system_tray::client::Event::Update(
-                addr,
-                system_tray::client::UpdateEvent::MenuConnect(menu_path),
-            ) = ev
-            {
-                log::trace!("Connected menu {menu_path} for addr {addr}");
-                menu_paths.insert(addr, Arc::<str>::from(menu_path));
-            }
-            ev_opt = client_rx.next().now_or_never().flatten();
+        tokio::select! {
+            Some(()) = event_reload_rx.wait() => {}
+            Some(()) = reload_rx.wait() => {},
         }
 
-        let Some((items, mut menus)) = fetch().await else {
+        let Some((items, menus)) = fetch().await else {
             continue;
         };
-        menu_paths.retain(|addr, menu_path| {
-            if let Some(menu) = menus.get_mut(addr as &str) {
-                menu.menu_path = Some(menu_path.clone());
-                true
-            } else {
-                false
-            }
-        });
         state_tx.send_replace(TrayState { items, menus });
     }
 }
-// FIXME: Move to bar
-async fn run_menu_interaction(
+async fn run_client_sched(
     client: system_tray::client::Client,
-    interact_rx: impl Stream<Item = TrayMenuInteract>,
+    cb_rx: impl Stream<Item = ClientCallback>,
 ) {
-    tokio::pin!(interact_rx);
-    while let Some(interact) = interact_rx.next().await {
-        let TrayMenuInteract {
-            addr,
-            menu_path,
-            id,
-            kind,
-        } = interact;
-
-        match kind {
-            tui::InteractKind::Click(tui::MouseButton::Left) => {
-                client
-                    .activate(system_tray::client::ActivateRequest::MenuItem {
-                        address: str::to_owned(&addr),
-                        menu_path: str::to_owned(&menu_path),
-                        submenu_id: id,
-                    })
-                    .await
-                    .context("Failed to send ActivateRequest")
-                    .ok_or_log();
-            }
-            _ => {
-                //
-            }
-        }
+    let client = Arc::new(client);
+    tokio::pin!(cb_rx);
+    while let Some(cb) = cb_rx.next().await {
+        let client = client.clone();
+        tokio::task::spawn_blocking(move || cb.call(client));
     }
     log::warn!("Tray interact stream was closed");
 }

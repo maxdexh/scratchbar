@@ -56,7 +56,7 @@ async fn exit_signal() {
             tasks.spawn(async move {
                 let exit = signal.recv().await.is_some();
                 if exit {
-                    log::debug!("Exiting for signal {kind:?}");
+                    log::info!("Exiting for signal {kind:?}");
                 }
                 exit
             });

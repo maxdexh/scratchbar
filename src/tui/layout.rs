@@ -110,7 +110,6 @@ impl RenderedLayout {
         event: crossterm::event::MouseEvent,
         font_size: Vec2<u16>,
     ) -> MouseEventResult {
-        log::debug!("{event:?} {self:?}");
         use crossterm::event::*;
 
         let MouseEvent {
