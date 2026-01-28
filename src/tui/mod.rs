@@ -9,73 +9,64 @@ use crate::utils::Callback;
 
 #[derive(Debug, Clone)]
 enum ElemKind {
-    Print { raw: Arc<str>, size: Vec2<u16> },
-    Image(Arc<Image>),
+    Print { raw: String, size: Vec2<u16> },
+    Image(Image),
     Stack(Stack),
-    Block(Arc<BlockBuilder>),
+    Block(BlockBuilder),
+    MinSize { size: Vec2<u16>, elem: Elem },
+    Interact(InteractElem),
+}
+#[derive(Debug, Clone)]
+struct InteractElem {
+    inner: Elem,
+    hovered: Option<Elem>,
+    callback: InteractCallback,
 }
 
 #[derive(Debug, Clone)]
-pub struct Elem {
-    kind: ElemKind,
-    elem_id: u64,
+pub struct Elem(Arc<ElemKind>);
 
-    min_size: Vec2<u16>,
-
-    // FIXME: Merge interact attrs,
-    // callbacks return optional replacement
-    // that stays active while tooltip/menu
-    // is active or if none is provided, until
-    // element is unhovered
-    interact: Option<InteractCallback>,
-    tooltip: Option<HoverCallback>,
-    hovered: Option<Arc<Elem>>,
+impl From<ElemKind> for Elem {
+    fn from(value: ElemKind) -> Self {
+        Self(Arc::new(value))
+    }
 }
 
 impl Elem {
     pub fn is_identical(&self, other: &Elem) -> bool {
-        self.elem_id == other.elem_id
-    }
-    fn new(kind: ElemKind) -> Self {
-        use std::sync::atomic::*;
-        static ELEM_ID: AtomicU64 = AtomicU64::new(0);
-        Self {
-            kind,
-            elem_id: ELEM_ID.fetch_add(1, Ordering::Relaxed),
-            min_size: Default::default(),
-            interact: None,
-            tooltip: None,
-            hovered: None,
-        }
+        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
     }
 
-    pub fn with_min_size(mut self, min_size: Vec2<u16>) -> Self {
-        self.min_size = self.min_size.combine(min_size, std::cmp::max);
-        self
+    pub fn with_min_size(self, min_size: Vec2<u16>) -> Self {
+        ElemKind::MinSize {
+            size: min_size,
+            elem: self,
+        }
+        .into()
     }
 
     pub fn empty() -> Self {
-        Self::new(ElemKind::Print {
+        ElemKind::Print {
             raw: Default::default(),
             size: Default::default(),
-        })
+        }
+        .into()
     }
     pub fn image(img: image::RgbaImage, sizing: ImageSizeMode) -> Self {
-        Self::new(ElemKind::Image(Arc::new(Image { img, sizing })))
+        ElemKind::Image(Image { img, sizing }).into()
     }
 
-    pub fn with_interact(mut self, on_interact: impl Into<InteractCallback>) -> Self {
-        self.interact = Some(on_interact.into());
-        self
-    }
-    pub fn with_tooltip(mut self, tooltip: impl Into<HoverCallback>) -> Self {
-        self.tooltip = Some(tooltip.into());
-        self
-    }
-    pub fn with_hovered(mut self, hovered: impl Into<Elem>) -> Self {
-        let hovered = hovered.into();
-        self.hovered = Some(Arc::new(hovered));
-        self
+    pub fn on_interact(
+        self,
+        on_interact: impl Into<InteractCallback>,
+        hovered: impl Into<Option<Elem>>,
+    ) -> Self {
+        ElemKind::Interact(InteractElem {
+            hovered: hovered.into(),
+            callback: on_interact.into(),
+            inner: self,
+        })
+        .into()
     }
     pub fn build_block(init: impl FnOnce(&mut BlockBuilder)) -> Self {
         let mut builder = BlockBuilder {
@@ -85,7 +76,7 @@ impl Elem {
             inner: None,
         };
         init(&mut builder);
-        Self::new(ElemKind::Block(Arc::new(builder)))
+        ElemKind::Block(builder).into()
     }
     pub fn build_stack(axis: Axis, init: impl FnOnce(&mut StackBuilder)) -> Self {
         let mut builder = StackBuilder::new(axis);
@@ -130,25 +121,27 @@ impl StackBuilder {
     }
     pub fn build(self) -> Elem {
         let Self { axis, parts } = self;
-        Elem::new(ElemKind::Stack(Stack {
+        ElemKind::Stack(Stack {
             axis,
             parts: parts.into(),
-        }))
+        })
+        .into()
     }
 }
 
 impl From<Stack> for Elem {
     fn from(value: Stack) -> Self {
-        Self::new(ElemKind::Stack(value))
+        ElemKind::Stack(value).into()
     }
 }
 impl<D: fmt::Display> From<RawPrint<D>> for Elem {
     fn from(value: RawPrint<D>) -> Self {
         let RawPrint { raw, size } = value;
-        Self::new(ElemKind::Print {
-            raw: raw.to_string().into(),
+        ElemKind::Print {
+            raw: raw.to_string(),
             size,
-        })
+        }
+        .into()
     }
 }
 impl<S: fmt::Display> From<PlainLines<S>> for Elem {
@@ -236,12 +229,32 @@ impl<S> PlainLines<S> {
     }
 }
 
-pub type InteractCallback = Callback<InteractArgs, Option<Elem>>;
-pub type HoverCallback = Callback<HoverArgs, Option<Elem>>;
 #[derive(Debug)]
-pub struct HoverArgs {
-    _p: (),
+pub struct OpenMenu {
+    pub(crate) tui: Elem,
+    pub(crate) menu_kind: MenuKind,
 }
+impl OpenMenu {
+    pub fn context(tui: Elem) -> Self {
+        Self {
+            tui,
+            menu_kind: MenuKind::Context,
+        }
+    }
+    pub fn tooltip(tui: Elem) -> Self {
+        Self {
+            tui,
+            menu_kind: MenuKind::Tooltip,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    Tooltip,
+    Context,
+}
+
+pub type InteractCallback = Callback<InteractArgs, Option<OpenMenu>>;
 
 #[derive(Debug)]
 pub struct InteractArgs {

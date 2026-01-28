@@ -13,6 +13,7 @@ use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 use crate::{
     monitors::MonitorInfo,
     tui,
+    tui::MenuKind,
     utils::{
         CancelDropGuard, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, run_or_retry, unb_chan,
         watch_chan,
@@ -25,12 +26,6 @@ const EDGE: &str = "top";
 /// Adds an extra line and centers the content of the menu with padding of half a cell.
 const VERTICAL_PADDING: bool = true;
 const HORIZONTAL_PADDING: u16 = 4;
-
-#[derive(Debug, Clone, Copy)]
-pub enum MenuKind {
-    Tooltip,
-    Context,
-}
 
 pub struct BarTuiState {
     // FIXME: Use Option<Elem> to hide
@@ -98,7 +93,7 @@ struct Term {
     sizes: tui::Sizes,
     layout: Option<tui::RenderedLayout>,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TermKind {
     Menu,
     Bar,
@@ -158,7 +153,7 @@ async fn run_monitor_mainloop(
     struct ShowMenu {
         kind: MenuKind,
         pix_location: tui::Vec2<u32>,
-        cached_tui_size: tui::Vec2<u16>,
+        cached_size: tui::Vec2<u16>,
         sizing: tui::SizingArgs,
         tui: tui::Elem,
     }
@@ -190,115 +185,58 @@ async fn run_monitor_mainloop(
                         }) else {
                             continue;
                         };
-                        let mut hide_menu = false;
-                        match (
-                            layout.interpret_mouse_event(ev, env.bar.sizes.font_size()),
-                            term_kind,
-                        ) {
-                            (tui::MouseEventResult::Ignore, _) => continue,
-                            (
-                                res @ (tui::MouseEventResult::HoverChanged
-                                | tui::MouseEventResult::HoverEmpty
-                                | tui::MouseEventResult::HoverTooltip { .. }),
-                                TermKind::Menu,
-                            ) => {
-                                if matches!(res, tui::MouseEventResult::HoverTooltip { .. }) {
-                                    log::warn!("Ignoring tooltip, which is unsupported on menu");
-                                }
+
+                        let tui::MouseEventResult {
+                            interact,
+                            callback,
+                            empty,
+                            changed,
+                            rerender,
+                            pix_location,
+                        } = layout.interpret_mouse_event(ev, env.bar.sizes.font_size());
+                        let is_hover = interact.kind == tui::InteractKind::Hover;
+
+                        if term_kind == TermKind::Menu
+                            && let Some(menu) = &show_menu
+                            && menu.kind == MenuKind::Tooltip
+                        {
+                            show_menu = None;
+                            rerender_menu = true;
+                        }
+
+                        if rerender {
+                            match term_kind {
+                                TermKind::Menu => rerender_menu = true,
+                                TermKind::Bar => rerender_bar = true,
+                            }
+                        }
+
+                        if changed || !is_hover {
+                            if empty
+                                && term_kind == TermKind::Bar
+                                && let Some(menu) = &show_menu
+                                && (!is_hover || menu.kind == MenuKind::Tooltip)
+                            {
+                                show_menu = None;
                                 rerender_menu = true;
                             }
-                            (tui::MouseEventResult::HoverChanged, TermKind::Bar) => {
-                                log::warn!("Hover without tooltip is unsupported on bar");
-                            }
-                            (tui::MouseEventResult::HoverEmpty, TermKind::Bar) => {
-                                if show_menu
-                                    .as_ref()
-                                    .is_some_and(|it| matches!(it.kind, MenuKind::Tooltip))
-                                {
-                                    hide_menu = true;
-                                }
-                                rerender_bar = true;
-                            }
-                            (
-                                tui::MouseEventResult::Interact {
-                                    pix_location,
-                                    interact,
-                                    tooltip,
-                                },
-                                _,
-                            ) => {
-                                if let Some((cb, args)) = interact
-                                    && let Some(tui) = cb.call(args)
-                                {
-                                    let sizing = tui::SizingArgs {
-                                        font_size: env.menu.sizes.font_size(),
-                                    };
-                                    show_menu = Some(ShowMenu {
-                                        cached_tui_size: tui::calc_min_size(&tui, &sizing),
-                                        sizing,
-                                        tui,
-                                        kind: MenuKind::Context,
-                                        pix_location,
-                                    });
-                                    rerender_menu = true;
-                                } else if let Some((tt, args)) = tooltip
-                                    && let Some(tui) = tt.call(args)
-                                {
-                                    let sizing = tui::SizingArgs {
-                                        font_size: env.menu.sizes.font_size(),
-                                    };
-                                    show_menu = Some(ShowMenu {
-                                        cached_tui_size: tui::calc_min_size(&tui, &sizing),
-                                        sizing,
-                                        tui,
-                                        kind: MenuKind::Context,
-                                        pix_location,
-                                    });
-                                    rerender_menu = true;
-                                } else if matches!(term_kind, TermKind::Bar) {
-                                    hide_menu = true;
-                                }
-                            }
-                            (tui::MouseEventResult::InteractEmpty, TermKind::Bar) => {
-                                hide_menu = true;
-                            }
-                            (tui::MouseEventResult::InteractEmpty, TermKind::Menu) => {
-                                continue;
-                            }
-                            (
-                                tui::MouseEventResult::HoverTooltip {
-                                    pix_location,
-                                    tooltip,
-                                    args,
-                                },
-                                TermKind::Bar,
-                            ) => {
-                                if show_menu
-                                    .as_ref()
-                                    .is_some_and(|it| matches!(it.kind, MenuKind::Context))
-                                {
-                                    log::debug!("Not replacing context menu with tooltip");
-                                    continue;
-                                }
-                                let Some(tui) = tooltip.call(args) else {
-                                    continue;
-                                };
+
+                            if let Some(callback) = callback
+                                && let Some(tui::OpenMenu { tui, menu_kind }) =
+                                    callback.call(interact)
+                            {
                                 let sizing = tui::SizingArgs {
                                     font_size: env.menu.sizes.font_size(),
                                 };
                                 show_menu = Some(ShowMenu {
-                                    cached_tui_size: tui::calc_min_size(&tui, &sizing),
+                                    cached_size: tui::calc_min_size(&tui, &sizing),
                                     sizing,
                                     tui,
-                                    kind: MenuKind::Tooltip,
+                                    kind: menu_kind,
                                     pix_location,
                                 });
                                 rerender_menu = true;
                             }
-                        }
-                        if hide_menu && show_menu.is_some() {
-                            show_menu = None;
-                            rerender_menu = true;
                         }
                     }
                     _ => {
@@ -319,7 +257,7 @@ async fn run_monitor_mainloop(
             Upd::MenuWatcherHide => {
                 show_menu = None;
                 if let Some(layout) = &mut env.bar.layout
-                    && layout.reset_hover()
+                    && layout.ext_focus_loss()
                 {
                     rerender_bar = true;
                 }
@@ -329,14 +267,14 @@ async fn run_monitor_mainloop(
         if rerender_menu {
             if show_menu.is_none()
                 && let Some(layout) = &mut env.bar.layout
-                && layout.reset_hover()
+                && layout.ext_focus_loss()
             {
                 rerender_bar = true;
             }
 
             if let Some(ShowMenu {
                 pix_location: location,
-                cached_tui_size,
+                cached_size: cached_tui_size,
                 ref tui,
                 ref sizing,
                 kind: _,

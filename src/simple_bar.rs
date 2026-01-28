@@ -224,7 +224,7 @@ async fn hypr_module(
                     fg: ws.is_active.then_some(tui::Color::Green),
                     ..Default::default()
                 }))
-                .with_interact(on_interact),
+                .on_interact(on_interact, None),
             );
             wss.spacing(1);
         }
@@ -246,7 +246,11 @@ async fn time_module(
     use chrono::{Datelike, Timelike};
     use std::time::Duration;
 
-    let tooltip = tui::HoverCallback::from_fn(move |_| {
+    let on_interact = tui::InteractCallback::from_fn(move |interact| {
+        if interact.kind != tui::InteractKind::Hover {
+            return None;
+        }
+
         let now = chrono::Local::now().date_naive();
         let title = now.format("%B %Y").to_string();
 
@@ -323,7 +327,7 @@ async fn time_module(
                 }));
             }
         });
-        Some(elem)
+        Some(tui::OpenMenu::tooltip(elem))
     });
 
     let mut prev_minutes = 61;
@@ -333,7 +337,7 @@ async fn time_module(
         if prev_minutes != minute {
             let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
             tui_tx.send_replace(BarTuiElem::Shared(
-                tui::Elem::from(tui).with_tooltip(&tooltip),
+                tui::Elem::from(tui).on_interact(&on_interact, None),
             ));
 
             prev_minutes = minute;
@@ -417,7 +421,7 @@ async fn pulse_module(
                     tui::RawPrint::plain(format!("{:>3}%", (volume * 100.0).round() as u32)).into(),
                 );
             })
-            .with_interact(&on_interact),
+            .on_interact(&on_interact, None),
         ));
     }
 }
@@ -429,7 +433,10 @@ async fn energy_module(
     use crate::clients::upower::*;
     let energy = Arc::new(clients::upower::connect(reload_rx));
 
-    let tooltip = tui::HoverCallback::from_fn_ctx(energy.clone(), |energy, _| {
+    let tooltip = tui::InteractCallback::from_fn_ctx(energy.clone(), |energy, interact| {
+        if interact.kind != tui::InteractKind::Hover {
+            return None;
+        }
         let text = {
             let lock = energy.state_rx.borrow();
             let display_time = |time: std::time::Duration| {
@@ -449,7 +456,7 @@ async fn energy_module(
                 }
             }
         };
-        Some(tui::RawPrint::plain(text).into())
+        Some(tui::OpenMenu::tooltip(tui::RawPrint::plain(text).into()))
     });
 
     let mut state_rx = energy.state_rx.clone();
@@ -472,7 +479,7 @@ async fn energy_module(
         let energy = format!("{percentage:>3}% {rate:<6}");
 
         tui_tx.send_replace(BarTuiElem::Shared(
-            tui::Elem::from(tui::RawPrint::plain(energy)).with_tooltip(&tooltip),
+            tui::Elem::from(tui::RawPrint::plain(energy)).on_interact(&tooltip, None),
         ));
     }
 }
@@ -483,21 +490,20 @@ async fn ppd_module(
 ) {
     let ppd = Arc::new(clients::ppd::connect(reload_rx));
 
-    let tooltip = tui::HoverCallback::from_fn_ctx(ppd.clone(), |ppd, _| {
-        let profile = ppd.profile_rx.borrow().clone();
-        Some(tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into())
-    });
-    let on_interact = tui::InteractCallback::from_fn_ctx(ppd.clone(), |ppd, interact| {
-        match interact.kind {
+    let on_interact =
+        tui::InteractCallback::from_fn_ctx(ppd.clone(), |ppd, interact| match interact.kind {
+            tui::InteractKind::Hover => {
+                let profile = ppd.profile_rx.borrow().clone();
+                Some(tui::OpenMenu::tooltip(
+                    tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
+                ))
+            }
             tui::InteractKind::Click(tui::MouseButton::Left) => {
                 ppd.cycle_profile();
+                None
             }
-            _ => {
-                //
-            }
-        }
-        None
-    });
+            _ => None,
+        });
 
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
@@ -518,7 +524,7 @@ async fn ppd_module(
         };
 
         let elem: tui::Elem = icon;
-        let elem = elem.with_tooltip(&tooltip).with_interact(&on_interact);
+        let elem = elem.on_interact(&on_interact, None);
 
         tui_tx.send_replace(BarTuiElem::Shared(elem));
     }
@@ -532,9 +538,12 @@ async fn tray_module(
     use crate::clients::tray::*;
     let tray = Arc::new(clients::tray::connect(reload_rx));
 
-    let mk_interactivity = |addr: &Arc<str>, elem: tui::Elem| {
-        let tooltip =
-            tui::HoverCallback::from_fn_ctx((tray.clone(), addr.clone()), |(tray, addr), _| {
+    fn interact_cb(
+        (addr, tray): &(Arc<str>, Arc<TrayClient>),
+        interact: tui::InteractArgs,
+    ) -> Option<tui::OpenMenu> {
+        match interact.kind {
+            tui::InteractKind::Hover => {
                 let items = tray.state_rx.borrow().items.clone();
 
                 // FIXME: Handle more attrs
@@ -565,12 +574,8 @@ async fn tray_module(
                     vstack.fit(header);
                     vstack.fit(tui::PlainLines::new(description).into());
                 });
-                Some(tui)
-            });
-
-        let addr = addr.clone();
-        let tray = tray.clone();
-        let on_interact = tui::InteractCallback::from_fn(move |interact| match interact.kind {
+                Some(tui::OpenMenu::tooltip(tui))
+            }
             tui::InteractKind::Click(tui::MouseButton::Right) => {
                 let TrayMenuExt {
                     menu_path,
@@ -580,7 +585,7 @@ async fn tray_module(
                     .state_rx
                     .borrow()
                     .menus
-                    .get(&addr)
+                    .get(addr)
                     .cloned()
                     .with_context(|| format!("Unknown tray addr {addr}"))
                     .ok_or_log()?;
@@ -617,7 +622,7 @@ async fn tray_module(
                         .map(|menu_path| |id| icb(menu_path, id))
                         .as_ref(),
                 );
-                Some(tui::Elem::build_block(|block| {
+                Some(tui::OpenMenu::context(tui::Elem::build_block(|block| {
                     block.set_borders_at(tui::Borders::all());
                     block.set_style(tui::Style {
                         fg: Some(tui::Color::DarkGrey),
@@ -625,12 +630,11 @@ async fn tray_module(
                     });
                     block.set_lines(tui::LineSet::thick());
                     block.set_inner(menu_tui);
-                }))
+                })))
             }
             _ => None,
-        });
-        elem.with_interact(on_interact).with_tooltip(tooltip)
-    };
+        }
+    }
 
     let mut state_rx = tray.state_rx.clone();
     while state_rx.changed().await.is_ok() {
@@ -663,13 +667,19 @@ async fn tray_module(
                         *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
                     }
 
-                    stack.fit(mk_interactivity(
-                        addr,
+                    stack.fit(
                         tui::Elem::image(
                             img, //
                             tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                        )
+                        .on_interact(
+                            tui::InteractCallback::from_fn_ctx(
+                                (addr.clone(), tray.clone()),
+                                interact_cb,
+                            ),
+                            None,
                         ),
-                    ));
+                    );
                     stack.spacing(1);
                 }
             }
@@ -731,7 +741,7 @@ async fn tray_module(
                 });
 
                 match on_interact {
-                    Some(mk_interact) => elem.with_interact(mk_interact(*id)),
+                    Some(mk_interact) => elem.on_interact(mk_interact(*id), None),
                     None => elem,
                 }
             }

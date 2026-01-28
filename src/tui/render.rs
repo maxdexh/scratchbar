@@ -8,10 +8,10 @@ pub(super) trait Render {
 }
 
 #[derive(Debug)]
-pub struct RenderCtx<'a, W> {
-    pub sizing: &'a SizingArgs,
-    pub writer: W,
-    pub layout: &'a mut RenderedLayout,
+pub(super) struct RenderCtx<'a, W> {
+    sizing: &'a SizingArgs,
+    writer: W,
+    layout: &'a mut RenderedLayout,
 }
 #[derive(Debug, Clone)]
 pub struct SizingArgs {
@@ -33,23 +33,12 @@ pub fn render(
         crossterm::terminal::BeginSynchronizedUpdate,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
     )?;
-    let mut layout = old_layout.map_or_else(
-        || RenderedLayout {
-            widgets: Default::default(),
-            last_hover: None,
-            last_hover_id: None,
-        },
-        |&RenderedLayout {
-             widgets: _,
-             last_hover,
-             last_hover_id,
-         }| RenderedLayout {
-            widgets: Default::default(),
-            last_hover,
-            // FIXME: This should be determined during the render
-            last_hover_id,
-        },
-    );
+    let last_mouse_pos = old_layout.as_ref().and_then(|it| it.last_mouse_pos);
+    let mut layout = RenderedLayout {
+        widgets: Default::default(),
+        last_mouse_pos,
+        last_hover_elem: None,
+    };
     elem.render(
         &mut RenderCtx {
             sizing,
@@ -64,13 +53,10 @@ pub fn render(
 
 impl Render for Elem {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
-        ctx.layout.insert(area, self);
-        self.kind.render(ctx, area)
+        self.0.render(ctx, area)
     }
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
-        self.kind
-            .calc_min_size(args)
-            .combine(self.min_size, std::cmp::max)
+        self.0.calc_min_size(args)
     }
 }
 impl Render for ElemKind {
@@ -86,6 +72,32 @@ impl Render for ElemKind {
             Self::Print { raw, .. } => {
                 crossterm::queue!(ctx.writer, crossterm::style::Print(raw as &str))
             }
+            Self::MinSize { elem, .. } => elem.render(ctx, area),
+            Self::Interact(elem) => {
+                ctx.layout.insert(area, elem);
+
+                let inner = if ctx
+                    .layout
+                    .last_mouse_pos
+                    .is_some_and(|it| area.contains(it))
+                {
+                    if ctx.layout.last_hover_elem.is_some() {
+                        log::warn!("Nested interactivity is unsupported");
+                        &elem.inner
+                    } else {
+                        ctx.layout.last_hover_elem = Some(elem.clone());
+                        if let Some(hover) = &elem.hovered {
+                            hover
+                        } else {
+                            &elem.inner
+                        }
+                    }
+                } else {
+                    &elem.inner
+                };
+
+                inner.render(ctx, area)
+            }
         }
     }
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
@@ -94,6 +106,8 @@ impl Render for ElemKind {
             Self::Image(image) => image.calc_min_size(args),
             Self::Block(block) => block.calc_min_size(args),
             Self::Print { size, .. } => *size,
+            Self::MinSize { size, elem } => elem.calc_min_size(args).combine(*size, std::cmp::max),
+            Self::Interact(elem) => elem.inner.calc_min_size(args),
         }
     }
 }

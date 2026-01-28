@@ -38,6 +38,17 @@ impl<T, R> Clone for Callback<T, R> {
         Self(self.0.clone())
     }
 }
+impl<F, T, R> From<F> for Callback<T, R>
+where
+    F: Fn(T) -> R + 'static + Send + Sync,
+{
+    #[inline]
+    #[track_caller]
+    fn from(value: F) -> Self {
+        Self::from_fn(value)
+    }
+}
+
 impl<T, R> fmt::Debug for Callback<T, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)

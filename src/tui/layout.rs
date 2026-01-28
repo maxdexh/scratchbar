@@ -75,44 +75,32 @@ impl Axis {
 
 #[derive(Debug)]
 pub struct RenderedLayout {
-    pub(super) widgets: Vec<(Area, Elem)>,
-    pub(super) last_hover: Option<Vec2<u16>>,
-    pub(super) last_hover_id: Option<u64>,
+    pub(super) widgets: Vec<(Area, InteractElem)>,
+    pub(super) last_mouse_pos: Option<Vec2<u16>>,
+    pub(super) last_hover_elem: Option<InteractElem>,
 }
 
-#[derive(Debug)]
-pub enum MouseEventResult {
-    Ignore,
-    HoverChanged,
-    HoverEmpty,
-    Interact {
-        pix_location: Vec2<u32>,
-        interact: Option<(InteractCallback, InteractArgs)>,
-        tooltip: Option<(HoverCallback, HoverArgs)>,
-    },
-    InteractEmpty,
-    HoverTooltip {
-        pix_location: Vec2<u32>,
-        tooltip: HoverCallback,
-        args: HoverArgs,
-    },
+pub struct MouseEventResult {
+    pub interact: InteractArgs,
+    pub callback: Option<InteractCallback>,
+    pub empty: bool,
+    pub changed: bool,
+    pub rerender: bool,
+    pub pix_location: Vec2<u32>,
 }
 
 impl RenderedLayout {
-    pub fn insert(&mut self, area: Area, elem: &Elem) {
-        if elem.hovered.is_some() || elem.tooltip.is_some() || elem.interact.is_some() {
-            self.widgets.push((area, elem.clone()))
-        }
+    pub(super) fn insert(&mut self, area: Area, elem: &InteractElem) {
+        self.widgets.push((area, elem.clone()));
     }
 
-    pub fn reset_hover(&mut self) -> bool {
-        let changed = self.last_hover_id.is_some();
-        self.last_hover = None;
-        self.last_hover_id = None;
+    pub fn ext_focus_loss(&mut self) -> bool {
+        let changed = self.last_hover_elem.is_some();
+        self.last_mouse_pos = None;
+        self.last_hover_elem = None;
         changed
     }
 
-    // FIXME: Find smallest area that contains location
     pub fn interpret_mouse_event(
         &mut self,
         event: crossterm::event::MouseEvent,
@@ -126,95 +114,72 @@ impl RenderedLayout {
             row,
             modifiers: _,
         } = event;
+
         let pos = Vec2 { x: column, y: row };
 
-        let (area, elem) = self
-            .widgets
-            .iter()
-            .find(|(r, _)| r.contains(pos))
-            .map_or_else(
-                || {
-                    (
-                        Area {
-                            pos,
-                            size: Default::default(),
-                        },
-                        None,
-                    )
-                },
-                |(r, w)| (*r, Some(w)),
-            );
+        self.last_mouse_pos = Some(pos);
 
         type DR = Direction;
         type IK = InteractKind;
         type MK = crossterm::event::MouseEventKind;
 
+        let kind = match kind {
+            MK::Down(button) => IK::Click(button.into()),
+            MK::ScrollDown => IK::Scroll(DR::Down),
+            MK::ScrollUp => IK::Scroll(DR::Up),
+            MK::ScrollLeft => IK::Scroll(DR::Left),
+            MK::ScrollRight => IK::Scroll(DR::Right),
+            MK::Moved | MK::Up(_) | MK::Drag(_) => IK::Hover,
+        };
+
+        let interact = InteractArgs { kind, _p: () };
+
+        let font_w = u32::from(font_size.x);
+        let font_h = u32::from(font_size.y);
+
+        let Some((area, elem)) = self.widgets.iter().find(|(r, _)| r.contains(pos)) else {
+            let cur = self.last_hover_elem.take();
+            return MouseEventResult {
+                interact,
+                empty: true,
+                callback: None,
+                pix_location: Vec2 {
+                    x: u32::from(pos.x) * font_w,
+                    y: u32::from(pos.y) * font_h,
+                },
+                changed: cur.is_some(),
+                rerender: cur.is_some_and(|it| it.hovered.is_some()),
+            };
+        };
+
         let pix_location = {
-            let font_w = u32::from(font_size.x);
-            let font_h = u32::from(font_size.y);
             Vec2 {
                 x: u32::from(area.pos.x) * font_w + u32::from(area.size.x) * font_w / 2,
                 y: u32::from(area.pos.y) * font_h + u32::from(area.size.y) * font_h / 2,
             }
         };
 
-        if let MK::Moved = kind {
-            self.last_hover = Some(pos);
-            let Some(Elem {
-                tooltip,
-                hovered,
-                elem_id,
-                ..
-            }) = { elem }.take_if(|it| it.tooltip.is_some() || it.hovered.is_some())
-            else {
-                return if self.last_hover_id.take().is_some() {
-                    MouseEventResult::HoverEmpty
-                } else {
-                    MouseEventResult::Ignore
-                };
-            };
-            if self.last_hover_id.replace(*elem_id) == Some(*elem_id) {
-                return MouseEventResult::Ignore;
-            }
-            let Some(tt) = tooltip else {
-                return MouseEventResult::HoverChanged;
-            };
-            MouseEventResult::HoverTooltip {
-                pix_location,
-                tooltip: tt.clone(),
-                args: HoverArgs { _p: () },
-            }
-        } else {
-            let kind = match kind {
-                MK::Moved => unreachable!(),
-                MK::Down(button) => IK::Click(button.into()),
-                MK::ScrollDown => IK::Scroll(DR::Down),
-                MK::ScrollUp => IK::Scroll(DR::Up),
-                MK::ScrollLeft => IK::Scroll(DR::Left),
-                MK::ScrollRight => IK::Scroll(DR::Right),
-                MK::Up(_) | MK::Drag(_) => {
-                    return MouseEventResult::Ignore;
-                }
-            };
-            let Some(elem) = elem else {
-                return MouseEventResult::InteractEmpty;
-            };
-            MouseEventResult::Interact {
-                pix_location,
-                interact: elem
-                    .interact
-                    .as_ref()
-                    .map(|cb| (cb.clone(), InteractArgs { kind, _p: () })),
-                tooltip: elem
-                    .tooltip
-                    .as_ref()
-                    .map(|tt| (tt.clone(), HoverArgs { _p: () })),
-            }
+        let prev = self.last_hover_elem.replace(elem.clone());
+
+        let changed = !prev
+            .as_ref()
+            .is_some_and(|it| it.inner.is_identical(&elem.inner));
+
+        let rerender = changed
+            && (prev.as_ref().is_some_and(|it| it.hovered.is_some()) || elem.hovered.is_some());
+
+        MouseEventResult {
+            interact,
+            callback: Some(elem.callback.clone()),
+            empty: false,
+            changed,
+            rerender,
+            pix_location,
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
     Right,
@@ -230,13 +195,14 @@ impl From<crossterm::event::MouseButton> for MouseButton {
         }
     }
 }
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum InteractKind {
     Click(MouseButton),
     Scroll(Direction),
+    Hover,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Up,
     Down,
