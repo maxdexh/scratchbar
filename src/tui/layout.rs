@@ -30,6 +30,14 @@ pub struct Vec2<T> {
     pub x: T,
     pub y: T,
 }
+impl<T> Vec2<T> {
+    pub fn combine<U, R>(self, other: Vec2<U>, mut f: impl FnMut(T, U) -> R) -> Vec2<R> {
+        Vec2 {
+            x: f(self.x, other.x),
+            y: f(self.y, other.y),
+        }
+    }
+}
 impl<T> std::ops::Index<Axis> for Vec2<T> {
     type Output = T;
 
@@ -153,10 +161,11 @@ impl RenderedLayout {
         if let MK::Moved = kind {
             self.last_hover = Some(pos);
             let Some(Elem {
-                hover_id: Some(hover_id),
                 tooltip,
+                hovered,
+                elem_id,
                 ..
-            }) = elem
+            }) = { elem }.take_if(|it| it.tooltip.is_some() || it.hovered.is_some())
             else {
                 return if self.last_hover_id.take().is_some() {
                     MouseEventResult::HoverEmpty
@@ -164,7 +173,7 @@ impl RenderedLayout {
                     MouseEventResult::Ignore
                 };
             };
-            if self.last_hover_id.replace(*hover_id) == Some(*hover_id) {
+            if self.last_hover_id.replace(*elem_id) == Some(*elem_id) {
                 return MouseEventResult::Ignore;
             }
             let Some(tt) = tooltip else {

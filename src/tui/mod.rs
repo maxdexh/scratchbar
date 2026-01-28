@@ -7,118 +7,168 @@ use std::{fmt, sync::Arc};
 
 use crate::utils::Callback;
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 enum ElemKind {
-    Print(RawPrint),
-    Image(Image),
+    Print { raw: Arc<str>, size: Vec2<u16> },
+    Image(Arc<Image>),
     Stack(Stack),
-    Block(Box<Block>),
-    Shared(Arc<Elem>),
-    #[default]
-    Empty,
+    Block(Arc<BlockBuilder>),
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Elem {
     kind: ElemKind,
+    elem_id: u64,
 
-    hover_id: Option<u64>,
+    min_size: Vec2<u16>,
+
+    // FIXME: Merge interact attrs,
+    // callbacks return optional replacement
+    // that stays active while tooltip/menu
+    // is active or if none is provided, until
+    // element is unhovered
     interact: Option<InteractCallback>,
     tooltip: Option<HoverCallback>,
     hovered: Option<Arc<Elem>>,
 }
 
-// FIXME: Implement hover replacements, clarify nested interactive elements.
 impl Elem {
-    pub fn empty() -> Self {
+    pub fn is_identical(&self, other: &Elem) -> bool {
+        self.elem_id == other.elem_id
+    }
+    fn new(kind: ElemKind) -> Self {
+        use std::sync::atomic::*;
+        static ELEM_ID: AtomicU64 = AtomicU64::new(0);
         Self {
-            kind: ElemKind::Empty,
-            ..Default::default()
+            kind,
+            elem_id: ELEM_ID.fetch_add(1, Ordering::Relaxed),
+            min_size: Default::default(),
+            interact: None,
+            tooltip: None,
+            hovered: None,
         }
     }
 
-    fn assign_hover_id(&mut self) {
-        if self.hover_id.is_none() {
-            use std::sync::atomic::*;
-            static HOVER_ID: AtomicU64 = AtomicU64::new(0);
-            self.hover_id = Some(HOVER_ID.fetch_add(1, Ordering::Relaxed));
-        }
+    pub fn with_min_size(mut self, min_size: Vec2<u16>) -> Self {
+        self.min_size = self.min_size.combine(min_size, std::cmp::max);
+        self
     }
+
+    pub fn empty() -> Self {
+        Self::new(ElemKind::Print {
+            raw: Default::default(),
+            size: Default::default(),
+        })
+    }
+    pub fn image(img: image::RgbaImage, sizing: ImageSizeMode) -> Self {
+        Self::new(ElemKind::Image(Arc::new(Image { img, sizing })))
+    }
+
     pub fn with_interact(mut self, on_interact: impl Into<InteractCallback>) -> Self {
         self.interact = Some(on_interact.into());
         self
     }
     pub fn with_tooltip(mut self, tooltip: impl Into<HoverCallback>) -> Self {
-        self.assign_hover_id();
         self.tooltip = Some(tooltip.into());
         self
     }
     pub fn with_hovered(mut self, hovered: impl Into<Elem>) -> Self {
-        self.assign_hover_id();
         let hovered = hovered.into();
         self.hovered = Some(Arc::new(hovered));
         self
+    }
+    pub fn build_block(init: impl FnOnce(&mut BlockBuilder)) -> Self {
+        let mut builder = BlockBuilder {
+            borders: Default::default(),
+            border_style: Default::default(),
+            border_set: LineSet::normal(),
+            inner: None,
+        };
+        init(&mut builder);
+        Self::new(ElemKind::Block(Arc::new(builder)))
+    }
+    pub fn build_stack(axis: Axis, init: impl FnOnce(&mut StackBuilder)) -> Self {
+        let mut builder = StackBuilder::new(axis);
+        init(&mut builder);
+        builder.build()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StackBuilder {
+    axis: Axis,
+    parts: Vec<StackItem>,
+}
+impl StackBuilder {
+    pub fn new(axis: Axis) -> Self {
+        Self {
+            axis,
+            parts: Default::default(),
+        }
+    }
+    pub fn fit(&mut self, elem: Elem) {
+        self.push(StackItem {
+            fill_weight: 0,
+            elem,
+        });
+    }
+    pub fn fill(&mut self, weight: u16, elem: Elem) {
+        self.parts.push(StackItem {
+            fill_weight: weight,
+            elem,
+        });
+    }
+    pub fn spacing(&mut self, len: u16) {
+        self.fit(Elem::empty().with_min_size({
+            let mut size = Vec2::default();
+            size[self.axis] = len;
+            size
+        }));
+    }
+    pub fn push(&mut self, item: StackItem) {
+        self.parts.push(item);
+    }
+    pub fn build(self) -> Elem {
+        let Self { axis, parts } = self;
+        Elem::new(ElemKind::Stack(Stack {
+            axis,
+            parts: parts.into(),
+        }))
     }
 }
 
 impl From<Stack> for Elem {
     fn from(value: Stack) -> Self {
-        Self {
-            kind: ElemKind::Stack(value),
-            ..Default::default()
-        }
-    }
-}
-impl From<Image> for Elem {
-    fn from(value: Image) -> Self {
-        Self {
-            kind: ElemKind::Image(value),
-            ..Default::default()
-        }
-    }
-}
-impl From<Block> for Elem {
-    fn from(value: Block) -> Self {
-        Self {
-            kind: ElemKind::Block(Box::new(value)),
-            ..Default::default()
-        }
-    }
-}
-impl From<Arc<Self>> for Elem {
-    fn from(value: Arc<Self>) -> Self {
-        Self {
-            kind: ElemKind::Shared(value),
-            ..Default::default()
-        }
+        Self::new(ElemKind::Stack(value))
     }
 }
 impl<D: fmt::Display> From<RawPrint<D>> for Elem {
     fn from(value: RawPrint<D>) -> Self {
-        Self {
-            kind: ElemKind::Print(value.map_display(|it| it.to_string())),
-            ..Default::default()
-        }
+        let RawPrint { raw, size } = value;
+        Self::new(ElemKind::Print {
+            raw: raw.to_string().into(),
+            size,
+        })
     }
 }
-impl From<PlainLines<'_>> for Elem {
-    fn from(value: PlainLines<'_>) -> Self {
-        Stack::horizontal(
-            value
-                .text
-                .lines()
-                .map(|line| StackItem::auto(RawPrint::plain(line).styled(value.style))),
-        )
-        .into()
+impl<S: fmt::Display> From<PlainLines<S>> for Elem {
+    #[track_caller]
+    fn from(value: PlainLines<S>) -> Self {
+        Elem::build_stack(Axis::Y, |stack| {
+            for line in value.text.to_string().lines() {
+                stack.fit(RawPrint::plain(line).styled(value.style).into())
+            }
+        })
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct RawPrint<D = String> {
-    pub raw: D,
-    pub size: Vec2<u16>,
+pub struct RawPrint<D> {
+    raw: D,
+    size: Vec2<u16>,
 }
 impl<D> RawPrint<D> {
+    #[track_caller]
     pub fn plain(text: D) -> Self
     where
         D: AsRef<str>,
@@ -169,12 +219,12 @@ impl<D> RawPrint<D> {
 }
 
 #[derive(Default, Debug)]
-pub struct PlainLines<'a> {
-    pub text: &'a str,
-    pub style: Style,
+pub struct PlainLines<S> {
+    text: S,
+    style: Style,
 }
-impl<'a> PlainLines<'a> {
-    pub fn new(text: &'a str) -> Self {
+impl<S> PlainLines<S> {
+    pub fn new(text: S) -> Self {
         Self {
             text,
             style: Default::default(),
@@ -204,9 +254,9 @@ pub enum ImageSizeMode {
     FillAxis(Axis, u16),
 }
 #[derive(Clone)]
-pub struct Image {
-    pub img: image::RgbaImage,
-    pub sizing: ImageSizeMode,
+struct Image {
+    img: image::RgbaImage,
+    sizing: ImageSizeMode,
 }
 
 impl fmt::Debug for Image {
@@ -218,11 +268,25 @@ impl fmt::Debug for Image {
     }
 }
 #[derive(Debug, Clone)]
-pub struct Block {
-    pub borders: Borders,
-    pub border_style: Style,
-    pub border_set: LineSet,
-    pub inner: Option<Elem>,
+pub struct BlockBuilder {
+    borders: Borders,
+    border_style: Style,
+    border_set: LineSet,
+    inner: Option<Elem>,
+}
+impl BlockBuilder {
+    pub fn set_borders_at(&mut self, borders: Borders) {
+        self.borders = borders;
+    }
+    pub fn set_style(&mut self, style: Style) {
+        self.border_style = style;
+    }
+    pub fn set_lines(&mut self, lines: LineSet) {
+        self.border_set = lines;
+    }
+    pub fn set_inner(&mut self, inner: Elem) {
+        self.inner = Some(inner);
+    }
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -243,54 +307,16 @@ impl Borders {
     }
 }
 
-#[derive(Default, Clone, Copy, Debug)]
-pub enum Constr {
-    Length(u16),
-    Fill(u16),
-    #[default]
-    Auto,
-}
 #[derive(Debug, Clone)]
-pub struct Stack {
-    pub axis: Axis,
-    pub parts: Vec<StackItem>,
-}
-impl Stack {
-    pub fn horizontal(parts: impl IntoIterator<Item = StackItem>) -> Self {
-        Self {
-            axis: Axis::X,
-            parts: FromIterator::from_iter(parts),
-        }
-    }
-    pub fn vertical(parts: impl IntoIterator<Item = StackItem>) -> Self {
-        Self {
-            axis: Axis::Y,
-            parts: FromIterator::from_iter(parts),
-        }
-    }
+struct Stack {
+    axis: Axis,
+    parts: Arc<[StackItem]>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StackItem {
-    pub constr: Constr,
-    pub elem: Elem,
-}
-impl StackItem {
-    pub fn spacing(len: u16) -> Self {
-        Self::length(len, Elem::empty())
-    }
-    pub fn auto(elem: impl Into<Elem>) -> Self {
-        Self::new(Constr::Auto, elem)
-    }
-    pub fn length(len: u16, elem: impl Into<Elem>) -> Self {
-        Self::new(Constr::Length(len), elem)
-    }
-    pub fn new(constr: Constr, elem: impl Into<Elem>) -> Self {
-        Self {
-            constr,
-            elem: elem.into(),
-        }
-    }
+    fill_weight: u16,
+    elem: Elem,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -313,6 +339,9 @@ pub struct Modifier {
     pub underline: bool,
     pub hidden: bool,
     pub strike: bool,
+
+    #[doc(hidden)]
+    pub __non_exhaustive: (),
 }
 
 // TODO: enums
@@ -341,7 +370,7 @@ impl KittyTextSize {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct LineSet {
     pub vertical: Arc<str>,
     pub horizontal: Arc<str>,

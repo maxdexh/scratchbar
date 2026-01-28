@@ -5,10 +5,24 @@ use tokio::task::JoinSet;
 
 use crate::{
     clients,
-    panels::{self, BarTuiElem},
+    panels::{self, BarTuiState},
     tui,
     utils::{ReloadRx, ReloadTx, ResultExt, WatchRx, WatchTx, watch_chan},
 };
+
+#[derive(Clone, Debug)]
+enum BarTuiElem {
+    ByMonitor(HashMap<Arc<str>, tui::Elem>),
+    Shared(tui::Elem),
+    Hide,
+    FillSpace(u16),
+    Spacing(u16),
+}
+impl From<tui::Elem> for BarTuiElem {
+    fn from(value: tui::Elem) -> Self {
+        Self::Shared(value)
+    }
+}
 
 struct ModuleArgs {
     tui_tx: WatchTx<BarTuiElem>,
@@ -40,19 +54,62 @@ impl BarModuleFactory {
     ) -> WatchRx<BarTuiElem> {
         self.spawn(|args| task(ctx, args))
     }
-    fn fixed(&mut self, elem: tui::StackItem) -> WatchRx<BarTuiElem> {
-        let (tx, rx) = watch_chan(BarTuiElem::Hide);
-        tx.send_replace(BarTuiElem::Shared(elem));
+    fn fixed(&mut self, elem: BarTuiElem) -> WatchRx<BarTuiElem> {
+        let (_, rx) = watch_chan(elem);
         rx
     }
 }
 
+fn gather_bar_tui(bar_tui: &[BarTuiElem], tx: &WatchTx<BarTuiState>) {
+    let mut by_monitor = HashMap::new();
+    let mut fallback = tui::StackBuilder::new(tui::Axis::X);
+    for elem in bar_tui {
+        match elem {
+            BarTuiElem::Shared(elem) => {
+                for stack in by_monitor.values_mut().chain(Some(&mut fallback)) {
+                    stack.fit(elem.clone());
+                }
+            }
+            BarTuiElem::ByMonitor(elems) => {
+                for (mtr, elem) in elems {
+                    by_monitor
+                        .entry(mtr.clone())
+                        .or_insert_with(|| fallback.clone())
+                        .fit(elem.clone());
+                }
+            }
+            BarTuiElem::Hide => {}
+            BarTuiElem::FillSpace(weight) => {
+                for stack in by_monitor.values_mut().chain(Some(&mut fallback)) {
+                    stack.fill(*weight, tui::Elem::empty());
+                }
+            }
+            BarTuiElem::Spacing(len) => {
+                for stack in by_monitor.values_mut().chain(Some(&mut fallback)) {
+                    stack.spacing(*len);
+                }
+            }
+        };
+    }
+
+    tx.send_replace(BarTuiState {
+        by_monitor: by_monitor
+            .into_iter()
+            .map(|(k, stack)| (k, stack.build()))
+            .collect(),
+        fallback: fallback.build(),
+    });
+}
+
 pub async fn main() -> std::process::ExitCode {
-    let mut tasks = JoinSet::new();
+    let mut required_tasks = JoinSet::new();
     let mut reload_tx = ReloadTx::new();
 
-    let bar_tx = WatchTx::new(Vec::new());
-    tasks.spawn(panels::run_manager(bar_tx.subscribe(), reload_tx.clone()));
+    let bar_tui_tx = WatchTx::new(BarTuiState::default());
+    required_tasks.spawn(panels::run_manager(
+        bar_tui_tx.subscribe(),
+        reload_tx.clone(),
+    ));
 
     let mut fac = BarModuleFactory {
         reload_tx: reload_tx.clone(),
@@ -60,15 +117,12 @@ pub async fn main() -> std::process::ExitCode {
     };
 
     let pulse = Arc::new(clients::pulse::connect(reload_tx.subscribe()));
-    let modules = [
-        fac.fixed(tui::StackItem::spacing(1)),
+    let mut modules = [
+        fac.fixed(BarTuiElem::Spacing(1)),
         fac.spawn(hypr_module),
-        fac.fixed(tui::StackItem::new(
-            tui::Constr::Fill(1),
-            tui::Elem::empty(),
-        )),
+        fac.fixed(BarTuiElem::FillSpace(1)),
         fac.spawn(tray_module),
-        fac.fixed(tui::StackItem::spacing(3)),
+        fac.fixed(BarTuiElem::Spacing(3)),
         fac.spawn_with(
             PulseModuleCtx {
                 pulse: pulse.clone(),
@@ -78,7 +132,7 @@ pub async fn main() -> std::process::ExitCode {
             },
             pulse_module,
         ),
-        fac.fixed(tui::StackItem::spacing(3)),
+        fac.fixed(BarTuiElem::Spacing(3)),
         fac.spawn_with(
             PulseModuleCtx {
                 pulse,
@@ -88,18 +142,39 @@ pub async fn main() -> std::process::ExitCode {
             },
             pulse_module,
         ),
-        fac.fixed(tui::StackItem::spacing(3)),
+        fac.fixed(BarTuiElem::Spacing(3)),
         fac.spawn(ppd_module),
         fac.spawn(energy_module),
-        fac.fixed(tui::StackItem::spacing(3)),
+        fac.fixed(BarTuiElem::Spacing(3)),
         fac.spawn(time_module),
     ];
 
-    bar_tx.send_replace(modules.into());
+    let mut module_tasks = JoinSet::new();
+
+    {
+        let bar_tui_tx_inner = WatchTx::new(Vec::from_iter(
+            modules.iter_mut().map(|it| it.borrow_and_update().clone()),
+        ));
+        for (i, mut module) in modules.into_iter().enumerate() {
+            let bar_tui_tx_inner = bar_tui_tx_inner.clone();
+            module_tasks.spawn(async move {
+                while let Ok(()) = module.changed().await {
+                    let tui = module.borrow_and_update().clone();
+                    bar_tui_tx_inner.send_modify(|modules| modules[i] = tui);
+                }
+            });
+        }
+        let mut bar_tui_rx_inner = bar_tui_tx_inner.subscribe();
+        required_tasks.spawn(async move {
+            while let Ok(()) = bar_tui_rx_inner.changed().await {
+                gather_bar_tui(&bar_tui_rx_inner.borrow_and_update(), &bar_tui_tx);
+            }
+        });
+    }
 
     reload_tx.reload();
 
-    if let Some(res) = tasks.join_next().await {
+    if let Some(res) = required_tasks.join_next().await {
         match res.ok_or_log() {
             Some(_) => std::process::ExitCode::SUCCESS,
             None => std::process::ExitCode::FAILURE,
@@ -125,7 +200,9 @@ async fn hypr_module(
             let Some(monitor) = ws.monitor.clone() else {
                 continue;
             };
-            let wss = by_monitor.entry(monitor).or_insert_with(Vec::new);
+            let wss = by_monitor
+                .entry(monitor)
+                .or_insert_with(|| tui::StackBuilder::new(tui::Axis::X));
 
             let on_interact = tui::InteractCallback::from_fn_ctx(
                 (hypr.clone(), ws.id.clone()),
@@ -142,18 +219,18 @@ async fn hypr_module(
                 },
             );
 
-            wss.push(tui::StackItem::auto(
+            wss.fit(
                 tui::Elem::from(tui::RawPrint::plain(&ws.name).styled(tui::Style {
                     fg: ws.is_active.then_some(tui::Color::Green),
                     ..Default::default()
                 }))
                 .with_interact(on_interact),
-            ));
-            wss.push(tui::StackItem::spacing(1));
+            );
+            wss.spacing(1);
         }
         let by_monitor = by_monitor
             .into_iter()
-            .map(|(k, v)| (k, tui::StackItem::auto(tui::Stack::horizontal(v))))
+            .map(|(k, v)| (k, v.build()))
             .collect();
 
         tui_tx.send_replace(BarTuiElem::ByMonitor(by_monitor));
@@ -183,7 +260,16 @@ async fn time_module(
             usize::from(now.num_days_in_month()) + usize::from(first_day_offset),
             7,
         );
-        let mut lines = vec![vec![[tui::StackItem::spacing(2)]; 7]; num_weeks];
+
+        // FIXME: Simplify
+        let mut lines: Vec<_> = std::iter::repeat_n(
+            std::array::repeat::<_, 7>(tui::Elem::empty().with_min_size(tui::Vec2 {
+                x: 2,
+                ..Default::default()
+            })),
+            num_weeks,
+        )
+        .collect();
 
         for n0 in 0u16..now.num_days_in_month().into() {
             let n1 = n0 + 1;
@@ -194,7 +280,7 @@ async fn time_module(
 
             let week_in_month = (first_day_offset + n0) / 7;
             let item = &mut lines[usize::from(week_in_month)][day.weekday() as usize];
-            *item = [tui::StackItem::auto({
+            *item = {
                 let it = tui::RawPrint::plain(format!("{n1:>2}"));
                 if now == day {
                     it.styled(tui::Style {
@@ -202,29 +288,42 @@ async fn time_module(
                         ..Default::default()
                     })
                     .map_display(|styled| styled.to_string())
+                    .into()
                 } else {
-                    it
+                    it.into()
                 }
-            })];
+            };
         }
-        let weekday_line = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
-            .map(|d| [tui::StackItem::auto(tui::RawPrint::plain(d))])
-            .into();
+        let weekday_line =
+            ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map(|d| tui::RawPrint::plain(d).into());
 
-        let title = tui::StackItem::auto(tui::RawPrint::plain(title).styled(tui::Style {
-            modifier: tui::Modifier {
-                bold: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        }));
-        let mut parts = vec![title];
-        for line in std::iter::once(weekday_line).chain(lines) {
-            let line = line.join(&tui::StackItem::spacing(1));
-            let line = tui::Stack::horizontal(line);
-            parts.push(tui::StackItem::auto(line));
-        }
-        Some(tui::Stack::vertical(parts).into())
+        let elem = tui::Elem::build_stack(tui::Axis::Y, |vstack| {
+            vstack.fit(
+                tui::RawPrint::plain(title)
+                    .styled(tui::Style {
+                        modifier: tui::Modifier {
+                            bold: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+            for line in std::iter::once(weekday_line).chain(lines) {
+                vstack.fit(tui::Elem::build_stack(tui::Axis::X, |hstack| {
+                    let mut first = true;
+                    for day in line {
+                        if !first {
+                            hstack.spacing(1);
+                        }
+                        first = false;
+
+                        hstack.fit(day);
+                    }
+                }));
+            }
+        });
+        Some(elem)
     });
 
     let mut prev_minutes = 61;
@@ -233,9 +332,9 @@ async fn time_module(
         let minute = now.minute();
         if prev_minutes != minute {
             let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
-            tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
+            tui_tx.send_replace(BarTuiElem::Shared(
                 tui::Elem::from(tui).with_tooltip(&tooltip),
-            )));
+            ));
 
             prev_minutes = minute;
         } else {
@@ -307,20 +406,19 @@ async fn pulse_module(
         };
         drop(state);
 
-        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
-            tui::Elem::from(tui::Stack::horizontal([
-                tui::StackItem::auto(if muted {
+        tui_tx.send_replace(BarTuiElem::Shared(
+            tui::Elem::build_stack(tui::Axis::X, |stack| {
+                stack.fit(if muted {
                     muted_sym.clone()
                 } else {
                     unmuted_sym.clone()
-                }),
-                tui::StackItem::auto(tui::RawPrint::plain(format!(
-                    "{:>3}%",
-                    (volume * 100.0).round() as u32
-                ))),
-            ]))
+                });
+                stack.fit(
+                    tui::RawPrint::plain(format!("{:>3}%", (volume * 100.0).round() as u32)).into(),
+                );
+            })
             .with_interact(&on_interact),
-        )));
+        ));
     }
 }
 async fn energy_module(
@@ -373,9 +471,9 @@ async fn energy_module(
         let rate = format!("{sign}{:.1}W", state.energy_rate);
         let energy = format!("{percentage:>3}% {rate:<6}");
 
-        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(
+        tui_tx.send_replace(BarTuiElem::Shared(
             tui::Elem::from(tui::RawPrint::plain(energy)).with_tooltip(&tooltip),
-        )));
+        ));
     }
 }
 async fn ppd_module(
@@ -422,7 +520,7 @@ async fn ppd_module(
         let elem: tui::Elem = icon;
         let elem = elem.with_tooltip(&tooltip).with_interact(&on_interact);
 
-        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(elem)));
+        tui_tx.send_replace(BarTuiElem::Shared(elem));
     }
 }
 
@@ -451,24 +549,22 @@ async fn tray_module(
                     .with_context(|| format!("Unknown tray addr {addr}"))
                     .ok_or_log()?;
 
-                let tui = tui::Stack::vertical([
-                    tui::StackItem::auto(tui::Stack::horizontal([
-                        tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::empty()),
-                        tui::StackItem::auto(tui::PlainLines::new(title.as_str()).styled(
-                            tui::Style {
-                                modifier: tui::Modifier {
-                                    bold: true,
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            },
-                        )),
-                        tui::StackItem::new(tui::Constr::Fill(1), tui::Elem::empty()),
-                    ])),
-                    tui::StackItem::auto(tui::PlainLines::new(description.as_str())),
-                ])
-                .into();
-
+                let header = tui::PlainLines::new(title).styled(tui::Style {
+                    modifier: tui::Modifier {
+                        bold: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+                let header = tui::Elem::build_stack(tui::Axis::X, |hstack| {
+                    hstack.fill(1, tui::Elem::empty());
+                    hstack.fit(header.into());
+                    hstack.fill(1, tui::Elem::empty());
+                });
+                let tui = tui::Elem::build_stack(tui::Axis::Y, |vstack| {
+                    vstack.fit(header);
+                    vstack.fit(tui::PlainLines::new(description).into());
+                });
                 Some(tui)
             });
 
@@ -513,23 +609,23 @@ async fn tray_module(
                     })
                 };
 
-                let tui = tui::Block {
-                    borders: tui::Borders::all(),
-                    border_style: tui::Style {
+                let menu_tui = tray_menu_to_tui(
+                    0,
+                    &submenus,
+                    menu_path
+                        .as_ref()
+                        .map(|menu_path| |id| icb(menu_path, id))
+                        .as_ref(),
+                );
+                Some(tui::Elem::build_block(|block| {
+                    block.set_borders_at(tui::Borders::all());
+                    block.set_style(tui::Style {
                         fg: Some(tui::Color::DarkGrey),
                         ..Default::default()
-                    },
-                    border_set: tui::LineSet::thick(),
-                    inner: Some(tray_menu_to_tui(
-                        0,
-                        &submenus,
-                        menu_path
-                            .as_ref()
-                            .map(|menu_path| |id| icb(menu_path, id))
-                            .as_ref(),
-                    )),
-                };
-                Some(tui.into())
+                    });
+                    block.set_lines(tui::LineSet::thick());
+                    block.set_inner(menu_tui);
+                }))
             }
             _ => None,
         });
@@ -539,48 +635,46 @@ async fn tray_module(
     let mut state_rx = tray.state_rx.clone();
     while state_rx.changed().await.is_ok() {
         let items = state_rx.borrow_and_update().items.clone();
-        let mut parts = Vec::new();
-        for (addr, item) in items.iter() {
-            // FIXME: Handle the other options
-            // FIXME: Why are we showing all icons?
-            for system_tray::item::IconPixmap {
-                width,
-                height,
-                pixels,
-            } in item.icon_pixmap.as_deref().unwrap_or(&[])
-            {
-                let mut img = match image::RgbaImage::from_vec(
-                    width.cast_unsigned(),
-                    height.cast_unsigned(),
-                    pixels.clone(),
-                ) {
-                    Some(img) => img,
-                    None => {
-                        log::error!("Failed to load image from bytes");
-                        continue;
-                    }
-                };
 
-                // https://users.rust-lang.org/t/argb32-color-model/92061/4
-                for image::Rgba(pixel) in img.pixels_mut() {
-                    *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
-                }
-
-                parts.extend([
-                    tui::StackItem::auto(mk_interactivity(
-                        addr,
-                        tui::Image {
-                            img,
-                            sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+        let tui = tui::Elem::build_stack(tui::Axis::X, |stack| {
+            for (addr, item) in items.iter() {
+                // FIXME: Handle the other options
+                // FIXME: Why are we showing all icons?
+                for system_tray::item::IconPixmap {
+                    width,
+                    height,
+                    pixels,
+                } in item.icon_pixmap.as_deref().unwrap_or(&[])
+                {
+                    let mut img = match image::RgbaImage::from_vec(
+                        width.cast_unsigned(),
+                        height.cast_unsigned(),
+                        pixels.clone(),
+                    ) {
+                        Some(img) => img,
+                        None => {
+                            log::error!("Failed to load image from bytes");
+                            continue;
                         }
-                        .into(),
-                    )),
-                    tui::StackItem::spacing(1),
-                ])
+                    };
+
+                    // https://users.rust-lang.org/t/argb32-color-model/92061/4
+                    for image::Rgba(pixel) in img.pixels_mut() {
+                        *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
+                    }
+
+                    stack.fit(mk_interactivity(
+                        addr,
+                        tui::Elem::image(
+                            img, //
+                            tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                        ),
+                    ));
+                    stack.spacing(1);
+                }
             }
-        }
-        let tui = tui::Stack::horizontal(parts);
-        tui_tx.send_replace(BarTuiElem::Shared(tui::StackItem::auto(tui)));
+        });
+        tui_tx.send_replace(BarTuiElem::Shared(tui));
     }
     fn tray_menu_item_to_tui(
         depth: u16,
@@ -594,20 +688,16 @@ async fn tray_module(
                 visible: true,
                 menu_type: MenuType::Separator,
                 ..
-            } => tui::Block {
-                borders: tui::Borders {
+            } => tui::Elem::build_block(|block| {
+                block.set_borders_at(tui::Borders {
                     top: true,
                     ..Default::default()
-                },
-                border_style: tui::Style {
+                });
+                block.set_style(tui::Style {
                     fg: Some(tui::Color::DarkGrey),
                     ..Default::default()
-                },
-                border_set: tui::LineSet::normal(),
-                inner: None,
-            }
-            .into(),
-
+                });
+            }),
             MenuItem {
                 id,
                 menu_type: MenuType::Standard,
@@ -623,35 +713,22 @@ async fn tray_module(
                 disposition: _, // TODO: what to do with this?
                 submenu: _,
             } => {
-                let elem = tui::Elem::from(tui::Stack::horizontal([
-                    tui::StackItem::spacing(depth + 1),
+                let elem = tui::Elem::build_stack(tui::Axis::X, |stack| {
+                    stack.spacing(depth + 1);
                     if let Some(icon) = icon_data
                         && let Some(img) =
                             image::load_from_memory_with_format(icon, image::ImageFormat::Png)
                                 .context("Systray icon has invalid png data")
                                 .ok_or_log()
                     {
-                        let mut lines = label.lines();
-                        let first_line = lines.next().unwrap_or_default();
-                        tui::StackItem::auto(tui::Stack::vertical(Iterator::chain(
-                            std::iter::once(tui::StackItem::length(
-                                1,
-                                tui::Stack::horizontal([
-                                    tui::StackItem::auto(tui::Image {
-                                        img: img.into_rgba8(),
-                                        sizing: tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
-                                    }),
-                                    tui::StackItem::spacing(1),
-                                    tui::StackItem::auto(tui::PlainLines::new(first_line)),
-                                ]),
-                            )),
-                            lines.map(tui::RawPrint::plain).map(tui::StackItem::auto),
-                        )))
-                    } else {
-                        tui::StackItem::auto(tui::PlainLines::new(label))
-                    },
-                    tui::StackItem::spacing(1),
-                ]));
+                        stack.fit(tui::Elem::image(
+                            img.into_rgba8(),
+                            tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                        ));
+                        stack.spacing(1);
+                    }
+                    stack.fit(tui::PlainLines::new(label).into())
+                });
 
                 match on_interact {
                     Some(mk_interact) => elem.with_interact(mk_interact(*id)),
@@ -668,11 +745,10 @@ async fn tray_module(
         Some(if item.submenu.is_empty() {
             main_elem
         } else {
-            tui::Stack::vertical([
-                tui::StackItem::auto(main_elem),
-                tui::StackItem::auto(tray_menu_to_tui(depth + 1, &item.submenu, on_interact)),
-            ])
-            .into()
+            tui::Elem::build_stack(tui::Axis::Y, |stack| {
+                stack.fit(main_elem);
+                stack.fit(tray_menu_to_tui(depth + 1, &item.submenu, on_interact));
+            })
         })
     }
 
@@ -681,12 +757,12 @@ async fn tray_module(
         items: &[system_tray::menu::MenuItem],
         on_interact: Option<&impl Fn(i32) -> tui::InteractCallback>,
     ) -> tui::Elem {
-        tui::Stack::vertical(items.iter().filter_map(|item| {
-            Some(tui::StackItem {
-                constr: tui::Constr::Auto,
-                elem: tray_menu_item_to_tui(depth, item, on_interact)?,
-            })
-        }))
-        .into()
+        tui::Elem::build_stack(tui::Axis::Y, |stack| {
+            for item in items {
+                if let Some(item) = tray_menu_item_to_tui(depth, item, on_interact) {
+                    stack.fit(item)
+                }
+            }
+        })
     }
 }

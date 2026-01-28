@@ -68,7 +68,9 @@ impl Render for Elem {
         self.kind.render(ctx, area)
     }
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
-        self.kind.calc_min_size(args)
+        self.kind
+            .calc_min_size(args)
+            .combine(self.min_size, std::cmp::max)
     }
 }
 impl Render for ElemKind {
@@ -81,10 +83,8 @@ impl Render for ElemKind {
             Self::Stack(subdiv) => subdiv.render(ctx, area),
             Self::Image(image) => image.render(ctx, area),
             Self::Block(block) => block.render(ctx, area),
-            Self::Shared(elem) => elem.render(ctx, area),
-            Self::Empty => Ok(()),
-            Self::Print(raw_print) => {
-                crossterm::queue!(ctx.writer, crossterm::style::Print(raw_print.raw.as_str()))
+            Self::Print { raw, .. } => {
+                crossterm::queue!(ctx.writer, crossterm::style::Print(raw as &str))
             }
         }
     }
@@ -93,9 +93,7 @@ impl Render for ElemKind {
             Self::Stack(subdiv) => subdiv.calc_min_size(args),
             Self::Image(image) => image.calc_min_size(args),
             Self::Block(block) => block.calc_min_size(args),
-            Self::Shared(elem) => elem.calc_min_size(args),
-            Self::Empty => Vec2::default(),
-            Self::Print(raw_print) => raw_print.size,
+            Self::Print { size, .. } => *size,
         }
     }
 }
@@ -201,11 +199,9 @@ impl Render for Stack {
         let mut lens = Vec::with_capacity(self.parts.len());
         let mut total_weight = 0u64;
         let mut rem_len = Some(area.size[self.axis]);
-        for part in &self.parts {
-            if let Constr::Fill(weight) = part.constr {
-                total_weight += u64::from(weight);
-            }
-            let len = Self::calc_min_part_size(part, self.axis, ctx.sizing)[self.axis];
+        for part in self.parts.iter() {
+            total_weight += u64::from(part.fill_weight);
+            let len = part.elem.calc_min_size(ctx.sizing)[self.axis];
             if let Some(rlen) = rem_len {
                 rem_len = rlen.checked_sub(len);
             }
@@ -222,27 +218,25 @@ impl Render for Stack {
             let mut rem_fill_len = tot_fill_len;
 
             for (part, len) in self.parts.iter().zip(&mut lens) {
-                if let Constr::Fill(weight) = part.constr {
-                    let extra_len =
-                        u16::try_from(u64::from(tot_fill_len) * u64::from(weight) / total_weight)
-                            .expect("bounded by render area");
-                    *len = len.checked_add(extra_len).unwrap_or_else(|| {
-                        log::error!("Element is way too large");
-                        *len
-                    });
-                    rem_fill_len = rem_fill_len
-                        .checked_sub(extra_len)
-                        .expect("bounded by partition via floor div");
-                }
+                let extra_len = u16::try_from(
+                    u64::from(tot_fill_len) * u64::from(part.fill_weight) / total_weight,
+                )
+                .expect("bounded by render area");
+                *len = len.checked_add(extra_len).unwrap_or_else(|| {
+                    log::error!("Element is way too large");
+                    *len
+                });
+                rem_fill_len = rem_fill_len
+                    .checked_sub(extra_len)
+                    .expect("bounded by partition via floor div");
             }
             if rem_fill_len > 0 {
                 let mut fills: Vec<_> = self
                     .parts
                     .iter()
                     .zip(&mut lens)
-                    .filter_map(|(part, len)| match part.constr {
-                        Constr::Fill(weight) if weight > 0 => Some((weight, len)),
-                        _ => None,
+                    .filter_map(|(part, len)| {
+                        (part.fill_weight > 0).then_some((part.fill_weight, len))
                     })
                     .collect();
                 fills.sort();
@@ -268,8 +262,8 @@ impl Render for Stack {
 
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         let mut tot = Vec2::default();
-        for part in &self.parts {
-            let size = Self::calc_min_part_size(part, self.axis, args);
+        for part in self.parts.iter() {
+            let size = part.elem.calc_min_size(args);
 
             tot[self.axis] = size[self.axis].saturating_add(tot[self.axis]);
 
@@ -278,17 +272,7 @@ impl Render for Stack {
         tot
     }
 }
-impl Stack {
-    fn calc_min_part_size(part: &StackItem, axis: Axis, args: &SizingArgs) -> Vec2<u16> {
-        let mut size = part.elem.calc_min_size(args);
-        match part.constr {
-            Constr::Length(l) => size[axis] = size[axis].max(l),
-            Constr::Fill(_) | Constr::Auto => (),
-        }
-        size
-    }
-}
-impl Render for Block {
+impl Render for BlockBuilder {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let Borders {
             top,
@@ -386,7 +370,7 @@ impl Render for Block {
         size
     }
 }
-impl Block {
+impl BlockBuilder {
     fn extra_dim(&self) -> Vec2<u16> {
         let Borders {
             top,
@@ -416,6 +400,7 @@ impl Style {
                     underline,
                     hidden,
                     strike,
+                    __non_exhaustive: (),
                 },
             underline_color,
             __non_exhaustive: (),

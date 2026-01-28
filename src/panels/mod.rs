@@ -32,28 +32,21 @@ pub enum MenuKind {
     Context,
 }
 
-// FIXME: Take Vec<StackItem> (hide becomes empty list), add helper methods
-#[derive(Debug, Clone)]
-pub enum BarTuiElem {
-    Shared(tui::StackItem),
-    ByMonitor(HashMap<Arc<str>, tui::StackItem>),
-    Hide,
+pub struct BarTuiState {
+    // FIXME: Use Option<Elem> to hide
+    pub by_monitor: HashMap<Arc<str>, tui::Elem>,
+    pub fallback: tui::Elem,
 }
-fn gather_bar_tui(bar_tui: &[BarTuiElem], monitor: &MonitorInfo) -> tui::Elem {
-    let mut parts = Vec::new();
-    for elem in bar_tui {
-        let elem = match elem {
-            BarTuiElem::Shared(elem) => Some(elem.clone()),
-            BarTuiElem::ByMonitor(elems) => elems.get(&monitor.name).cloned(),
-            BarTuiElem::Hide => None,
-        };
-        parts.extend(elem);
+impl Default for BarTuiState {
+    fn default() -> Self {
+        Self {
+            by_monitor: Default::default(),
+            fallback: tui::Elem::empty(),
+        }
     }
-    parts.push(tui::StackItem::spacing(1));
-    tui::Stack::horizontal(parts).into()
 }
 
-pub async fn run_manager(bar_rx: WatchRx<Vec<WatchRx<BarTuiElem>>>, mut reload_tx: ReloadTx) {
+pub async fn run_manager(tui_rx: WatchRx<BarTuiState>, mut reload_tx: ReloadTx) {
     let mut monitors_auto_cancel = HashMap::new();
 
     let mut monitor_rx = crate::monitors::connect();
@@ -67,7 +60,7 @@ pub async fn run_manager(bar_rx: WatchRx<Vec<WatchRx<BarTuiElem>>>, mut reload_t
             tokio::spawn(run_monitor(RunMonitorArgs {
                 monitor: monitor.clone(),
                 cancel_monitor: cancel.clone(),
-                bar_rx: bar_rx.clone(),
+                bar_rx: tui_rx.clone(),
                 reload_tx: reload_tx.clone(),
             }));
             monitors_auto_cancel.insert(monitor.name.clone(), CancelDropGuard::from(cancel));
@@ -80,7 +73,7 @@ pub async fn run_manager(bar_rx: WatchRx<Vec<WatchRx<BarTuiElem>>>, mut reload_t
 struct RunMonitorArgs {
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
-    bar_rx: WatchRx<Vec<WatchRx<BarTuiElem>>>,
+    bar_rx: WatchRx<BarTuiState>,
     reload_tx: ReloadTx,
 }
 
@@ -120,7 +113,7 @@ struct StartedMonitorEnv {
     bar: Term,
     menu: Term,
     intern_upd_rx: UnbRx<Upd>,
-    bar_tui_rx: WatchRx<Vec<BarTuiElem>>,
+    bar_tui_rx: WatchRx<tui::Elem>,
 }
 
 async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
@@ -184,8 +177,7 @@ async fn run_monitor_mainloop(
         match upd {
             Upd::BarTui => {
                 if let Some(bar) = &mut show_bar {
-                    let tui = gather_bar_tui(&env.bar_tui_rx.borrow_and_update(), &monitor);
-                    *bar = tui;
+                    *bar = env.bar_tui_rx.borrow_and_update().clone();
                     rerender_bar = true;
                 }
             }
@@ -516,10 +508,13 @@ async fn init_term(
 
 async fn try_init_monitor(
     monitor: &MonitorInfo,
-    bar_rx: &WatchRx<Vec<WatchRx<BarTuiElem>>>,
+    bar_rx: &WatchRx<BarTuiState>,
     required_tasks: &mut JoinSet<anyhow::Result<std::convert::Infallible>>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<StartedMonitorEnv> {
+    let mut bar_rx = bar_rx.clone();
+    let monitor = monitor.clone();
+
     let (intern_upd_tx, intern_upd_rx) = unb_chan();
 
     let tmpdir = tokio::task::spawn_blocking(TempDir::new).await??;
@@ -663,54 +658,23 @@ async fn try_init_monitor(
         }
     });
 
-    let (bar_tui_tx, bar_tui_rx) = watch_chan(Vec::new());
-    let mut bar_rx = bar_rx.clone();
-    required_tasks.spawn(async move {
-        loop {
-            let current_bar = bar_rx.borrow_and_update().clone();
-            let mut listeners = JoinSet::new();
-
-            bar_tui_tx.send_if_modified(|tui| {
-                *tui = std::iter::repeat_n(BarTuiElem::Hide, current_bar.len()).collect();
-                false
-            });
-
-            let (bar_changed_tx, mut bar_changed_rx) = unb_chan();
-            for (i, mut rx) in current_bar.into_iter().enumerate() {
-                rx.mark_changed();
-                let bar_changed_tx = bar_changed_tx.clone();
-                listeners.spawn(async move {
-                    loop {
-                        bar_changed_tx
-                            .send((i, rx.borrow_and_update().clone()))
-                            .ok_or_debug();
-
-                        if rx.changed().await.is_err() {
-                            log::trace!("Freezing bar part {i} since its tui channel was closed");
-                            break; // stop listening
-                        }
-                    }
-                });
-            }
-
-            loop {
-                tokio::select! {
-                    res = bar_rx.changed() => {
-                        res?;
-                        break; // restart all listeners
-                    }
-                    Some((i, elem)) = bar_changed_rx.next() => {
-                        // Bundle together changes in 50ms windows
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        bar_tui_tx.send_modify(|tui| {
-                            tui[i] = elem;
-                            while let Ok((i, elem)) = bar_changed_rx.inner.try_recv() {
-                                tui[i] = elem;
-                            }
-                        });
-                    }
+    let (bar_tui_tx, bar_tui_rx) = watch_chan(tui::Elem::empty());
+    tokio::spawn(async move {
+        while let Ok(()) = bar_rx.changed().await {
+            let tui = {
+                let lock = bar_rx.borrow_and_update();
+                lock.by_monitor
+                    .get(&monitor.name)
+                    .unwrap_or(&lock.fallback)
+                    .clone()
+            };
+            bar_tui_tx.send_if_modified(|cur| {
+                if cur.is_identical(&tui) {
+                    return false;
                 }
-            }
+                *cur = tui;
+                true
+            });
         }
     });
 
