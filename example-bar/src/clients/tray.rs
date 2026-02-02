@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
-use bar_common::utils::{
+use ctrl::utils::{
     ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, run_or_retry, unb_chan, watch_chan,
 };
 

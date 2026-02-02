@@ -218,55 +218,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "bar-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "crossterm",
- "flexi_logger",
- "futures",
- "image",
- "log",
- "serde",
- "tokio",
- "tokio-util",
- "unicode-width",
-]
-
-[[package]]
 name = "bar-panel-controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bar-common",
- "bar-proc-mgr",
- "base64",
- "chrono",
- "crossterm",
- "flexi_logger",
- "futures",
- "hyprland",
- "image",
- "libpulse-binding",
- "log",
- "postcard",
- "serde",
- "serde_json",
- "system-tray",
- "tempfile",
- "tokio",
- "tokio-util",
- "unicode-width",
- "zbus",
-]
-
-[[package]]
-name = "bar-proc-mgr"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bar-common",
  "base64",
  "chrono",
  "crossterm",
@@ -562,7 +517,6 @@ name = "example-bar"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bar-common",
  "bar-panel-controller",
  "base64",
  "chrono",

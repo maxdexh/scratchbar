@@ -16,8 +16,6 @@ pub enum ProcKind {
     Panel,
 }
 
-pub const LOG_NAME_ENV_VAR: &str = "BAR_PROC_LOG_NAME";
-
 const COLOR_VAR: &str = "COLOR";
 
 static PROC_NAME: OnceLock<String> = OnceLock::new();

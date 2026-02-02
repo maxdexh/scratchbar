@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+cd -- "$(dirname "$0")/.."
+
+PATH="$PWD/target/installdir/bin:$PATH"
+cargo install --path ./panel-controller --root target/installdir "$@" || exit 1
+cargo install --path ./example-bar --root target/installdir "$@" || exit 1
+bar-panel-controller example-bar

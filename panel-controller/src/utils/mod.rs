@@ -1,4 +1,5 @@
 use anyhow::Context;
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 mod reload;
@@ -92,4 +93,55 @@ impl From<CancellationToken> for CancelDropGuard {
 
 pub fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+pub async fn read_cobs<T: serde::de::DeserializeOwned>(
+    mut read: impl tokio::io::AsyncBufRead + std::marker::Unpin,
+    tx: impl Fn(T),
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncBufReadExt as _;
+    loop {
+        let mut buf = Vec::new();
+        if read.read_until(0, &mut buf).await? == 0 {
+            break;
+        }
+
+        match postcard::from_bytes_cobs(&mut buf) {
+            Err(err) => {
+                log::error!(
+                    "Failed to deserialize {} from socket: {err}",
+                    std::any::type_name::<T>()
+                );
+            }
+            Ok(ev) => {
+                tx(ev);
+            }
+        }
+
+        buf.clear();
+    }
+    Ok(())
+}
+
+pub async fn write_cobs<T: serde::Serialize>(
+    mut write: impl tokio::io::AsyncWrite + std::marker::Unpin,
+    mut items: impl futures::Stream<Item = T> + std::marker::Unpin,
+) -> anyhow::Result<()> {
+    let ret = async {
+        use futures::StreamExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        while let Some(item) = items.next().await {
+            let Ok(buf) = postcard::to_stdvec_cobs(&item)
+                .map_err(|err| log::error!("Failed to serialize update: {err}"))
+            else {
+                continue;
+            };
+
+            write.write_all(&buf).await?;
+        }
+        Ok(())
+    }
+    .await;
+    write.shutdown().await.ok_or_log();
+    ret
 }

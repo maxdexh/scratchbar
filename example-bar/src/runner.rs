@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context as _;
-use bar_common::{
+use ctrl::BarTuiState;
+use ctrl::{
     tui,
     utils::{
-        Callback, ReloadRx, ReloadTx, ResultExt as _, UnbTx, WatchRx, WatchTx, lock_mutex,
+        Callback, ReloadRx, ReloadTx, ResultExt as _, UnbRx, UnbTx, WatchRx, WatchTx, lock_mutex,
         unb_chan, watch_chan,
     },
 };
-use bar_panel_controller::BarTuiState;
 use futures::StreamExt;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
@@ -61,14 +61,6 @@ impl<K: std::hash::Hash + std::cmp::Eq + Clone, V> InteractTagRegistry<K, V> {
         });
         (tag, val)
     }
-    // TODO: Also delete from controller
-    fn remove(&mut self, key: &K) -> Option<(tui::InteractTag, V)> {
-        let ret = self.key_to_tag.remove(key);
-        if let Some((tag, _)) = ret.as_ref() {
-            self.tag_to_key.remove(tag);
-        }
-        ret
-    }
 }
 
 struct InteractArgs {
@@ -79,18 +71,16 @@ type RegTagCallback = (tui::InteractTag, Option<InteractCallback>);
 
 #[derive(Debug, Clone)]
 struct ModuleControllerTx {
-    tx: UnbTx<bar_panel_controller::ControllerUpdate>,
+    tx: UnbTx<ctrl::ControllerUpdate>,
 }
 impl ModuleControllerTx {
     fn set_menu(&self, tag: tui::InteractTag, kind: tui::InteractKind, menu: tui::OpenMenu) {
         self.tx
-            .send(bar_panel_controller::ControllerUpdate::BarMenu(
-                bar_panel_controller::BarMenuUpdate {
-                    tag,
-                    kind,
-                    menu: Some(menu),
-                },
-            ))
+            .send(ctrl::ControllerUpdate::BarMenu(ctrl::BarMenuUpdate {
+                tag,
+                kind,
+                menu: Some(menu),
+            }))
             .ok_or_debug();
     }
 }
@@ -178,12 +168,12 @@ fn gather_bar_tui(bar_tui: &[BarTuiElem]) -> BarTuiState {
     }
 }
 
-pub async fn main() -> std::process::ExitCode {
+pub async fn main(
+    ctrl_upd_tx: UnbTx<ctrl::ControllerUpdate>,
+    mut ctrl_ev_rx: UnbRx<ctrl::ControllerEvent>,
+) -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
     let mut reload_tx = ReloadTx::new();
-
-    let (ctrl_upd_tx, ctrl_upd_rx) = unb_chan::<bar_panel_controller::ControllerUpdate>();
-    let (ctrl_ev_tx, mut ctrl_ev_rx) = unb_chan();
 
     let (tag_callback_tx, mut tag_callback_rx) = unb_chan();
     let mut fac = BarModuleFactory {
@@ -194,11 +184,6 @@ pub async fn main() -> std::process::ExitCode {
         tag_callback_tx,
         tasks: JoinSet::new(),
     };
-
-    required_tasks.spawn(bar_panel_controller::run_controller(
-        ctrl_upd_rx,
-        ctrl_ev_tx,
-    ));
 
     let callbacks = Arc::new(std::sync::Mutex::new(HashMap::new()));
     {
@@ -219,14 +204,12 @@ pub async fn main() -> std::process::ExitCode {
         tokio::spawn(async move {
             while let Some(ev) = ctrl_ev_rx.next().await {
                 match ev {
-                    bar_panel_controller::ControllerEvent::Interact(
-                        bar_panel_controller::TuiInteract { kind, tag, .. },
-                    ) => {
+                    ctrl::ControllerEvent::Interact(ctrl::TuiInteract { kind, tag, .. }) => {
                         let callback: Option<InteractCallback> =
                             lock_mutex(&callbacks).get(&tag).cloned();
                         callback.inspect(|cb| cb.call(InteractArgs { kind }));
                     }
-                    bar_panel_controller::ControllerEvent::ReloadRequest => {
+                    ctrl::ControllerEvent::ReloadRequest => {
                         reload_tx.reload();
                     }
                     ev => log::warn!("Unimplemented event handler: {ev:?}"),
@@ -288,7 +271,7 @@ pub async fn main() -> std::process::ExitCode {
             while let Ok(()) = bar_tui_rx_inner.changed().await {
                 let tui = gather_bar_tui(&bar_tui_rx_inner.borrow_and_update());
                 ctrl_upd_tx
-                    .send(bar_panel_controller::ControllerUpdate::BarTui(tui))
+                    .send(ctrl::ControllerUpdate::BarTui(tui))
                     .ok_or_debug();
             }
         });

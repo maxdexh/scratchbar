@@ -1,8 +1,15 @@
+mod inst;
+mod logging;
 mod monitors;
-use bar_common::utils::WatchTx;
-pub(crate) use bar_common::*;
+pub mod tui;
+pub mod utils;
 
-use bar_proc_mgr::{TermEvent, TermUpdate};
+pub fn init_driver_logger() {
+    logging::init_logger(logging::ProcKind::Controller, "DRIVER".into());
+}
+
+use inst::{TermEvent, TermUpdate};
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
@@ -14,29 +21,29 @@ use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
     monitors::MonitorInfo,
-    tui,
     tui::MenuKind,
     utils::{
-        CancelDropGuard, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, run_or_retry, unb_chan,
-        watch_chan,
+        CancelDropGuard, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, WatchTx, run_or_retry,
+        unb_chan, watch_chan,
     },
 };
+// FIXME: Move everything out of this file
 
-// FIXME: Add to args of run_manager
+// FIXME: Add to update enum
 const EDGE: &str = "top";
 
 /// Adds an extra line and centers the content of the menu with padding of half a cell.
 const VERTICAL_PADDING: bool = true;
 const HORIZONTAL_PADDING: u16 = 4;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BarTuiState {
-    // FIXME: Use Option<Elem> to hide
+    // FIXME: Use Option<Elem> to hide, start hidden
     pub by_monitor: HashMap<Arc<str>, tui::Elem>,
     pub fallback: tui::Elem,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 struct BarMenu {
     kind: tui::MenuKind,
     tui_tx: WatchTx<tui::Elem>,
@@ -45,26 +52,26 @@ struct BarMenu {
 // TODO: Auto clean unused
 type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, BarMenu>>;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ControllerUpdate {
     BarMenu(BarMenuUpdate),
     BarTui(BarTuiState),
 }
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BarMenuUpdate {
     pub tag: tui::InteractTag,
     pub kind: tui::InteractKind,
     pub menu: Option<tui::OpenMenu>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ControllerEvent {
     Interact(TuiInteract),
     ReloadRequest,
 }
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TuiInteract {
     pub kind: tui::InteractKind,
@@ -549,7 +556,7 @@ async fn init_term(
     let (term_upd_tx, term_upd_rx) = unb_chan();
     let (term_ev_tx, mut term_ev_rx) = unb_chan();
 
-    bar_proc_mgr::start_generic_panel(
+    inst::start_generic_panel(
         &sock_path,
         &log_name,
         term_upd_rx,
@@ -753,4 +760,136 @@ async fn try_init_monitor(
         bar_tui_rx,
         event_tx: args.event_tx.clone(),
     })
+}
+
+#[doc(hidden)]
+pub fn __main() -> std::process::ExitCode {
+    main_inner().unwrap_or(std::process::ExitCode::FAILURE)
+}
+fn main_inner() -> Option<std::process::ExitCode> {
+    use std::process::ExitCode;
+
+    if std::env::args_os().nth(1).as_deref() == Some(inst::INTERNAL_INST_ARG.as_ref()) {
+        return Some(inst::inst_main());
+    }
+
+    use anyhow::Context as _;
+
+    crate::logging::init_logger(crate::logging::ProcKind::Controller, "CONTROLLER".into());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Failed to start the tokio runtime")
+        .ok_or_log()?;
+
+    let _guard = runtime.enter();
+
+    // FIXME: Proper arg parsing
+    let driver = std::env::args_os().nth(1)?;
+
+    let (mut driver_child, conn) = {
+        let socket_dir = tempfile::TempDir::new().ok_or_log()?;
+        let sock_path = socket_dir.path().join("driver.sock");
+        let socket = tokio::net::UnixListener::bind(&sock_path).ok_or_log()?;
+
+        let child = tokio::process::Command::new(driver)
+            .args(std::env::args_os().skip(2))
+            .env("SOCK_PATH", sock_path)
+            .spawn()
+            .ok_or_log()?;
+
+        let (conn, _) = runtime.block_on(socket.accept()).ok_or_log()?;
+
+        (child, conn)
+    };
+    let (read, write) = conn.into_split();
+
+    let signals_task = runtime.spawn(async move {
+        type SK = tokio::signal::unix::SignalKind;
+
+        let mut tasks = tokio::task::JoinSet::new();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+
+        for kind in [
+            SK::interrupt(),
+            SK::quit(),
+            SK::alarm(),
+            SK::hangup(),
+            SK::pipe(),
+            SK::terminate(),
+            SK::user_defined1(),
+            SK::user_defined2(),
+        ] {
+            let Some(mut signal) = tokio::signal::unix::signal(kind).ok_or_log() else {
+                continue;
+            };
+            let tx = tx.clone();
+            tasks.spawn(async move {
+                while let Some(()) = signal.recv().await
+                    && tx.send(kind).await.is_ok()
+                {}
+            });
+        }
+        drop(tx);
+
+        rx.recv()
+            .await
+            .context("Failed to receive any signals")
+            .map(|kind| {
+                log::debug!("Received exit signal {kind:?}");
+                let code = 128 + kind.as_raw_value();
+                ExitCode::from(code as u8)
+            })
+            .ok_or_log()
+    });
+    let signals_task = async move {
+        signals_task
+            .await
+            .context("Signal handler failed")
+            .ok_or_log()
+            .flatten()
+    };
+
+    let mut required_tasks = tokio::task::JoinSet::new();
+
+    let (update_tx, update_rx) = unb_chan();
+    let (event_tx, event_rx) = unb_chan();
+
+    required_tasks.spawn(async move {
+        run_controller(update_rx, event_tx).await;
+        // FIXME: Return exit code from controller
+        ExitCode::FAILURE
+    });
+
+    runtime.spawn(crate::utils::read_cobs(
+        tokio::io::BufReader::new(read),
+        move |ev| {
+            update_tx.send(ev).ok_or_debug();
+        },
+    ));
+    runtime.spawn(crate::utils::write_cobs(write, event_rx));
+
+    required_tasks.spawn(async move {
+        let Some(status) = driver_child.wait().await.ok_or_log() else {
+            return ExitCode::FAILURE;
+        };
+        match status.code() {
+            Some(code) => ExitCode::from(code as u8),
+            None => ExitCode::FAILURE,
+        }
+    });
+
+    let exit_task = runtime.spawn(async move {
+        tokio::select! {
+            Some(res) = required_tasks.join_next() => match res.ok_or_log() {
+                Some(code) => code,
+                None => std::process::ExitCode::FAILURE,
+            },
+            Some(code) = signals_task => code,
+        }
+    });
+
+    runtime.block_on(async move { exit_task.await.ok_or_log() })
 }

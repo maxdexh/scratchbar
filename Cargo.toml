@@ -1,29 +1,28 @@
 [workspace]
 resolver = "2"
-members = ["panel-controller", "proc-mgr", "common", "example-bar"]
+members = ["panel-controller", "example-bar"]
 
 [workspace.dependencies]
-bar-common = { path = "common" }
-bar-proc-mgr = { path = "proc-mgr" }
 bar-panel-controller = { path = "panel-controller" }
 
 crossterm = { version = "0.29.0", default-features = false, features = [
-  "event-stream",
-  "serde",
+    "event-stream",
+    "serde",
 ] }
 anyhow = "1.0.100"
 futures = { version = "0.3.31", default-features = false }
 tokio = { version = "1.49.0", features = [
-  "macros",
-  "net",
-  "rt-multi-thread",
-  "signal",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "io-std",
 ] }
 tokio-util = { version = "0.7.18", features = ["rt", "time"] }
 flexi_logger = "0.31.7"
 log = "0.4.29"
 image = { version = "0.25.9", default-features = false, features = [
-  "png",
-  "serde",
+    "png",
+    "serde",
 ] }
 serde = { version = "1.0.228", features = ["rc"] }

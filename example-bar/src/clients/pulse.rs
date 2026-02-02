@@ -24,7 +24,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use bar_common::utils::{
+use ctrl::utils::{
     CancelDropGuard, ReloadRx, ResultExt, UnbTx, WatchRx, WatchTx, unb_chan, watch_chan,
 };
 

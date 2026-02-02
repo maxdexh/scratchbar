@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use bar_common::utils::CancelDropGuard;
+use crate::utils::CancelDropGuard;
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
@@ -20,7 +20,7 @@ pub enum TermUpdate {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum TermEvent {
     Crossterm(crossterm::event::Event),
-    Sizes(bar_common::tui::Sizes),
+    Sizes(crate::tui::Sizes),
     FocusChange { is_focused: bool },
 }
 
