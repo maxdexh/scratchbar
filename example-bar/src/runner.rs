@@ -3,10 +3,15 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::Context as _;
 use bar_common::{
     tui,
-    utils::{ReloadRx, ReloadTx, ResultExt as _, WatchRx, WatchTx, watch_chan},
+    utils::{
+        Callback, ReloadRx, ReloadTx, ResultExt as _, UnbTx, WatchRx, WatchTx, lock_mutex,
+        unb_chan, watch_chan,
+    },
 };
 use bar_panel_controller::BarTuiState;
+use futures::StreamExt;
 use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::clients;
 
@@ -24,14 +29,84 @@ impl From<tui::Elem> for BarTuiElem {
     }
 }
 
+struct InteractTagRegistry<K, V> {
+    key_to_tag: HashMap<K, (tui::InteractTag, V)>,
+    tag_to_key: HashMap<tui::InteractTag, K>,
+}
+
+fn mk_fresh_interact_tag() -> tui::InteractTag {
+    use std::sync::atomic::*;
+
+    static TAG_COUNTER: AtomicU64 = AtomicU64::new(0);
+    tui::InteractTag::from_bytes(&TAG_COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes())
+}
+
+impl<K: std::hash::Hash + std::cmp::Eq + Clone, V> InteractTagRegistry<K, V> {
+    fn new() -> Self {
+        Self {
+            key_to_tag: Default::default(),
+            tag_to_key: Default::default(),
+        }
+    }
+    fn get_or_init(
+        &mut self,
+        key: &K,
+        init: impl FnOnce(&tui::InteractTag) -> V,
+    ) -> (&tui::InteractTag, &mut V) {
+        let (tag, val) = self.key_to_tag.entry(key.clone()).or_insert_with(|| {
+            let tag = mk_fresh_interact_tag();
+            self.tag_to_key.insert(tag.clone(), key.clone());
+            let val = init(&tag);
+            (tag, val)
+        });
+        (tag, val)
+    }
+    // TODO: Also delete from controller
+    fn remove(&mut self, key: &K) -> Option<(tui::InteractTag, V)> {
+        let ret = self.key_to_tag.remove(key);
+        if let Some((tag, _)) = ret.as_ref() {
+            self.tag_to_key.remove(tag);
+        }
+        ret
+    }
+}
+
+struct InteractArgs {
+    kind: tui::InteractKind,
+}
+type InteractCallback = Callback<InteractArgs, ()>;
+type RegTagCallback = (tui::InteractTag, Option<InteractCallback>);
+
+#[derive(Debug, Clone)]
+struct ModuleControllerTx {
+    tx: UnbTx<bar_panel_controller::ControllerUpdate>,
+}
+impl ModuleControllerTx {
+    fn set_menu(&self, tag: tui::InteractTag, kind: tui::InteractKind, menu: tui::OpenMenu) {
+        self.tx
+            .send(bar_panel_controller::ControllerUpdate::BarMenu(
+                bar_panel_controller::BarMenuUpdate {
+                    tag,
+                    kind,
+                    menu: Some(menu),
+                },
+            ))
+            .ok_or_debug();
+    }
+}
+
 struct ModuleArgs {
     tui_tx: WatchTx<BarTuiElem>,
     reload_rx: ReloadRx,
+    ctrl_tx: ModuleControllerTx,
+    tag_callback_tx: UnbTx<RegTagCallback>,
     _unused: (),
 }
 
 struct BarModuleFactory {
     reload_tx: ReloadTx,
+    ctrl_tx: ModuleControllerTx,
+    tag_callback_tx: UnbTx<RegTagCallback>,
     tasks: JoinSet<()>,
 }
 impl BarModuleFactory {
@@ -42,6 +117,8 @@ impl BarModuleFactory {
         let (tui_tx, tui_rx) = watch_chan(BarTuiElem::Hide);
         self.tasks.spawn(task(ModuleArgs {
             reload_rx: self.reload_tx.subscribe(),
+            ctrl_tx: self.ctrl_tx.clone(),
+            tag_callback_tx: self.tag_callback_tx.clone(),
             tui_tx,
             _unused: (),
         }));
@@ -60,7 +137,7 @@ impl BarModuleFactory {
     }
 }
 
-fn gather_bar_tui(bar_tui: &[BarTuiElem], tx: &WatchTx<BarTuiState>) {
+fn gather_bar_tui(bar_tui: &[BarTuiElem]) -> BarTuiState {
     let mut by_monitor = HashMap::new();
     let mut fallback = tui::StackBuilder::new(tui::Axis::X);
     for elem in bar_tui {
@@ -92,29 +169,71 @@ fn gather_bar_tui(bar_tui: &[BarTuiElem], tx: &WatchTx<BarTuiState>) {
         };
     }
 
-    tx.send_replace(BarTuiState {
+    BarTuiState {
         by_monitor: by_monitor
             .into_iter()
             .map(|(k, stack)| (k, stack.build()))
             .collect(),
         fallback: fallback.build(),
-    });
+    }
 }
 
 pub async fn main() -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
     let mut reload_tx = ReloadTx::new();
 
-    let bar_tui_tx = WatchTx::new(BarTuiState::default());
-    required_tasks.spawn(bar_panel_controller::run_controller(
-        bar_tui_tx.subscribe(),
-        reload_tx.clone(),
-    ));
+    let (ctrl_upd_tx, ctrl_upd_rx) = unb_chan::<bar_panel_controller::ControllerUpdate>();
+    let (ctrl_ev_tx, mut ctrl_ev_rx) = unb_chan();
 
+    let (tag_callback_tx, mut tag_callback_rx) = unb_chan();
     let mut fac = BarModuleFactory {
         reload_tx: reload_tx.clone(),
+        ctrl_tx: ModuleControllerTx {
+            tx: ctrl_upd_tx.clone(),
+        },
+        tag_callback_tx,
         tasks: JoinSet::new(),
     };
+
+    required_tasks.spawn(bar_panel_controller::run_controller(
+        ctrl_upd_rx,
+        ctrl_ev_tx,
+    ));
+
+    let callbacks = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    {
+        let callbacks = callbacks.clone();
+        tokio::spawn(async move {
+            while let Some((tag, cb)) = tag_callback_rx.next().await {
+                if let Some(cb) = cb {
+                    lock_mutex(&callbacks).insert(tag, cb);
+                } else {
+                    lock_mutex(&callbacks).remove(&tag);
+                }
+            }
+        });
+    }
+
+    {
+        let mut reload_tx = reload_tx.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = ctrl_ev_rx.next().await {
+                match ev {
+                    bar_panel_controller::ControllerEvent::Interact(
+                        bar_panel_controller::TuiInteract { kind, tag, .. },
+                    ) => {
+                        let callback: Option<InteractCallback> =
+                            lock_mutex(&callbacks).get(&tag).cloned();
+                        callback.inspect(|cb| cb.call(InteractArgs { kind }));
+                    }
+                    bar_panel_controller::ControllerEvent::ReloadRequest => {
+                        reload_tx.reload();
+                    }
+                    ev => log::warn!("Unimplemented event handler: {ev:?}"),
+                }
+            }
+        });
+    }
 
     let pulse = Arc::new(clients::pulse::connect(reload_tx.subscribe()));
     let mut modules = [
@@ -167,7 +286,10 @@ pub async fn main() -> std::process::ExitCode {
         let mut bar_tui_rx_inner = bar_tui_tx_inner.subscribe();
         required_tasks.spawn(async move {
             while let Ok(()) = bar_tui_rx_inner.changed().await {
-                gather_bar_tui(&bar_tui_rx_inner.borrow_and_update(), &bar_tui_tx);
+                let tui = gather_bar_tui(&bar_tui_rx_inner.borrow_and_update());
+                ctrl_upd_tx
+                    .send(bar_panel_controller::ControllerUpdate::BarTui(tui))
+                    .ok_or_debug();
             }
         });
     }
@@ -186,7 +308,10 @@ pub async fn main() -> std::process::ExitCode {
 
 async fn hypr_module(
     ModuleArgs {
-        tui_tx, reload_rx, ..
+        tui_tx,
+        reload_rx,
+        tag_callback_tx,
+        ..
     }: ModuleArgs,
 ) {
     let hypr = Arc::new(clients::hypr::connect(reload_rx));
@@ -194,38 +319,61 @@ async fn hypr_module(
     let mut basic_rx = hypr.basic_rx.clone();
     basic_rx.mark_changed();
 
+    let mut ws_reg = InteractTagRegistry::new();
+
     while let Some(()) = basic_rx.changed().await.ok_or_debug() {
         let mut by_monitor = HashMap::new();
         for ws in basic_rx.borrow_and_update().workspaces.iter() {
             let Some(monitor) = ws.monitor.clone() else {
                 continue;
             };
+
+            let (_, (tui, tui_active)) = ws_reg.get_or_init(&ws.id, |tag| {
+                let tui = tui::RawPrint::plain(ws.name.clone());
+                let tui_active = tui
+                    .clone()
+                    .styled(tui::Style {
+                        fg: Some(tui::Color::Green),
+                        ..Default::default()
+                    })
+                    .map_display(|it| it.to_string().into());
+
+                let with_hover = |base: tui::RawPrint<Arc<str>>| {
+                    let hovered = base.clone().styled(tui::Style {
+                        modifier: tui::Modifier {
+                            underline: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                    tui::Elem::from(base).interactive_hover(tag.clone(), hovered.into())
+                };
+
+                let on_interact = InteractCallback::from_fn_ctx(
+                    (hypr.clone(), ws.id.clone()),
+                    move |(hypr, ws_id), interact| {
+                        if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
+                            return;
+                        }
+                        hypr.switch_workspace(ws_id.clone());
+                    },
+                );
+                tag_callback_tx
+                    .send((tag.clone(), Some(on_interact)))
+                    .ok_or_debug();
+
+                (with_hover(tui), with_hover(tui_active))
+            });
+
             let wss = by_monitor
                 .entry(monitor)
                 .or_insert_with(|| tui::StackBuilder::new(tui::Axis::X));
 
-            let on_interact = tui::InteractCallback::from_fn_ctx(
-                (hypr.clone(), ws.id.clone()),
-                move |(hypr, ws), interact| {
-                    match interact.kind {
-                        tui::InteractKind::Click(tui::MouseButton::Left) => {
-                            hypr.switch_workspace(ws.clone());
-                        }
-                        _ => {
-                            // TODO: Show workspace info on rclick/hover
-                        }
-                    }
-                    None
-                },
-            );
-
-            wss.fit(
-                tui::Elem::from(tui::RawPrint::plain(&ws.name).styled(tui::Style {
-                    fg: ws.is_active.then_some(tui::Color::Green),
-                    ..Default::default()
-                }))
-                .on_interact(on_interact, None),
-            );
+            wss.fit(if ws.is_active {
+                tui_active.clone()
+            } else {
+                tui.clone()
+            });
             wss.spacing(1);
         }
         let by_monitor = by_monitor
@@ -240,17 +388,14 @@ async fn time_module(
     ModuleArgs {
         tui_tx,
         mut reload_rx,
+        ctrl_tx,
         ..
     }: ModuleArgs,
 ) {
     use chrono::{Datelike, Timelike};
     use std::time::Duration;
 
-    let on_interact = tui::InteractCallback::from_fn(move |interact| {
-        if interact.kind != tui::InteractKind::Hover {
-            return None;
-        }
-
+    let mk_menu = || {
         let now = chrono::Local::now().date_naive();
         let title = now.format("%B %Y").to_string();
 
@@ -328,6 +473,16 @@ async fn time_module(
             }
         });
         Some(tui::OpenMenu::tooltip(elem))
+    };
+    let interact_tag = mk_fresh_interact_tag();
+    let _menu_task = AbortOnDropHandle::new({
+        let interact_tag = interact_tag.clone();
+        tokio::spawn(async move {
+            if let Some(menu) = mk_menu() {
+                ctrl_tx.set_menu(interact_tag.clone(), tui::InteractKind::Hover, menu);
+            }
+            // FIXME: Schedule daily
+        })
     });
 
     let mut prev_minutes = 61;
@@ -336,9 +491,9 @@ async fn time_module(
         let minute = now.minute();
         if prev_minutes != minute {
             let tui = tui::RawPrint::plain(now.format("%H:%M %d/%m").to_string());
-            tui_tx.send_replace(BarTuiElem::Shared(
-                tui::Elem::from(tui).on_interact(&on_interact, None),
-            ));
+            let tui = tui::Elem::from(tui).interactive(interact_tag.clone());
+
+            tui_tx.send_replace(BarTuiElem::Shared(tui));
 
             prev_minutes = minute;
         } else {
@@ -366,41 +521,44 @@ async fn pulse_module(
         muted_sym,
         unmuted_sym,
     }: PulseModuleCtx,
-    ModuleArgs { tui_tx, .. }: ModuleArgs,
+    ModuleArgs {
+        tui_tx,
+        tag_callback_tx,
+        ..
+    }: ModuleArgs,
 ) {
     use crate::clients::pulse::*;
 
     let mut state_rx = pulse.state_rx.clone();
 
-    let on_interact = tui::InteractCallback::from_fn({
-        let pulse = pulse.clone();
-        move |interact| {
-            pulse
-                .update_tx
-                .send(PulseUpdate {
-                    target: device_kind,
-                    kind: match interact.kind {
-                        tui::InteractKind::Click(tui::MouseButton::Left) => {
-                            PulseUpdateKind::ToggleMute
-                        }
-                        tui::InteractKind::Click(tui::MouseButton::Right) => {
-                            PulseUpdateKind::ResetVolume
-                        }
-                        tui::InteractKind::Scroll(direction) => PulseUpdateKind::VolumeDelta(
-                            2 * match direction {
-                                tui::Direction::Up => 1,
-                                tui::Direction::Down => -1,
-                                tui::Direction::Left => -1,
-                                tui::Direction::Right => 1,
-                            },
-                        ),
-                        _ => return None,
-                    },
-                })
-                .ok_or_log();
-            None
-        }
+    let on_interact = InteractCallback::from_fn_ctx(pulse.clone(), move |pulse, interact| {
+        pulse
+            .update_tx
+            .send(PulseUpdate {
+                target: device_kind,
+                kind: match interact.kind {
+                    tui::InteractKind::Click(tui::MouseButton::Left) => PulseUpdateKind::ToggleMute,
+                    tui::InteractKind::Click(tui::MouseButton::Right) => {
+                        PulseUpdateKind::ResetVolume
+                    }
+                    tui::InteractKind::Scroll(direction) => PulseUpdateKind::VolumeDelta(
+                        2 * match direction {
+                            tui::Direction::Up => 1,
+                            tui::Direction::Down => -1,
+                            tui::Direction::Left => -1,
+                            tui::Direction::Right => 1,
+                        },
+                    ),
+                    _ => return,
+                },
+            })
+            .ok_or_log();
     });
+
+    let interact_tag = mk_fresh_interact_tag();
+    tag_callback_tx
+        .send((interact_tag.clone(), Some(on_interact)))
+        .ok_or_log();
 
     while let Some(()) = state_rx.changed().await.ok_or_debug() {
         let state = state_rx.borrow_and_update();
@@ -421,46 +579,28 @@ async fn pulse_module(
                     tui::RawPrint::plain(format!("{:>3}%", (volume * 100.0).round() as u32)).into(),
                 );
             })
-            .on_interact(&on_interact, None),
+            .interactive(interact_tag.clone()),
         ));
     }
 }
 async fn energy_module(
     ModuleArgs {
-        tui_tx, reload_rx, ..
+        tui_tx,
+        reload_rx,
+        ctrl_tx,
+        ..
     }: ModuleArgs,
 ) {
     use crate::clients::upower::*;
     let energy = Arc::new(clients::upower::connect(reload_rx));
 
-    let tooltip = tui::InteractCallback::from_fn_ctx(energy.clone(), |energy, interact| {
-        if interact.kind != tui::InteractKind::Hover {
-            return None;
-        }
-        let text = {
-            let lock = energy.state_rx.borrow();
-            let display_time = |time: std::time::Duration| {
-                let hours = time.as_secs() / 3600;
-                let mins = (time.as_secs() / 60) % 60;
-                format!("{hours}h {mins}min")
-            };
-            match lock.battery_state {
-                BatteryState::Discharging | BatteryState::PendingDischarge => {
-                    format!("Battery empty in {}", display_time(lock.time_to_empty))
-                }
-                BatteryState::FullyCharged => "Battery full".to_owned(),
-                BatteryState::Empty => "Battery empty".to_owned(),
-                BatteryState::Unknown => "Battery state unknown".to_owned(),
-                BatteryState::Charging | BatteryState::PendingCharge => {
-                    format!("Battery full in {}", display_time(lock.time_to_full))
-                }
-            }
-        };
-        Some(tui::OpenMenu::tooltip(tui::RawPrint::plain(text).into()))
-    });
+    let interact_tag = mk_fresh_interact_tag();
 
     let mut state_rx = energy.state_rx.clone();
     state_rx.mark_changed();
+
+    let mut last_energy_text = String::default();
+    let mut last_tooltip = String::default();
     while let Some(()) = state_rx.changed().await.ok_or_debug() {
         let state = state_rx.borrow_and_update().clone();
         if !state.is_present {
@@ -468,134 +608,170 @@ async fn energy_module(
             continue;
         }
 
-        // TODO: Time estimate tooltip
-        let percentage = state.percentage.round() as i64;
-        let sign = match state.battery_state {
-            BatteryState::Discharging | BatteryState::PendingDischarge => '-',
-            BatteryState::Charging | BatteryState::PendingCharge => '+',
-            BatteryState::FullyCharged | BatteryState::Unknown | BatteryState::Empty => '±',
-        };
-        let rate = format!("{sign}{:.1}W", state.energy_rate);
-        let energy = format!("{percentage:>3}% {rate:<6}");
+        {
+            let percentage = state.percentage.round() as i64;
+            let sign = match state.battery_state {
+                BatteryState::Discharging | BatteryState::PendingDischarge => '-',
+                BatteryState::Charging | BatteryState::PendingCharge => '+',
+                BatteryState::FullyCharged | BatteryState::Unknown | BatteryState::Empty => '±',
+            };
+            let rate = format!("{sign}{:.1}W", state.energy_rate);
+            let energy = format!("{percentage:>3}% {rate:<6}");
 
-        tui_tx.send_replace(BarTuiElem::Shared(
-            tui::Elem::from(tui::RawPrint::plain(energy)).on_interact(&tooltip, None),
-        ));
+            if energy != last_energy_text {
+                let tui = tui::RawPrint::plain(energy.as_str());
+                let tui = tui::Elem::from(tui).interactive(interact_tag.clone());
+                tui_tx.send_replace(BarTuiElem::Shared(tui));
+                last_energy_text = energy;
+            }
+        }
+
+        {
+            let text = {
+                let display_time = |time: std::time::Duration| {
+                    let hours = time.as_secs() / 3600;
+                    let mins = (time.as_secs() / 60) % 60;
+                    format!("{hours}h {mins}min")
+                };
+                match state.battery_state {
+                    BatteryState::Discharging | BatteryState::PendingDischarge => {
+                        format!("Battery empty in {}", display_time(state.time_to_empty))
+                    }
+                    BatteryState::FullyCharged => "Battery full".to_owned(),
+                    BatteryState::Empty => "Battery empty".to_owned(),
+                    BatteryState::Unknown => "Battery state unknown".to_owned(),
+                    BatteryState::Charging | BatteryState::PendingCharge => {
+                        format!("Battery full in {}", display_time(state.time_to_full))
+                    }
+                }
+            };
+            if text != last_tooltip {
+                let menu = tui::OpenMenu::tooltip(tui::RawPrint::plain(text.as_str()).into());
+                ctrl_tx.set_menu(interact_tag.clone(), tui::InteractKind::Hover, menu);
+                last_tooltip = text;
+            }
+        }
     }
 }
 async fn ppd_module(
     ModuleArgs {
-        tui_tx, reload_rx, ..
+        tui_tx,
+        reload_rx,
+        ctrl_tx,
+        tag_callback_tx,
+        ..
     }: ModuleArgs,
 ) {
     let ppd = Arc::new(clients::ppd::connect(reload_rx));
 
-    let on_interact =
-        tui::InteractCallback::from_fn_ctx(ppd.clone(), |ppd, interact| match interact.kind {
-            tui::InteractKind::Hover => {
-                let profile = ppd.profile_rx.borrow().clone();
-                Some(tui::OpenMenu::tooltip(
-                    tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
-                ))
-            }
-            tui::InteractKind::Click(tui::MouseButton::Left) => {
-                ppd.cycle_profile();
-                None
-            }
-            _ => None,
-        });
+    let interact_tag = mk_fresh_interact_tag();
+
+    let on_interact = InteractCallback::from_fn_ctx(ppd.clone(), |ppd, interact| {
+        if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
+            return;
+        }
+        ppd.cycle_profile();
+    });
+    tag_callback_tx
+        .send((interact_tag.clone(), Some(on_interact)))
+        .ok_or_log();
 
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
-        let Some(icon) = profile_rx
-            .borrow_and_update()
-            .as_deref()
-            .and_then(|profile| {
-                Some(match profile {
-                    "balanced" => tui::RawPrint::plain(" ").into(),
-                    "performance" => tui::RawPrint::center_symbol(" ", 2).into(),
-                    "power-saver" => tui::RawPrint::plain(" ").into(),
-                    _ => return None,
-                })
-            })
-        else {
-            tui_tx.send_replace(BarTuiElem::Hide);
-            continue;
+        let profile = profile_rx.borrow_and_update().clone();
+        ctrl_tx.set_menu(
+            interact_tag.clone(),
+            tui::InteractKind::Click(tui::MouseButton::Left),
+            tui::OpenMenu::tooltip(
+                tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
+            ),
+        );
+
+        let icon: tui::Elem = match profile.as_deref() {
+            Some("balanced") => tui::RawPrint::plain(" ").into(),
+            Some("performance") => tui::RawPrint::center_symbol(" ", 2).into(),
+            Some("power-saver") => tui::RawPrint::plain(" ").into(),
+            _ => {
+                tui_tx.send_if_modified(|tui| {
+                    let old = std::mem::replace(tui, BarTuiElem::Hide);
+                    !matches!(old, BarTuiElem::Hide)
+                });
+                continue;
+            }
         };
 
-        let elem: tui::Elem = icon;
-        let elem = elem.on_interact(&on_interact, None);
-
-        tui_tx.send_replace(BarTuiElem::Shared(elem));
+        tui_tx.send_replace(BarTuiElem::Shared(icon.interactive(interact_tag.clone())));
     }
 }
 
 async fn tray_module(
     ModuleArgs {
-        tui_tx, reload_rx, ..
+        tui_tx,
+        reload_rx,
+        ctrl_tx,
+        tag_callback_tx,
+        ..
     }: ModuleArgs,
 ) {
     use crate::clients::tray::*;
     let tray = Arc::new(clients::tray::connect(reload_rx));
 
-    fn interact_cb(
-        (addr, tray): &(Arc<str>, Arc<TrayClient>),
-        interact: tui::InteractArgs,
-    ) -> Option<tui::OpenMenu> {
-        match interact.kind {
-            tui::InteractKind::Hover => {
-                let items = tray.state_rx.borrow().items.clone();
+    let mut entry_reg = InteractTagRegistry::new();
 
-                // FIXME: Handle more attrs
-                let system_tray::item::Tooltip {
+    let mut state_rx = tray.state_rx.clone();
+    while state_rx.changed().await.is_ok() {
+        let state = state_rx.borrow_and_update().clone();
+
+        let tui = tui::Elem::build_stack(tui::Axis::X, |stack| {
+            for TrayEntry { addr, item, menu } in state.entries.iter() {
+                let (tag, ()) = entry_reg.get_or_init(addr, |_| ());
+
+                // FIXME: Handle icon attrs
+                if let Some(system_tray::item::Tooltip {
                     icon_name: _,
                     icon_data: _,
                     title,
                     description,
-                } = items
-                    .get(addr)
-                    .and_then(|item| item.tool_tip.as_ref())
-                    .with_context(|| format!("Unknown tray addr {addr}"))
-                    .ok_or_log()?;
-
-                let header = tui::PlainLines::new(title).styled(tui::Style {
-                    modifier: tui::Modifier {
-                        bold: true,
+                }) = item.tool_tip.as_ref()
+                {
+                    let header = tui::PlainLines::new(title).styled(tui::Style {
+                        modifier: tui::Modifier {
+                            bold: true,
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
-                });
-                let header = tui::Elem::build_stack(tui::Axis::X, |hstack| {
-                    hstack.fill(1, tui::Elem::empty());
-                    hstack.fit(header.into());
-                    hstack.fill(1, tui::Elem::empty());
-                });
-                let tui = tui::Elem::build_stack(tui::Axis::Y, |vstack| {
-                    vstack.fit(header);
-                    vstack.fit(tui::PlainLines::new(description).into());
-                });
-                Some(tui::OpenMenu::tooltip(tui))
-            }
-            tui::InteractKind::Click(tui::MouseButton::Right) => {
-                let TrayMenuExt {
+                    });
+                    let header = tui::Elem::build_stack(tui::Axis::X, |hstack| {
+                        hstack.fill(1, tui::Elem::empty());
+                        hstack.fit(header.into());
+                        hstack.fill(1, tui::Elem::empty());
+                    });
+                    let tui = tui::Elem::build_stack(tui::Axis::Y, |vstack| {
+                        vstack.fit(header);
+                        vstack.fit(tui::PlainLines::new(description).into());
+                    });
+                    let menu = tui::OpenMenu::tooltip(tui);
+                    ctrl_tx.set_menu(tag.clone(), tui::InteractKind::Hover, menu);
+                }
+
+                if let Some(TrayMenuExt {
                     menu_path,
                     submenus,
                     ..
-                } = tray
-                    .state_rx
-                    .borrow()
-                    .menus
-                    .get(addr)
-                    .cloned()
-                    .with_context(|| format!("Unknown tray addr {addr}"))
-                    .ok_or_log()?;
+                }) = menu.as_ref()
+                {
+                    let menu_tui = tray_menu_to_tui(0, submenus, &|id| {
+                        let tag = mk_fresh_interact_tag();
+                        let Some(menu_path) = menu_path.clone() else {
+                            return tag;
+                        };
 
-                let icb = |menu_path: &Arc<str>, id| {
-                    let tray = tray.clone();
-                    let addr = addr.clone();
-                    let menu_path = menu_path.clone();
-                    tui::InteractCallback::from_fn(move |interact| {
-                        if let tui::InteractKind::Click(tui::MouseButton::Left) = interact.kind {
+                        let tray = tray.clone();
+                        let addr = addr.clone();
+                        let icb = InteractCallback::from_fn(move |interact| {
+                            if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
+                                return;
+                            }
                             let addr = addr.clone();
                             let menu_path = menu_path.clone();
                             tray.sched_with_client(async move |client| {
@@ -609,39 +785,28 @@ async fn tray_module(
                                     .context("Failed to send ActivateRequest")
                                     .ok_or_log();
                             });
-                        }
-                        None
-                    })
-                };
-
-                let menu_tui = tray_menu_to_tui(
-                    0,
-                    &submenus,
-                    menu_path
-                        .as_ref()
-                        .map(|menu_path| |id| icb(menu_path, id))
-                        .as_ref(),
-                );
-                Some(tui::OpenMenu::context(tui::Elem::build_block(|block| {
-                    block.set_borders_at(tui::Borders::all());
-                    block.set_style(tui::Style {
-                        fg: Some(tui::Color::DarkGrey),
-                        ..Default::default()
+                        });
+                        tag_callback_tx.send((tag.clone(), Some(icb))).ok_or_debug();
+                        tag
                     });
-                    block.set_lines(tui::LineSet::thick());
-                    block.set_inner(menu_tui);
-                })))
-            }
-            _ => None,
-        }
-    }
 
-    let mut state_rx = tray.state_rx.clone();
-    while state_rx.changed().await.is_ok() {
-        let items = state_rx.borrow_and_update().items.clone();
+                    let menu = tui::OpenMenu::context(tui::Elem::build_block(|block| {
+                        block.set_borders_at(tui::Borders::all());
+                        block.set_style(tui::Style {
+                            fg: Some(tui::Color::DarkGrey),
+                            ..Default::default()
+                        });
+                        block.set_lines(tui::LineSet::thick());
+                        block.set_inner(menu_tui);
+                    }));
 
-        let tui = tui::Elem::build_stack(tui::Axis::X, |stack| {
-            for (addr, item) in items.iter() {
+                    ctrl_tx.set_menu(
+                        tag.clone(),
+                        tui::InteractKind::Click(tui::MouseButton::Right),
+                        menu,
+                    );
+                }
+
                 // FIXME: Handle the other options
                 // FIXME: Why are we showing all icons?
                 for system_tray::item::IconPixmap {
@@ -672,13 +837,7 @@ async fn tray_module(
                             img, //
                             tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
                         )
-                        .on_interact(
-                            tui::InteractCallback::from_fn_ctx(
-                                (addr.clone(), tray.clone()),
-                                interact_cb,
-                            ),
-                            None,
-                        ),
+                        .interactive(tag.clone()),
                     );
                     stack.spacing(1);
                 }
@@ -689,7 +848,7 @@ async fn tray_module(
     fn tray_menu_item_to_tui(
         depth: u16,
         item: &system_tray::menu::MenuItem,
-        on_interact: Option<&impl Fn(i32) -> tui::InteractCallback>,
+        mk_interact: &impl Fn(i32) -> tui::InteractTag,
     ) -> Option<tui::Elem> {
         use system_tray::menu::*;
         let main_elem = match item {
@@ -740,10 +899,8 @@ async fn tray_module(
                     stack.fit(tui::PlainLines::new(label).into())
                 });
 
-                match on_interact {
-                    Some(mk_interact) => elem.on_interact(mk_interact(*id), None),
-                    None => elem,
-                }
+                // FIXME: Add hover
+                elem.interactive(mk_interact(*id))
             }
 
             _ => {
@@ -757,7 +914,7 @@ async fn tray_module(
         } else {
             tui::Elem::build_stack(tui::Axis::Y, |stack| {
                 stack.fit(main_elem);
-                stack.fit(tray_menu_to_tui(depth + 1, &item.submenu, on_interact));
+                stack.fit(tray_menu_to_tui(depth + 1, &item.submenu, mk_interact));
             })
         })
     }
@@ -765,11 +922,11 @@ async fn tray_module(
     fn tray_menu_to_tui(
         depth: u16,
         items: &[system_tray::menu::MenuItem],
-        on_interact: Option<&impl Fn(i32) -> tui::InteractCallback>,
+        mk_interact: &impl Fn(i32) -> tui::InteractTag,
     ) -> tui::Elem {
         tui::Elem::build_stack(tui::Axis::Y, |stack| {
             for item in items {
-                if let Some(item) = tray_menu_item_to_tui(depth, item, on_interact) {
+                if let Some(item) = tray_menu_item_to_tui(depth, item, mk_interact) {
                     stack.fit(item)
                 }
             }

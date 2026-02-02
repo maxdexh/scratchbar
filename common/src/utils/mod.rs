@@ -89,3 +89,7 @@ impl From<CancellationToken> for CancelDropGuard {
         Self { inner }
     }
 }
+
+pub fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}

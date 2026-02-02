@@ -73,16 +73,29 @@ impl Axis {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct StoredInteractive {
+    tag: InteractTag,
+    has_hover: bool,
+}
+impl StoredInteractive {
+    pub fn new(elem: &InteractElem) -> Self {
+        Self {
+            has_hover: elem.hovered.is_some(),
+            tag: elem.tag.clone(),
+        }
+    }
+}
 #[derive(Debug)]
 pub struct RenderedLayout {
-    pub(super) widgets: Vec<(Area, InteractElem)>,
+    pub(super) widgets: Vec<(Area, StoredInteractive)>,
     pub(super) last_mouse_pos: Option<Vec2<u16>>,
-    pub(super) last_hover_elem: Option<InteractElem>,
+    pub(super) last_hover_elem: Option<StoredInteractive>,
 }
 
 pub struct MouseEventResult {
-    pub interact: InteractArgs,
-    pub callback: Option<InteractCallback>,
+    pub kind: InteractKind,
+    pub tag: Option<InteractTag>,
     pub empty: bool,
     pub changed: bool,
     pub rerender: bool,
@@ -91,14 +104,11 @@ pub struct MouseEventResult {
 
 impl RenderedLayout {
     pub(super) fn insert(&mut self, area: Area, elem: &InteractElem) {
-        self.widgets.push((area, elem.clone()));
+        self.widgets.push((area, StoredInteractive::new(elem)));
     }
 
     pub fn ext_focus_loss(&mut self) -> bool {
-        let changed = self
-            .last_hover_elem
-            .as_ref()
-            .is_some_and(|it| it.hovered.is_some());
+        let changed = self.last_hover_elem.as_ref().is_some_and(|it| it.has_hover);
         self.last_mouse_pos = None;
         self.last_hover_elem = None;
         changed
@@ -135,23 +145,21 @@ impl RenderedLayout {
             MK::Moved | MK::Up(_) | MK::Drag(_) => IK::Hover,
         };
 
-        let interact = InteractArgs { kind };
-
         let font_w = u32::from(font_size.x);
         let font_h = u32::from(font_size.y);
 
         let Some((area, elem)) = self.widgets.iter().find(|(r, _)| r.contains(pos)) else {
             let cur = self.last_hover_elem.take();
             return MouseEventResult {
-                interact,
+                kind,
                 empty: true,
-                callback: None,
+                tag: None,
                 pix_location: Vec2 {
                     x: u32::from(pos.x) * font_w,
                     y: u32::from(pos.y) * font_h,
                 },
                 changed: cur.is_some(),
-                rerender: cur.is_some_and(|it| it.hovered.is_some()),
+                rerender: cur.is_some_and(|it| it.has_hover),
             };
         };
 
@@ -164,16 +172,13 @@ impl RenderedLayout {
 
         let prev = self.last_hover_elem.replace(elem.clone());
 
-        let changed = !prev
-            .as_ref()
-            .is_some_and(|it| it.inner.is_identical(&elem.inner));
+        let changed = prev.as_ref().is_none_or(|it| it.tag != elem.tag);
 
-        let rerender = changed
-            && (prev.as_ref().is_some_and(|it| it.hovered.is_some()) || elem.hovered.is_some());
+        let rerender = changed && (prev.as_ref().is_some_and(|it| it.has_hover) || elem.has_hover);
 
         MouseEventResult {
-            interact,
-            callback: Some(elem.callback.clone()),
+            kind,
+            tag: Some(elem.tag.clone()),
             empty: false,
             changed,
             rerender,
@@ -182,7 +187,7 @@ impl RenderedLayout {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,
@@ -198,14 +203,14 @@ impl From<crossterm::event::MouseButton> for MouseButton {
         }
     }
 }
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InteractKind {
     Click(MouseButton),
     Scroll(Direction),
     Hover,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     Up,
     Down,

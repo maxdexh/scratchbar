@@ -5,9 +5,7 @@ pub use layout::*;
 
 use std::{fmt, sync::Arc};
 
-use crate::utils::Callback;
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum ElemKind {
     Print { raw: String, size: Vec2<u16> },
     Image(Image),
@@ -16,15 +14,25 @@ enum ElemKind {
     MinSize { size: Vec2<u16>, elem: Elem },
     Interact(InteractElem),
 }
+
 #[derive(Debug, Clone)]
-struct InteractElem {
-    inner: Elem,
+pub struct InteractElem {
+    tag: InteractTag,
+    normal: Elem,
     hovered: Option<Elem>,
-    callback: InteractCallback,
 }
 
 #[derive(Debug, Clone)]
 pub struct Elem(Arc<ElemKind>);
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InteractTag(Arc<[u8]>);
+
+impl InteractTag {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(bytes.into())
+    }
+}
 
 impl From<ElemKind> for Elem {
     fn from(value: ElemKind) -> Self {
@@ -33,10 +41,6 @@ impl From<ElemKind> for Elem {
 }
 
 impl Elem {
-    pub fn is_identical(&self, other: &Elem) -> bool {
-        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
-    }
-
     pub fn with_min_size(self, min_size: Vec2<u16>) -> Self {
         ElemKind::MinSize {
             size: min_size,
@@ -56,18 +60,24 @@ impl Elem {
         ElemKind::Image(Image { img, sizing }).into()
     }
 
-    pub fn on_interact(
-        self,
-        on_interact: impl Into<InteractCallback>,
-        hovered: impl Into<Option<Elem>>,
-    ) -> Self {
+    pub fn interactive(self, tag: InteractTag) -> Self {
         ElemKind::Interact(InteractElem {
-            hovered: hovered.into(),
-            callback: on_interact.into(),
-            inner: self,
+            tag,
+            normal: self,
+            hovered: None,
         })
         .into()
     }
+
+    pub fn interactive_hover(self, tag: InteractTag, hovered: Elem) -> Self {
+        ElemKind::Interact(InteractElem {
+            tag,
+            normal: self,
+            hovered: Some(hovered),
+        })
+        .into()
+    }
+
     pub fn build_block(init: impl FnOnce(&mut BlockBuilder)) -> Self {
         let mut builder = BlockBuilder {
             borders: Default::default(),
@@ -229,7 +239,7 @@ impl<S> PlainLines<S> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpenMenu {
     pub tui: Elem,
     pub menu_kind: MenuKind,
@@ -252,14 +262,6 @@ impl OpenMenu {
 pub enum MenuKind {
     Tooltip,
     Context,
-}
-
-pub type InteractCallback = Callback<InteractArgs, Option<OpenMenu>>;
-
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct InteractArgs {
-    pub kind: InteractKind,
 }
 
 #[derive(Clone, Copy, Debug)]

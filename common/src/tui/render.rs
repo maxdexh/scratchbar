@@ -76,27 +76,23 @@ impl Render for ElemKind {
             Self::Interact(elem) => {
                 ctx.layout.insert(area, elem);
 
-                let inner = if ctx
+                let hovered = if ctx
                     .layout
                     .last_mouse_pos
                     .is_some_and(|it| area.contains(it))
                 {
                     if ctx.layout.last_hover_elem.is_some() {
                         log::warn!("Nested interactivity is unsupported");
-                        &elem.inner
+                        None
                     } else {
-                        ctx.layout.last_hover_elem = Some(elem.clone());
-                        if let Some(hover) = &elem.hovered {
-                            hover
-                        } else {
-                            &elem.inner
-                        }
+                        ctx.layout.last_hover_elem = Some(StoredInteractive::new(elem));
+                        elem.hovered.as_ref()
                     }
                 } else {
-                    &elem.inner
+                    None
                 };
 
-                inner.render(ctx, area)
+                hovered.unwrap_or(&elem.normal).render(ctx, area)
             }
         }
     }
@@ -107,7 +103,7 @@ impl Render for ElemKind {
             Self::Block(block) => block.calc_min_size(args),
             Self::Print { size, .. } => *size,
             Self::MinSize { size, elem } => elem.calc_min_size(args).combine(*size, std::cmp::max),
-            Self::Interact(elem) => elem.inner.calc_min_size(args),
+            Self::Interact(elem) => elem.normal.calc_min_size(args),
         }
     }
 }

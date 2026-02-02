@@ -1,9 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::sync::Mutex;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures::Stream;
 use futures::StreamExt as _;
+use system_tray::data::BaseMap;
 use system_tray::item::StatusNotifierItem;
+use system_tray::menu::TrayMenu;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
@@ -12,10 +15,16 @@ use bar_common::utils::{
     ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, run_or_retry, unb_chan, watch_chan,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
+pub struct TrayEntry {
+    pub addr: Arc<str>,
+    pub item: StatusNotifierItem,
+    pub menu: Option<TrayMenuExt>,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct TrayState {
-    pub items: HashMap<Arc<str>, StatusNotifierItem>,
-    pub menus: HashMap<Arc<str>, TrayMenuExt>,
+    pub entries: Arc<[TrayEntry]>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -118,7 +127,7 @@ async fn events_to_reloads(mut tx: ReloadTx, mut rx: broadcast::Receiver<impl Cl
 }
 
 async fn run_state_fetcher(
-    state_mutex: Arc<std::sync::Mutex<system_tray::data::BaseMap>>,
+    state_mutex: Arc<Mutex<BaseMap>>,
     mut event_reload_rx: ReloadRx,
     state_tx: WatchTx<TrayState>,
     mut reload_rx: ReloadRx,
@@ -126,24 +135,22 @@ async fn run_state_fetcher(
     let fetch_blocking = move || {
         let lock = state_mutex.lock().unwrap_or_else(|it| it.into_inner());
 
-        let mut items = HashMap::with_capacity(lock.len());
-        let mut menus = HashMap::with_capacity(lock.len());
-
-        for (addr, (item, menu)) in &*lock {
-            let addr: Arc<str> = addr.as_str().into();
-            if let Some(menu) = &menu {
-                menus.insert(
-                    addr.clone(),
-                    TrayMenuExt {
-                        id: menu.id,
+        lock.iter()
+            .map(|(addr, (item, menu))| {
+                let menu = menu
+                    .as_ref()
+                    .map(|&TrayMenu { id, ref submenus }| TrayMenuExt {
+                        id,
                         menu_path: item.menu.as_deref().map(Into::into),
-                        submenus: menu.submenus.clone(),
-                    },
-                );
-            }
-            items.insert(addr, item.clone());
-        }
-        (items, menus)
+                        submenus: submenus.clone(),
+                    });
+                TrayEntry {
+                    addr: addr.as_str().into(),
+                    item: item.clone(),
+                    menu,
+                }
+            })
+            .collect()
     };
 
     loop {
@@ -153,10 +160,10 @@ async fn run_state_fetcher(
         }
 
         let task = tokio::task::spawn_blocking(fetch_blocking.clone());
-        let Some((items, menus)) = task.await.ok_or_log() else {
+        let Some(entries) = task.await.ok_or_log() else {
             continue;
         };
-        state_tx.send_replace(TrayState { items, menus });
+        state_tx.send_replace(TrayState { entries });
     }
 }
 async fn run_client_sched(
