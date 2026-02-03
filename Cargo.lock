@@ -223,23 +223,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "chrono",
  "crossterm",
  "flexi_logger",
  "futures",
- "hyprland",
  "image",
- "libpulse-binding",
  "log",
  "postcard",
  "serde",
  "serde_json",
- "system-tray",
  "tempfile",
  "tokio",
  "tokio-util",
  "unicode-width",
- "zbus",
 ]
 
 [[package]]
@@ -518,23 +513,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bar-panel-controller",
- "base64",
  "chrono",
- "crossterm",
- "flexi_logger",
  "futures",
  "hyprland",
- "image",
  "libpulse-binding",
  "log",
  "postcard",
  "serde",
- "serde_json",
  "system-tray",
- "tempfile",
  "tokio",
  "tokio-util",
- "unicode-width",
  "zbus",
 ]
 

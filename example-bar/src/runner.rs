@@ -1,3 +1,4 @@
+use ctrl::image;
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context as _;
@@ -868,10 +869,12 @@ async fn tray_module(
                 let elem = tui::Elem::build_stack(tui::Axis::X, |stack| {
                     stack.spacing(depth + 1);
                     if let Some(icon) = icon_data
-                        && let Some(img) =
-                            image::load_from_memory_with_format(icon, image::ImageFormat::Png)
-                                .context("Systray icon has invalid png data")
-                                .ok_or_log()
+                        && let Some(img) = ctrl::image::load_from_memory_with_format(
+                            icon,
+                            ctrl::image::ImageFormat::Png,
+                        )
+                        .context("Systray icon has invalid png data")
+                        .ok_or_log()
                     {
                         stack.fit(tui::Elem::image(
                             img.into_rgba8(),

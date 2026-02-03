@@ -1,3 +1,6 @@
+pub extern crate image;
+pub extern crate log;
+
 mod inst;
 mod logging;
 mod monitors;
