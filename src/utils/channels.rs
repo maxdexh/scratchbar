@@ -6,6 +6,7 @@ pub fn watch_chan<T>(init: T) -> (WatchTx<T>, WatchRx<T>) {
 }
 
 pub type UnbTx<T> = tokio::sync::mpsc::UnboundedSender<T>;
+#[derive(Debug)]
 pub struct UnbRx<T> {
     pub inner: tokio::sync::mpsc::UnboundedReceiver<T>,
 }

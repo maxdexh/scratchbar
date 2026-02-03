@@ -665,7 +665,7 @@ async fn ppd_module(
         let profile = profile_rx.borrow_and_update().clone();
         ctrl_tx.set_menu(
             interact_tag.clone(),
-            tui::InteractKind::Click(tui::MouseButton::Left),
+            tui::InteractKind::Hover,
             tui::OpenMenu::tooltip(
                 tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
             ),

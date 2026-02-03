@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use futures::{Stream, StreamExt};
 use tokio::task::JoinSet;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
@@ -769,6 +769,8 @@ async fn try_init_monitor(
 pub fn __main() -> std::process::ExitCode {
     main_inner().unwrap_or(std::process::ExitCode::FAILURE)
 }
+
+const INTERNAL_SOCK_PATH_VAR: &str = "BAR_INTERNAL_SOCK_PATH";
 fn main_inner() -> Option<std::process::ExitCode> {
     use std::process::ExitCode;
 
@@ -797,8 +799,9 @@ fn main_inner() -> Option<std::process::ExitCode> {
         let socket = tokio::net::UnixListener::bind(&sock_path).ok_or_log()?;
 
         let child = tokio::process::Command::new(driver)
+            .kill_on_drop(true)
             .args(std::env::args_os().skip(2))
-            .env("SOCK_PATH", sock_path)
+            .env(INTERNAL_SOCK_PATH_VAR, sock_path)
             .spawn()
             .ok_or_log()?;
 
@@ -855,16 +858,8 @@ fn main_inner() -> Option<std::process::ExitCode> {
             .flatten()
     };
 
-    let mut required_tasks = tokio::task::JoinSet::new();
-
     let (update_tx, update_rx) = unb_chan();
     let (event_tx, event_rx) = unb_chan();
-
-    required_tasks.spawn(async move {
-        run_controller(update_rx, event_tx).await;
-        // FIXME: Return exit code from controller
-        ExitCode::FAILURE
-    });
 
     runtime.spawn(crate::utils::read_cobs(
         tokio::io::BufReader::new(read),
@@ -874,25 +869,116 @@ fn main_inner() -> Option<std::process::ExitCode> {
     ));
     runtime.spawn(crate::utils::write_cobs(write, event_rx));
 
-    required_tasks.spawn(async move {
-        let Some(status) = driver_child.wait().await.ok_or_log() else {
-            return ExitCode::FAILURE;
-        };
-        match status.code() {
-            Some(code) => ExitCode::from(code as u8),
-            None => ExitCode::FAILURE,
-        }
-    });
+    let main_task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
+        run_controller(update_rx, event_tx).await;
+        // FIXME: Return exit code
+        ExitCode::SUCCESS
+    }));
 
     let exit_task = runtime.spawn(async move {
-        tokio::select! {
-            Some(res) = required_tasks.join_next() => match res.ok_or_log() {
-                Some(code) => code,
-                None => std::process::ExitCode::FAILURE,
+        let wait_res = tokio::select! {
+            it = driver_child.wait() => Ok(it),
+            join = main_task => {
+                let code = join
+                    .context("Main task failed")
+                    .ok_or_log()
+                    .unwrap_or(std::process::ExitCode::FAILURE);
+                Err(code)
             },
-            Some(code) = signals_task => code,
+            Some(code) = signals_task => Err(code),
+        };
+        let (wait_res, code) = match wait_res {
+            Ok(res) => (Some(res), std::process::ExitCode::SUCCESS),
+            Err(code) => (
+                driver_child
+                    .wait()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .await
+                    .context("Driver process failed to exit on its own")
+                    .ok_or_log(),
+                code,
+            ),
+        };
+        let child_code = match wait_res {
+            Some(res) => res
+                .ok_or_log()
+                .map_or(std::process::ExitCode::FAILURE, |exit| {
+                    std::process::ExitCode::from(exit.code().unwrap_or(0) as u8)
+                }),
+            None => std::process::ExitCode::FAILURE,
+        };
+        if code == std::process::ExitCode::SUCCESS {
+            child_code
+        } else {
+            code
         }
     });
 
     runtime.block_on(async move { exit_task.await.ok_or_log() })
+}
+
+#[derive(Debug)]
+pub struct ControllerEventStream {
+    rx: UnbRx<ControllerEvent>,
+}
+impl Stream for ControllerEventStream {
+    type Item = ControllerEvent;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().rx.poll_next_unpin(cx)
+    }
+}
+#[derive(Debug, Clone)]
+pub struct ControllerUpdateSender {
+    tx: std::sync::mpsc::Sender<ControllerUpdate>,
+}
+impl ControllerUpdateSender {
+    pub fn send(
+        &mut self,
+        update: ControllerUpdate,
+    ) -> Result<(), std::sync::mpsc::SendError<ControllerUpdate>> {
+        self.tx.send(update)
+    }
+}
+
+pub struct WrappedErr(anyhow::Error);
+const _: () = {
+    use std::fmt;
+
+    impl fmt::Debug for WrappedErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fmt::Debug::fmt(&self.0, f)
+        }
+    }
+    impl fmt::Display for WrappedErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fmt::Display::fmt(&self.0, f)
+        }
+    }
+    impl std::error::Error for WrappedErr {}
+};
+
+pub async fn run_driver_connection(
+    tx: impl Fn(ControllerEvent) -> Option<()> + Send + 'static,
+    rx: impl FnMut() -> Option<ControllerUpdate> + Send + 'static,
+    on_stop: impl AsyncFnOnce(),
+) -> Result<(), WrappedErr> {
+    let sock_path = std::env::var_os(INTERNAL_SOCK_PATH_VAR)
+        .context("Missing socket path env var")
+        .map_err(WrappedErr)?;
+
+    // HACK: This is potentially blocking, but it should be fine if we document it, since
+    // this function is only meant to be run during startup? Alternatively, we can
+    // spawn a thread for this.
+    let socket = std::os::unix::net::UnixStream::connect(sock_path)
+        .context("Failed to connect to controller socket")
+        .map_err(WrappedErr)?;
+
+    crate::utils::run_cobs_socket(socket, tx, rx, CancellationToken::new()).await;
+    on_stop().await;
+
+    Ok(())
 }

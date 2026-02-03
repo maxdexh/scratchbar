@@ -81,12 +81,12 @@ async fn run_bg(
 
     let cycle_fut = async {
         loop {
-            let Some(perm) = cycle_rx.acquire().await.ok_or_log() else {
+            let Some(perm) = cycle_rx.acquire().await.ok_or_debug() else {
                 break;
             };
             perm.forget();
             let mut steps = 1;
-            while let Some(perm) = cycle_rx.try_acquire().ok_or_debug() {
+            while let Ok(perm) = cycle_rx.try_acquire() {
                 perm.forget();
                 steps += 1;
             }

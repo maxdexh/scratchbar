@@ -20,27 +20,25 @@ fn main_inner() -> Option<std::process::ExitCode> {
         .ok_or_log()?;
     let _guard = runtime.enter();
 
-    let sock_path = std::env::var_os("SOCK_PATH")
-        .context("Missing socket path env var")
-        .ok_or_log()?;
-    let conn = runtime
-        .block_on(tokio::net::UnixStream::connect(sock_path))
-        .ok_or_log()?;
-
-    let (read, write) = conn.into_split();
-
-    let (ctrl_upd_tx, ctrl_upd_rx) = ctrl::utils::unb_chan();
+    let (ctrl_upd_tx, mut ctrl_upd_rx) = ctrl::utils::unb_chan();
     let (ctrl_ev_tx, ctrl_ev_rx) = ctrl::utils::unb_chan();
 
-    let main_task = runtime.spawn(runner::main(ctrl_upd_tx, ctrl_ev_rx));
+    let mut required_tasks = tokio::task::JoinSet::new();
+    let on_disconnect = tokio_util::sync::CancellationToken::new();
 
-    runtime.spawn(ctrl::utils::read_cobs(
-        tokio::io::BufReader::new(read),
-        move |ev| {
-            ctrl_ev_tx.send(ev).ok_or_debug();
-        },
-    ));
-    runtime.spawn(ctrl::utils::write_cobs(write, ctrl_upd_rx));
+    required_tasks.spawn(async move { Some(runner::main(ctrl_upd_tx, ctrl_ev_rx).await) });
+    required_tasks.spawn(async move {
+        ctrl::run_driver_connection(
+            move |ev| ctrl_ev_tx.send(ev).ok(),
+            move || ctrl_upd_rx.inner.blocking_recv(),
+            async || on_disconnect.cancel(),
+        )
+        .await
+        .context("Failed to connect to controller")
+        .ok_or_log()?;
 
-    runtime.block_on(async move { main_task.await.ok_or_log() })
+        Some(std::process::ExitCode::SUCCESS)
+    });
+
+    runtime.block_on(async move { required_tasks.join_next().await?.ok_or_log().flatten() })
 }

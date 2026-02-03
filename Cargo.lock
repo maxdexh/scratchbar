@@ -514,6 +514,7 @@ dependencies = [
  "anyhow",
  "bar-panel-controller",
  "chrono",
+ "flexi_logger",
  "futures",
  "hyprland",
  "libpulse-binding",
