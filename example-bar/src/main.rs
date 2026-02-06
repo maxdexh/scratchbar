@@ -24,14 +24,12 @@ fn main_inner() -> Option<std::process::ExitCode> {
     let (ctrl_ev_tx, ctrl_ev_rx) = ctrl::utils::unb_chan();
 
     let mut required_tasks = tokio::task::JoinSet::new();
-    let on_disconnect = tokio_util::sync::CancellationToken::new();
 
     required_tasks.spawn(async move { Some(runner::main(ctrl_upd_tx, ctrl_ev_rx).await) });
     required_tasks.spawn(async move {
         ctrl::run_driver_connection(
             move |ev| ctrl_ev_tx.send(ev).ok(),
-            move || ctrl_upd_rx.inner.blocking_recv(),
-            async || on_disconnect.cancel(),
+            async move || ctrl_upd_rx.inner.recv().await,
         )
         .await
         .context("Failed to connect to controller")

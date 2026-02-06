@@ -14,8 +14,6 @@ use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 pub use ipc::{TermEvent, TermUpdate};
 
-// FIXME: Return channels instead of taking streams as args, also return
-// initial sizes
 pub async fn start_generic_panel(
     sock_path: &Path,
     log_name: &str,
@@ -35,7 +33,6 @@ pub async fn start_generic_panel(
         .envs(extra_envs)
         .env(ipc::SOCK_PATH_VAR, sock_path)
         .env(ipc::PROC_LOG_NAME_VAR, log_name)
-        .env("PATH", std::env::var_os("PATH").unwrap())
         .kill_on_drop(true)
         .stdout(std::io::stderr())
         .spawn()
@@ -125,37 +122,64 @@ async fn run_term_inst_mgr(
     Ok(())
 }
 
+const KITTY_FWD_VAR: &str = "KITTY_STDIO_FORWARDED";
+fn fwd_log_self_exe() -> Option<std::process::Command> {
+    let fwd_raw = std::env::var_os(KITTY_FWD_VAR).take_if(|it| !it.is_empty())?;
+
+    let mut cmd = std::process::Command::new(std::env::current_exe().ok_or_log()?);
+    cmd.env(KITTY_FWD_VAR, "");
+
+    let fwd_str = fwd_raw
+        .into_string()
+        .map_err(|s| anyhow::anyhow!("Expected {KITTY_FWD_VAR} to be fd, got {s:?}"))
+        .ok_or_log()?;
+    let fwd_fd = fwd_str
+        .parse::<std::os::fd::RawFd>()
+        .with_context(|| format!("{KITTY_FWD_VAR} is not a valid fd"))
+        .ok_or_log()?;
+    // This makes me sad, but there is no way to just tell kitty to redirect stderr to the
+    // terminal's parent process
+    let fwd = unsafe { <std::process::Stdio as std::os::fd::FromRawFd>::from_raw_fd(fwd_fd) };
+    cmd.stderr(fwd);
+
+    cmd.args(std::env::args().skip(1));
+    Some(cmd)
+}
+
 pub const INTERNAL_INST_ARG: &str = "--internal-inst";
-pub fn inst_main() -> ExitCode {
+pub fn inst_main() -> Option<ExitCode> {
     let (log_name, res) =
         match std::env::var(ipc::PROC_LOG_NAME_VAR).context("Bad log name env var") {
             Ok(name) => (name, Ok(())),
             Err(err) => ("UNKNOWN".into(), Err(err)),
         };
 
-    crate::logging::init_logger(crate::logging::ProcKind::Panel, log_name);
+    crate::logging::init_logger(log_name);
+
+    if let Some(mut cmd) = fwd_log_self_exe() {
+        let err = anyhow::Error::from(std::os::unix::process::CommandExt::exec(&mut cmd))
+            .context("Failed to replace current process");
+        log::error!("{:?}", err);
+    }
 
     res.ok_or_log();
 
-    let Some(runtime) = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("Failed to start the tokio runtime")
-        .ok_or_log()
-    else {
-        return ExitCode::FAILURE;
-    };
+        .ok_or_log()?;
 
     let main_handle = runtime.spawn(term_proc_main_inner());
-    match runtime
+    let main_res = runtime
         .block_on(main_handle)
         .context("Failed to join main")
-        .flatten()
-        .ok_or_log()
-    {
+        .flatten();
+
+    Some(match main_res.ok_or_log() {
         Some(()) => ExitCode::SUCCESS,
         None => ExitCode::FAILURE,
-    }
+    })
 }
 
 async fn term_proc_main_inner() -> anyhow::Result<()> {
