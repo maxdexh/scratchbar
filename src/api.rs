@@ -1,55 +1,97 @@
 use serde::{Deserialize, Serialize};
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
 use tokio_util::{sync::CancellationToken, time::FutureExt};
 
 use crate::{tui, utils::ResultExt as _};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BarTuiState {
-    // FIXME: Use Option<Elem> to hide, start hidden
-    pub by_monitor: HashMap<Arc<str>, tui::Elem>,
-    pub fallback: tui::Elem,
+macro_rules! warn_non_exhaustive {
+    () => {
+        "This hidden field is not part of the public API. It only serves to make it non_exhaustive while allowing struct update syntax."
+    };
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ControllerUpdate {
-    BarMenu(BarMenuUpdate),
-    BarTui(BarTuiState),
+    UpdateBars(BarSelection, BarUpdate),
+    SetDefaultTui(SetBarTui),
+    RegisterMenu(RegisterMenu),
+}
+
+#[non_exhaustive]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum BarUpdate {
+    SetTui(SetBarTui),
+    Hide,
+    Show,
+}
+impl From<SetBarTui> for BarUpdate {
+    fn from(value: SetBarTui) -> Self {
+        Self::SetTui(value)
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BarMenuUpdate {
-    pub tag: tui::InteractTag,
-    pub kind: tui::InteractKind,
-    pub menu: Option<tui::OpenMenu>,
+pub struct SetBarTui {
+    pub tui: tui::Elem,
+    pub options: SetBarTuiOptions,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SetBarTuiOptions {
+    #[doc(hidden)]
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
+}
+#[non_exhaustive]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum BarSelection {
+    All,
+    OnMonitor { monitor_name: Arc<str> },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterMenu {
+    pub on_tag: tui::InteractTag,
+    pub on_kind: tui::InteractKind,
+    pub tui: tui::Elem,
+    pub menu_kind: MenuKind,
+    pub options: RegisterMenuOptions,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct RegisterMenuOptions {
+    // TODO: Option on whether to apply update to already open tui
+    #[doc(hidden)]
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum MenuKind {
+    Tooltip,
+    Context,
+}
+impl MenuKind {
+    pub(crate) fn internal_clone(&self) -> Self {
+        match self {
+            Self::Tooltip => Self::Tooltip,
+            Self::Context => Self::Context,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ControllerEvent {
-    Interact(TuiInteract),
-    ReloadRequest,
+    Interact(InteractEvent),
+    // TODO: Add monitor change event
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct TuiInteract {
+pub struct InteractEvent {
     pub kind: tui::InteractKind,
     pub tag: tui::InteractTag,
-}
-
-#[doc(hidden)]
-pub fn __main() -> std::process::ExitCode {
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new(crate::inst::INTERNAL_INST_ARG))
-    {
-        crate::inst::inst_main()
-    } else {
-        crate::controller::ctrl_main()
-    }
-    .unwrap_or(std::process::ExitCode::FAILURE)
 }
 
 pub struct Error(anyhow::Error);

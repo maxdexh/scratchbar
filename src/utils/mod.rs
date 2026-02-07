@@ -91,10 +91,6 @@ impl From<CancellationToken> for CancelDropGuard {
     }
 }
 
-pub fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
 pub async fn read_cobs<T: serde::de::DeserializeOwned>(
     mut read: impl tokio::io::AsyncBufRead + std::marker::Unpin,
     tx: impl Fn(T),

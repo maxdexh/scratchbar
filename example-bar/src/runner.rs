@@ -1,10 +1,8 @@
-use ctrl::image;
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context as _;
-use ctrl::BarTuiState;
 use ctrl::{
-    tui,
+    api, tui,
     utils::{
         Callback, ReloadRx, ReloadTx, ResultExt as _, UnbRx, UnbTx, WatchRx, WatchTx, lock_mutex,
         unb_chan, watch_chan,
@@ -72,16 +70,12 @@ type RegTagCallback = (tui::InteractTag, Option<InteractCallback>);
 
 #[derive(Debug, Clone)]
 struct ModuleControllerTx {
-    tx: UnbTx<ctrl::ControllerUpdate>,
+    tx: UnbTx<api::ControllerUpdate>,
 }
 impl ModuleControllerTx {
-    fn set_menu(&self, tag: tui::InteractTag, kind: tui::InteractKind, menu: tui::OpenMenu) {
+    fn set_menu(&self, menu: api::RegisterMenu) {
         self.tx
-            .send(ctrl::ControllerUpdate::BarMenu(ctrl::BarMenuUpdate {
-                tag,
-                kind,
-                menu: Some(menu),
-            }))
+            .send(api::ControllerUpdate::RegisterMenu(menu))
             .ok_or_debug();
     }
 }
@@ -128,7 +122,7 @@ impl BarModuleFactory {
     }
 }
 
-fn gather_bar_tui(bar_tui: &[BarTuiElem]) -> BarTuiState {
+fn send_bar_tui(bar_tui: &[BarTuiElem], ctrl_tx: &UnbTx<api::ControllerUpdate>) {
     let mut by_monitor = HashMap::new();
     let mut fallback = tui::StackBuilder::new(tui::Axis::X);
     for elem in bar_tui {
@@ -160,18 +154,32 @@ fn gather_bar_tui(bar_tui: &[BarTuiElem]) -> BarTuiState {
         };
     }
 
-    BarTuiState {
-        by_monitor: by_monitor
-            .into_iter()
-            .map(|(k, stack)| (k, stack.build()))
-            .collect(),
-        fallback: fallback.build(),
+    ctrl_tx
+        .send(api::ControllerUpdate::SetDefaultTui(api::SetBarTui {
+            tui: fallback.build(),
+            options: Default::default(),
+        }))
+        .ok_or_debug();
+
+    for (monitor, tui) in by_monitor {
+        ctrl_tx
+            .send(api::ControllerUpdate::UpdateBars(
+                api::BarSelection::OnMonitor {
+                    monitor_name: monitor,
+                },
+                api::SetBarTui {
+                    tui: tui.build(),
+                    options: Default::default(),
+                }
+                .into(),
+            ))
+            .ok_or_debug();
     }
 }
 
 pub async fn main(
-    ctrl_upd_tx: UnbTx<ctrl::ControllerUpdate>,
-    mut ctrl_ev_rx: UnbRx<ctrl::ControllerEvent>,
+    ctrl_upd_tx: UnbTx<api::ControllerUpdate>,
+    mut ctrl_ev_rx: UnbRx<api::ControllerEvent>,
 ) -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
     let mut reload_tx = ReloadTx::new();
@@ -201,17 +209,15 @@ pub async fn main(
     }
 
     {
+        // TODO: Reload on certain events
         let mut reload_tx = reload_tx.clone();
         tokio::spawn(async move {
             while let Some(ev) = ctrl_ev_rx.next().await {
                 match ev {
-                    ctrl::ControllerEvent::Interact(ctrl::TuiInteract { kind, tag, .. }) => {
+                    api::ControllerEvent::Interact(api::InteractEvent { kind, tag, .. }) => {
                         let callback: Option<InteractCallback> =
                             lock_mutex(&callbacks).get(&tag).cloned();
                         callback.inspect(|cb| cb.call(InteractArgs { kind }));
-                    }
-                    ctrl::ControllerEvent::ReloadRequest => {
-                        reload_tx.reload();
                     }
                     ev => log::warn!("Unimplemented event handler: {ev:?}"),
                 }
@@ -270,10 +276,7 @@ pub async fn main(
         let mut bar_tui_rx_inner = bar_tui_tx_inner.subscribe();
         required_tasks.spawn(async move {
             while let Ok(()) = bar_tui_rx_inner.changed().await {
-                let tui = gather_bar_tui(&bar_tui_rx_inner.borrow_and_update());
-                ctrl_upd_tx
-                    .send(ctrl::ControllerUpdate::BarTui(tui))
-                    .ok_or_debug();
+                send_bar_tui(&bar_tui_rx_inner.borrow_and_update(), &ctrl_upd_tx);
             }
         });
     }
@@ -379,7 +382,10 @@ async fn time_module(
     use chrono::{Datelike, Timelike};
     use std::time::Duration;
 
-    let mk_menu = || {
+    let interact_tag = mk_fresh_interact_tag();
+
+    let interact_tag_clone = interact_tag.clone();
+    let mk_menu = move || {
         let now = chrono::Local::now().date_naive();
         let title = now.format("%B %Y").to_string();
 
@@ -456,16 +462,20 @@ async fn time_module(
                 }));
             }
         });
-        Some(tui::OpenMenu::tooltip(elem))
+        Some(api::RegisterMenu {
+            on_tag: interact_tag_clone.clone(),
+            on_kind: tui::InteractKind::Hover,
+            tui: elem,
+            menu_kind: api::MenuKind::Tooltip,
+            options: Default::default(),
+        })
     };
-    let interact_tag = mk_fresh_interact_tag();
     let _menu_task = AbortOnDropHandle::new({
-        let interact_tag = interact_tag.clone();
         tokio::spawn(async move {
             if let Some(menu) = mk_menu() {
-                ctrl_tx.set_menu(interact_tag.clone(), tui::InteractKind::Hover, menu);
+                ctrl_tx.set_menu(menu);
             }
-            // FIXME: Schedule daily
+            // FIXME: Schedule regular update
         })
     });
 
@@ -630,8 +640,13 @@ async fn energy_module(
                 }
             };
             if text != last_tooltip {
-                let menu = tui::OpenMenu::tooltip(tui::RawPrint::plain(text.as_str()).into());
-                ctrl_tx.set_menu(interact_tag.clone(), tui::InteractKind::Hover, menu);
+                ctrl_tx.set_menu(api::RegisterMenu {
+                    on_tag: interact_tag.clone(),
+                    on_kind: tui::InteractKind::Hover,
+                    tui: tui::RawPrint::plain(text.as_str()).into(),
+                    menu_kind: api::MenuKind::Tooltip,
+                    options: Default::default(),
+                });
                 last_tooltip = text;
             }
         }
@@ -663,13 +678,13 @@ async fn ppd_module(
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
         let profile = profile_rx.borrow_and_update().clone();
-        ctrl_tx.set_menu(
-            interact_tag.clone(),
-            tui::InteractKind::Hover,
-            tui::OpenMenu::tooltip(
-                tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
-            ),
-        );
+        ctrl_tx.set_menu(api::RegisterMenu {
+            on_tag: interact_tag.clone(),
+            on_kind: tui::InteractKind::Hover,
+            tui: tui::PlainLines::new(profile.as_deref().unwrap_or("No profile")).into(),
+            menu_kind: api::MenuKind::Tooltip,
+            options: Default::default(),
+        });
 
         let icon: tui::Elem = match profile.as_deref() {
             Some("balanced") => tui::RawPrint::plain(" ").into(),
@@ -734,8 +749,13 @@ async fn tray_module(
                         vstack.fit(header);
                         vstack.fit(tui::PlainLines::new(description).into());
                     });
-                    let menu = tui::OpenMenu::tooltip(tui);
-                    ctrl_tx.set_menu(tag.clone(), tui::InteractKind::Hover, menu);
+                    ctrl_tx.set_menu(api::RegisterMenu {
+                        on_tag: tag.clone(),
+                        on_kind: tui::InteractKind::Hover,
+                        menu_kind: api::MenuKind::Tooltip,
+                        tui,
+                        options: Default::default(),
+                    });
                 }
 
                 if let Some(TrayMenuExt {
@@ -774,21 +794,21 @@ async fn tray_module(
                         tag
                     });
 
-                    let menu = tui::OpenMenu::context(tui::Elem::build_block(|block| {
-                        block.set_borders_at(tui::Borders::all());
-                        block.set_style(tui::Style {
-                            fg: Some(tui::Color::DarkGrey),
-                            ..Default::default()
-                        });
-                        block.set_lines(tui::LineSet::thick());
-                        block.set_inner(menu_tui);
-                    }));
-
-                    ctrl_tx.set_menu(
-                        tag.clone(),
-                        tui::InteractKind::Click(tui::MouseButton::Right),
-                        menu,
-                    );
+                    ctrl_tx.set_menu(api::RegisterMenu {
+                        on_tag: tag.clone(),
+                        on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
+                        menu_kind: api::MenuKind::Context,
+                        tui: tui::Elem::build_block(|block| {
+                            block.set_borders_at(tui::Borders::all());
+                            block.set_style(tui::Style {
+                                fg: Some(tui::Color::DarkGrey),
+                                ..Default::default()
+                            });
+                            block.set_lines(tui::LineSet::thick());
+                            block.set_inner(menu_tui);
+                        }),
+                        options: Default::default(),
+                    });
                 }
 
                 // FIXME: Handle the other options
@@ -799,7 +819,7 @@ async fn tray_module(
                     pixels,
                 } in item.icon_pixmap.as_deref().unwrap_or(&[])
                 {
-                    let mut img = match image::RgbaImage::from_vec(
+                    let mut img = match ctrl::image::RgbaImage::from_vec(
                         width.cast_unsigned(),
                         height.cast_unsigned(),
                         pixels.clone(),
@@ -812,7 +832,7 @@ async fn tray_module(
                     };
 
                     // https://users.rust-lang.org/t/argb32-color-model/92061/4
-                    for image::Rgba(pixel) in img.pixels_mut() {
+                    for ctrl::image::Rgba(pixel) in img.pixels_mut() {
                         *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
                     }
 

@@ -27,7 +27,7 @@ fn main_inner() -> Option<std::process::ExitCode> {
 
     required_tasks.spawn(async move { Some(runner::main(ctrl_upd_tx, ctrl_ev_rx).await) });
     required_tasks.spawn(async move {
-        ctrl::run_driver_connection(
+        ctrl::api::run_driver_connection(
             move |ev| ctrl_ev_tx.send(ev).ok(),
             async move || ctrl_upd_rx.inner.recv().await,
         )

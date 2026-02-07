@@ -244,31 +244,6 @@ impl<S> PlainLines<S> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenMenu {
-    pub tui: Elem,
-    pub menu_kind: MenuKind,
-}
-impl OpenMenu {
-    pub fn context(tui: Elem) -> Self {
-        Self {
-            tui,
-            menu_kind: MenuKind::Context,
-        }
-    }
-    pub fn tooltip(tui: Elem) -> Self {
-        Self {
-            tui,
-            menu_kind: MenuKind::Tooltip,
-        }
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MenuKind {
-    Tooltip,
-    Context,
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum ImageSizeMode {
     FillAxis(Axis, u16),

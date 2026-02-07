@@ -1,6 +1,12 @@
-// TODO: Find a safer version of watch::Sender that is not prone to blocking and deadlocks
 pub type WatchTx<T> = tokio::sync::watch::Sender<T>;
 pub type WatchRx<T> = tokio::sync::watch::Receiver<T>;
+
+pub fn lock_mutex<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+pub fn with_mutex_lock<T, U>(mutex: &std::sync::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
+    f(&mut lock_mutex(mutex))
+}
 pub fn watch_chan<T>(init: T) -> (WatchTx<T>, WatchRx<T>) {
     tokio::sync::watch::channel(init)
 }

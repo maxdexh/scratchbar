@@ -1,6 +1,6 @@
 use tempfile::TempDir;
 
-use std::{collections::HashMap, ffi::OsString, time::Duration};
+use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures::{Stream, StreamExt};
@@ -8,135 +8,237 @@ use tokio::task::JoinSet;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
-    BarMenuUpdate, BarTuiState, ControllerEvent, ControllerUpdate, TuiInteract,
+    api,
     inst::{TermEvent, TermUpdate},
     monitors::MonitorInfo,
-    tui::{self, MenuKind},
+    tui,
     utils::{
-        CancelDropGuard, ReloadTx, ResultExt, UnbRx, UnbTx, WatchRx, WatchTx, run_or_retry,
-        unb_chan, watch_chan,
+        CancelDropGuard, ResultExt, UnbRx, UnbTx, WatchRx, WatchTx, run_or_retry, unb_chan,
+        watch_chan, with_mutex_lock,
     },
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct BarMenu {
-    kind: tui::MenuKind,
-    tui_tx: WatchTx<tui::Elem>,
-    tui_rx: WatchRx<tui::Elem>,
+    kind: api::MenuKind,
+    tui: tui::Elem,
 }
-type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, BarMenu>>;
+type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, WatchTx<BarMenu>>>;
+
+#[derive(Debug, Clone)]
+struct BarTuiState {
+    tui: tui::Elem,
+    hidden: bool,
+}
+#[derive(Debug, Clone)]
+struct BarTuiStateTx {
+    tui: WatchTx<tui::Elem>,
+    hidden: WatchTx<bool>,
+}
+#[derive(Debug)]
+struct BarTuiStates {
+    by_monitor: HashMap<Arc<str>, WatchTx<BarTuiStateTx>>,
+    defaults: BarTuiStateTx,
+}
+impl BarTuiStates {
+    pub fn get_or_mk_monitor(&mut self, name: Arc<str>) -> &mut WatchTx<BarTuiStateTx> {
+        self.by_monitor
+            .entry(name)
+            .or_insert_with(|| WatchTx::new(self.defaults.clone()))
+    }
+}
 
 async fn run_controller(
-    update_rx: impl Stream<Item = ControllerUpdate> + Send + 'static,
-    event_tx: UnbTx<ControllerEvent>,
+    update_rx: impl Stream<Item = api::ControllerUpdate> + Send + 'static,
+    event_tx: UnbTx<api::ControllerEvent>,
 ) {
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut required_tasks = tokio::task::JoinSet::new();
 
-    let (tui_tx, tui_rx) = watch_chan(BarTuiState {
+    let bar_tui_states = Arc::new(std::sync::Mutex::new(BarTuiStates {
         by_monitor: Default::default(),
-        fallback: tui::Elem::empty(),
-    });
+        defaults: BarTuiStateTx {
+            tui: WatchTx::new(tui::Elem::empty()),
+            hidden: WatchTx::new(false),
+        },
+    }));
     let (bar_menus_tx, bar_menus_rx) = watch_chan(BarMenus::default());
 
-    tasks.spawn(async move {
+    required_tasks.spawn(run_controller_inner(
+        bar_tui_states.clone(),
+        bar_menus_rx,
+        event_tx.clone(),
+    ));
+
+    required_tasks.spawn(async move {
         tokio::pin!(update_rx);
         while let Some(update) = update_rx.next().await {
             match update {
-                ControllerUpdate::BarMenu(BarMenuUpdate { tag, kind, menu }) => {
-                    bar_menus_tx.send_if_modified(|menus| {
-                        if let Some(tui::OpenMenu { tui, menu_kind }) = menu {
-                            use std::collections::hash_map::Entry;
-                            match menus.entry(tag) {
-                                Entry::Occupied(mut entry) => match entry.get_mut().entry(kind) {
-                                    Entry::Occupied(mut cur) if cur.get().kind == menu_kind => {
-                                        cur.get_mut().tui_tx.send_replace(tui);
-                                        false
-                                    }
-                                    cur => {
-                                        let (tui_tx, tui_rx) = watch_chan(tui);
-                                        cur.insert_entry(BarMenu {
-                                            kind: menu_kind,
-                                            tui_tx,
-                                            tui_rx,
-                                        });
-                                        true
-                                    }
-                                },
-                                Entry::Vacant(entry) => {
-                                    let (tui_tx, tui_rx) = watch_chan(tui);
-                                    entry.insert_entry(HashMap::from_iter([(
-                                        kind,
-                                        BarMenu {
-                                            kind: menu_kind,
-                                            tui_tx,
-                                            tui_rx,
-                                        },
-                                    )]));
-                                    true
-                                }
+                api::ControllerUpdate::RegisterMenu(api::RegisterMenu {
+                    on_tag,
+                    on_kind,
+                    tui,
+                    menu_kind,
+                    options:
+                        api::RegisterMenuOptions {
+                            #[allow(deprecated)]
+                            __non_exhaustive_struct_update,
+                        },
+                }) => {
+                    use std::collections::hash_map::Entry;
+                    let menu = BarMenu {
+                        kind: menu_kind,
+                        tui,
+                    };
+
+                    bar_menus_tx.send_if_modified(|menus| match menus.entry(on_tag) {
+                        Entry::Occupied(mut entry) => match entry.get_mut().entry(on_kind) {
+                            Entry::Occupied(cur) => {
+                                cur.get().send_replace(menu);
+                                false
                             }
-                        } else if let Some(tag_menus) = menus.get_mut(&tag)
-                            && tag_menus.remove(&kind).is_some()
-                        {
+                            cur => {
+                                cur.insert_entry(WatchTx::new(menu));
+                                true
+                            }
+                        },
+                        Entry::Vacant(entry) => {
+                            entry.insert_entry(HashMap::from_iter([(on_kind, WatchTx::new(menu))]));
                             true
-                        } else {
-                            false
                         }
                     });
                 }
-                ControllerUpdate::BarTui(tui) => {
-                    tui_tx.send_replace(tui);
+                api::ControllerUpdate::UpdateBars(api::BarSelection::All, update) => {
+                    fn doit<T>(
+                        bar_tui_states: &mut BarTuiStates,
+                        val: T,
+                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut WatchTx<T>,
+                    ) {
+                        let default_tx = get_tx(&mut bar_tui_states.defaults);
+                        default_tx.send_replace(val);
+                        for state in bar_tui_states.by_monitor.values_mut() {
+                            state.send_modify(|it| *get_tx(it) = default_tx.clone());
+                        }
+                    }
+                    with_mutex_lock(&bar_tui_states, |bar_tui_states| {
+                        // TODO: Keep unknown monitors around only for a few minutes
+                        match update {
+                            api::BarUpdate::SetTui(api::SetBarTui {
+                                tui,
+                                options:
+                                    api::SetBarTuiOptions {
+                                        #[allow(deprecated)]
+                                        __non_exhaustive_struct_update,
+                                    },
+                            }) => {
+                                doit(bar_tui_states, tui, |state| &mut state.tui);
+                            }
+                            api::BarUpdate::Hide | api::BarUpdate::Show => {
+                                doit(
+                                    bar_tui_states,
+                                    matches!(update, api::BarUpdate::Hide),
+                                    |state| &mut state.hidden,
+                                );
+                            }
+                        }
+                    });
                 }
+                api::ControllerUpdate::UpdateBars(
+                    api::BarSelection::OnMonitor { monitor_name },
+                    update,
+                ) => {
+                    fn doit<T>(
+                        bar_tui_states: &mut BarTuiStates,
+                        monitor: Arc<str>,
+                        val: T,
+                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut WatchTx<T>,
+                    ) {
+                        let default_tx = get_tx(&mut bar_tui_states.defaults).clone();
+                        bar_tui_states
+                            .get_or_mk_monitor(monitor.clone())
+                            .send_if_modified(|state| {
+                                let tx = get_tx(state);
+                                if tx.same_channel(&default_tx) {
+                                    *tx = WatchTx::new(val);
+                                    true
+                                } else {
+                                    tx.send_replace(val);
+                                    false
+                                }
+                            });
+                    }
+                    with_mutex_lock(&bar_tui_states, |bar_tui_states| {
+                        // TODO: Keep unknown monitors around only for a few minutes
+                        match update {
+                            api::BarUpdate::SetTui(api::SetBarTui {
+                                tui,
+                                options:
+                                    api::SetBarTuiOptions {
+                                        #[allow(deprecated)]
+                                        __non_exhaustive_struct_update,
+                                    },
+                            }) => {
+                                doit(bar_tui_states, monitor_name, tui, |state| &mut state.tui);
+                            }
+                            api::BarUpdate::Hide | api::BarUpdate::Show => {
+                                doit(
+                                    bar_tui_states,
+                                    monitor_name,
+                                    matches!(update, api::BarUpdate::Hide),
+                                    |state| &mut state.hidden,
+                                );
+                            }
+                        }
+                    });
+                }
+                api::ControllerUpdate::SetDefaultTui(api::SetBarTui {
+                    tui,
+                    options:
+                        api::SetBarTuiOptions {
+                            #[allow(deprecated)]
+                            __non_exhaustive_struct_update,
+                        },
+                }) => with_mutex_lock(&bar_tui_states, |bar_tui_states| {
+                    bar_tui_states.defaults.tui.send_replace(tui);
+                }),
             }
         }
     });
 
-    let reload_tx = ReloadTx::new();
-    let mut reload_rx = reload_tx.subscribe();
-
-    tasks.spawn(run_controller_inner(
-        tui_rx,
-        bar_menus_rx,
-        reload_tx,
-        event_tx.clone(),
-    ));
-    tokio::spawn(async move {
-        while let Some(()) = reload_rx.wait().await
-            && let Some(()) = event_tx.send(ControllerEvent::ReloadRequest).ok_or_debug()
-        {}
-    });
-
-    if let Some(res) = tasks.join_next().await {
+    if let Some(res) = required_tasks.join_next().await {
         res.ok_or_log();
     }
 }
 
 async fn run_controller_inner(
-    tui_rx: WatchRx<BarTuiState>,
+    bar_tui_states: Arc<std::sync::Mutex<BarTuiStates>>,
     bar_menus_rx: WatchRx<BarMenus>,
-    mut reload_tx: ReloadTx,
-    event_tx: UnbTx<ControllerEvent>,
+    event_tx: UnbTx<api::ControllerEvent>,
 ) {
+    // TODO: Consider moving this to BarTuiStates
     let mut monitors_auto_cancel = HashMap::new();
 
     let mut monitor_rx = crate::monitors::connect();
 
     while let Some(ev) = monitor_rx.next().await {
-        for monitor in ev.removed() {
-            drop(monitors_auto_cancel.remove(monitor));
-        }
-        for monitor in ev.added_or_changed() {
-            let cancel = CancellationToken::new();
-            tokio::spawn(run_monitor(RunMonitorArgs {
-                monitor: monitor.clone(),
-                cancel_monitor: cancel.clone(),
-                bar_rx: tui_rx.clone(),
-                bar_menus_rx: bar_menus_rx.clone(),
-                event_tx: event_tx.clone(),
-            }));
-            monitors_auto_cancel.insert(monitor.name.clone(), CancelDropGuard::from(cancel));
-        }
-        reload_tx.reload();
+        with_mutex_lock(&bar_tui_states, |bar_tui_states| {
+            for monitor in ev.removed() {
+                drop(monitors_auto_cancel.remove(monitor));
+                bar_tui_states.by_monitor.remove(monitor);
+            }
+            for monitor in ev.added_or_changed() {
+                let bar_state_tx = bar_tui_states.get_or_mk_monitor(monitor.name.clone());
+
+                let cancel = CancellationToken::new();
+                tokio::spawn(run_monitor(RunMonitorArgs {
+                    monitor: monitor.clone(),
+                    cancel_monitor: cancel.clone(),
+                    bar_state_tx: bar_state_tx.clone(),
+                    bar_menus_rx: bar_menus_rx.clone(),
+                    event_tx: event_tx.clone(),
+                }));
+                monitors_auto_cancel.insert(monitor.name.clone(), CancelDropGuard::from(cancel));
+            }
+        });
     }
 }
 
@@ -144,9 +246,9 @@ async fn run_controller_inner(
 struct RunMonitorArgs {
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
-    bar_rx: WatchRx<BarTuiState>,
+    bar_state_tx: WatchTx<BarTuiStateTx>,
     bar_menus_rx: WatchRx<BarMenus>,
-    event_tx: UnbTx<ControllerEvent>,
+    event_tx: UnbTx<api::ControllerEvent>,
 }
 async fn run_monitor(args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
@@ -175,7 +277,7 @@ enum TermKind {
     Bar,
 }
 enum Upd {
-    BarTui,
+    Noop,
     Term(TermKind, TermEvent),
 }
 
@@ -184,7 +286,8 @@ struct StartedMonitorEnv {
     menu: Term,
     intern_upd_rx: UnbRx<Upd>,
     bar_tui_rx: WatchRx<tui::Elem>,
-    event_tx: UnbTx<ControllerEvent>,
+    bar_hide_rx: WatchRx<bool>,
+    event_tx: UnbTx<api::ControllerEvent>,
 }
 
 async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
@@ -234,31 +337,39 @@ async fn run_monitor_main(
 ) -> anyhow::Result<std::convert::Infallible> {
     #[derive(Debug)]
     struct ShowMenu {
-        kind: MenuKind,
+        kind: api::MenuKind,
         pix_location: tui::Vec2<u32>,
         cached_size: tui::Vec2<u16>,
         sizing: tui::SizingArgs,
         tui: tui::Elem,
     }
     let mut show_menu = None::<ShowMenu>;
-    let mut show_bar = Some(tui::Elem::empty());
+    let mut bar_tui_state = BarTuiState {
+        tui: tui::Elem::empty(),
+        hidden: false,
+    };
     loop {
         let mut rerender_menu = false;
-        let mut rerender_bar = false;
+        let mut bar_tui_changed = false;
+        let mut bar_vis_changed = false;
 
         let upd = tokio::select! {
             Some(ev) = env.bar.term_ev_rx.next() => Upd::Term(TermKind::Bar, ev),
             Some(ev) = env.menu.term_ev_rx.next() => Upd::Term(TermKind::Menu, ev),
             Some(upd) = env.intern_upd_rx.next() => upd,
-            Ok(()) = env.bar_tui_rx.changed() => Upd::BarTui,
+            Ok(()) = env.bar_hide_rx.changed() => {
+                let hidden = *env.bar_hide_rx.borrow_and_update();
+                bar_vis_changed = hidden != std::mem::replace(&mut bar_tui_state.hidden, hidden);
+                Upd::Noop
+            }
+            Ok(()) = env.bar_tui_rx.changed() => {
+                bar_tui_state.tui = env.bar_tui_rx.borrow_and_update().clone();
+                bar_tui_changed = true;
+                Upd::Noop
+            },
         };
         match upd {
-            Upd::BarTui => {
-                if let Some(bar) = &mut show_bar {
-                    *bar = env.bar_tui_rx.borrow_and_update().clone();
-                    rerender_bar = true;
-                }
-            }
+            Upd::Noop => {}
             Upd::Term(term_kind, TermEvent::Crossterm(ev)) => match ev {
                 crossterm::event::Event::Mouse(ev) => {
                     let Some(layout) = (match term_kind {
@@ -280,16 +391,17 @@ async fn run_monitor_main(
 
                     if term_kind == TermKind::Menu
                         && let Some(menu) = &show_menu
-                        && menu.kind == MenuKind::Tooltip
+                        && matches!(&menu.kind, api::MenuKind::Tooltip)
                     {
                         show_menu = None;
                         rerender_menu = true;
                     }
 
+                    // FIXME: Forcibly open menu for on bar hover if none is available
                     if rerender {
                         match term_kind {
                             TermKind::Menu => rerender_menu = true,
-                            TermKind::Bar => rerender_bar = true,
+                            TermKind::Bar => bar_tui_changed = true,
                         }
                     }
 
@@ -297,14 +409,14 @@ async fn run_monitor_main(
                         if empty
                             && term_kind == TermKind::Bar
                             && let Some(menu) = &show_menu
-                            && (!is_hover || menu.kind == MenuKind::Tooltip)
+                            && (!is_hover || matches!(&menu.kind, api::MenuKind::Tooltip))
                         {
                             show_menu = None;
                             rerender_menu = true;
                         }
 
                         if let Some(tag) = tag.as_ref()
-                            && let Some(BarMenu { kind, tui_rx, .. }) = bar_menus_rx
+                            && let Some(menu) = bar_menus_rx
                                 .borrow()
                                 .get(tag)
                                 .and_then(|tag_menus| tag_menus.get(&kind))
@@ -313,14 +425,14 @@ async fn run_monitor_main(
                             let sizing = tui::SizingArgs {
                                 font_size: env.menu.sizes.font_size(),
                             };
-                            // TODO: remember receiver (Also update on change of bar_menus_rx)
+                            // FIXME: remember receiver (Also update on change of bar_menus_rx)
                             // Use a seperate task for the menu to do this
-                            let tui = tui_rx.borrow().clone();
+                            let tui = menu.borrow().tui.clone();
                             show_menu = Some(ShowMenu {
                                 cached_size: tui::calc_min_size(&tui, &sizing),
                                 sizing,
                                 tui,
-                                kind,
+                                kind: menu.borrow().kind.internal_clone(),
                                 pix_location,
                             });
                             rerender_menu = true;
@@ -328,7 +440,10 @@ async fn run_monitor_main(
 
                         if let Some(tag) = tag {
                             env.event_tx
-                                .send(ControllerEvent::Interact(TuiInteract { kind, tag }))
+                                .send(api::ControllerEvent::Interact(api::InteractEvent {
+                                    kind,
+                                    tag,
+                                }))
                                 .ok_or_debug();
                         }
                     }
@@ -345,7 +460,7 @@ async fn run_monitor_main(
             }
             Upd::Term(TermKind::Bar, TermEvent::Sizes(sizes)) => {
                 env.bar.sizes = sizes;
-                rerender_bar = true;
+                bar_tui_changed = true;
             }
             Upd::Term(term_kind, TermEvent::FocusChange { is_focused }) => {
                 // FIXME: This only works because the menu doesnt lose focus while we are
@@ -355,7 +470,7 @@ async fn run_monitor_main(
                     if let Some(layout) = &mut env.bar.layout
                         && layout.ext_focus_loss()
                     {
-                        rerender_bar = true;
+                        bar_tui_changed = true;
                     }
                 }
             }
@@ -366,7 +481,7 @@ async fn run_monitor_main(
                 && let Some(layout) = &mut env.bar.layout
                 && layout.ext_focus_loss()
             {
-                rerender_bar = true;
+                bar_tui_changed = true;
             }
 
             if let Some(ShowMenu {
@@ -461,20 +576,18 @@ async fn run_monitor_main(
                 }
             }
 
-            let action = if show_menu.is_some() { "show" } else { "hide" };
+            // FIXME: Only send when necessary
             env.menu
                 .term_upd_tx
-                .send(TermUpdate::RemoteControl(vec![
-                    "resize-os-window".into(),
-                    format!("--action={}", action).into(),
-                ]))
+                .send(set_vis_update(show_menu.is_some()))
                 .ok_or_debug();
         }
 
-        if rerender_bar && let Some(tui) = &show_bar {
+        if !bar_tui_state.hidden && (bar_vis_changed || bar_tui_changed) {
             let mut buf = Vec::new();
+
             let Some(layout) = tui::render(
-                tui,
+                &bar_tui_state.tui,
                 tui::Area {
                     size: env.bar.sizes.cell_size,
                     pos: Default::default(),
@@ -497,7 +610,21 @@ async fn run_monitor_main(
                 .ok_or_debug();
             env.bar.term_upd_tx.send(TermUpdate::Flush).ok_or_debug();
         }
+        if bar_vis_changed {
+            env.bar
+                .term_upd_tx
+                .send(set_vis_update(!bar_tui_state.hidden))
+                .ok_or_debug();
+        }
     }
+}
+
+fn set_vis_update(vis: bool) -> TermUpdate {
+    let action = if vis { "show" } else { "hide" };
+    TermUpdate::RemoteControl(vec![
+        "resize-os-window".into(),
+        format!("--action={}", action).into(),
+    ])
 }
 
 async fn init_term(
@@ -546,7 +673,6 @@ async fn try_init_monitor(
     required_tasks: &mut JoinSet<anyhow::Result<std::convert::Infallible>>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<StartedMonitorEnv> {
-    let mut bar_rx = args.bar_rx.clone();
     let monitor = args.monitor.clone();
 
     let (intern_upd_tx, intern_upd_rx) = unb_chan();
@@ -558,6 +684,9 @@ async fn try_init_monitor(
         format!("BAR@{}", monitor.name),
         [
             format!("--output-name={}", monitor.name).into(),
+            // Allow remote control
+            "-o=allow_remote_control=socket-only".into(),
+            "--listen-on=unix:/tmp/kitty-bar-panel.sock".into(),
             // Allow logging to $KITTY_STDIO_FORWARDED
             "-o=forward_stdio=yes".into(),
             // Do not use the system's kitty.conf
@@ -695,24 +824,48 @@ async fn try_init_monitor(
     });
 
     let (bar_tui_tx, bar_tui_rx) = watch_chan(tui::Elem::empty());
-    tokio::spawn(async move {
-        while let Ok(()) = bar_rx.changed().await {
-            let tui = {
-                let lock = bar_rx.borrow_and_update();
-                lock.by_monitor
-                    .get(&monitor.name)
-                    .unwrap_or(&lock.fallback)
-                    .clone()
-            };
-            bar_tui_tx.send_replace(tui);
-        }
-    });
+    let (bar_hide_tx, bar_hide_rx) = watch_chan(false);
+    {
+        let mut bar_state_tx_rx = args.bar_state_tx.subscribe();
+        required_tasks.spawn(async move {
+            'outer: loop {
+                let mut tui_rx;
+                let mut hide_rx;
+                {
+                    let BarTuiStateTx { tui, hidden } = &*bar_state_tx_rx.borrow_and_update();
+
+                    tui_rx = tui.subscribe();
+                    tui_rx.mark_changed();
+
+                    hide_rx = hidden.subscribe();
+                    hide_rx.mark_changed();
+                }
+
+                loop {
+                    tokio::select! {
+                        Ok(()) = tui_rx.changed() => {
+                            let tui = tui_rx.borrow_and_update().clone();
+                            bar_tui_tx.send_replace(tui);
+                        }
+                        Ok(()) = hide_rx.changed() => {
+                            let hidden = *hide_rx.borrow_and_update();
+                            bar_hide_tx.send_replace(hidden);
+                        }
+                        Ok(()) = bar_state_tx_rx.changed() => {
+                            continue 'outer;
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     Ok(StartedMonitorEnv {
         bar,
         menu,
         intern_upd_rx,
         bar_tui_rx,
+        bar_hide_rx,
         event_tx: args.event_tx.clone(),
     })
 }

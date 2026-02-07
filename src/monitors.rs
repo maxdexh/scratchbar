@@ -4,6 +4,7 @@ use futures::Stream;
 
 use crate::utils::unb_chan;
 
+// FIXME: Mark and handle mirrored monitors
 #[derive(PartialEq, Clone, Debug)]
 pub struct MonitorInfo {
     pub name: Arc<str>,
@@ -12,6 +13,7 @@ pub struct MonitorInfo {
     pub height: u32,
 }
 
+// FIXME: Just send current state through watch channel, let receiver handle diffs
 #[derive(Debug, Default, Clone)]
 pub struct MonitorEvent {
     data: Arc<HashMap<Arc<str>, MonitorInfo>>,
