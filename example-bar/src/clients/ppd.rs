@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use futures::StreamExt as _;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::{ReloadRx, ResultExt, WatchRx, WatchTx, watch_chan};
+use crate::utils::{ReloadRx, ResultExt};
 
 mod dbus {
     use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ mod dbus {
 }
 
 pub struct PpdClient {
-    pub profile_rx: WatchRx<Option<Arc<str>>>,
+    pub profile_rx: watch::Receiver<Option<Arc<str>>>,
     cycle: Arc<Semaphore>,
     _background: AbortOnDropHandle<()>,
 }
@@ -54,7 +54,7 @@ impl PpdClient {
 
 async fn run_bg(
     cycle_rx: Arc<Semaphore>,
-    profile_tx: WatchTx<Option<Arc<str>>>,
+    profile_tx: watch::Sender<Option<Arc<str>>>,
     mut reload_rx: ReloadRx,
 ) {
     let Some(connection) = zbus::Connection::system().await.ok_or_log() else {
@@ -126,7 +126,7 @@ async fn run_bg(
 
 pub fn connect(reload_rx: ReloadRx) -> PpdClient {
     let cycle = Arc::new(Semaphore::new(0));
-    let (profile_tx, profile_rx) = watch_chan(Default::default());
+    let (profile_tx, profile_rx) = watch::channel(Default::default());
     PpdClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(
             cycle.clone(),

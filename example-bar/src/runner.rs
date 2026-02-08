@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::utils::{ReloadRx, ReloadTx, ResultExt as _, WatchRx, WatchTx, watch_chan};
+use crate::utils::{ReloadRx, ReloadTx, ResultExt as _};
 use anyhow::Context as _;
 use ctrl::{api, tui};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -81,7 +82,7 @@ impl ModuleControllerTx {
 }
 
 struct ModuleArgs {
-    tui_tx: WatchTx<BarTuiElem>,
+    tui_tx: watch::Sender<BarTuiElem>,
     reload_rx: ReloadRx,
     ctrl_tx: ModuleControllerTx,
     tag_callback_tx: tokio::sync::mpsc::UnboundedSender<RegTagCallback>,
@@ -98,8 +99,8 @@ impl BarModuleFactory {
     fn spawn<F: Future<Output = ()> + 'static + Send>(
         &mut self,
         task: impl FnOnce(ModuleArgs) -> F,
-    ) -> WatchRx<BarTuiElem> {
-        let (tui_tx, tui_rx) = watch_chan(BarTuiElem::Hide);
+    ) -> watch::Receiver<BarTuiElem> {
+        let (tui_tx, tui_rx) = watch::channel(BarTuiElem::Hide);
         self.tasks.spawn(task(ModuleArgs {
             reload_rx: self.reload_tx.subscribe(),
             ctrl_tx: self.ctrl_tx.clone(),
@@ -113,11 +114,11 @@ impl BarModuleFactory {
         &mut self,
         ctx: C,
         task: impl FnOnce(C, ModuleArgs) -> F,
-    ) -> WatchRx<BarTuiElem> {
+    ) -> watch::Receiver<BarTuiElem> {
         self.spawn(|args| task(ctx, args))
     }
-    fn fixed(&mut self, elem: BarTuiElem) -> WatchRx<BarTuiElem> {
-        let (_, rx) = watch_chan(elem);
+    fn fixed(&mut self, elem: BarTuiElem) -> watch::Receiver<BarTuiElem> {
+        let (_, rx) = watch::channel(elem);
         rx
     }
 }
@@ -265,7 +266,7 @@ pub async fn main(
     let mut module_tasks = JoinSet::new();
 
     {
-        let bar_tui_tx_inner = WatchTx::new(Vec::from_iter(
+        let bar_tui_tx_inner = watch::Sender::new(Vec::from_iter(
             modules.iter_mut().map(|it| it.borrow_and_update().clone()),
         ));
         for (i, mut module) in modules.into_iter().enumerate() {

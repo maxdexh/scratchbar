@@ -5,11 +5,11 @@ use anyhow::Context;
 use system_tray::data::BaseMap;
 use system_tray::item::StatusNotifierItem;
 use system_tray::menu::TrayMenu;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::{ReloadRx, ReloadTx, ResultExt, WatchRx, WatchTx, run_or_retry, watch_chan};
+use crate::utils::{ReloadRx, ReloadTx, ResultExt, run_or_retry};
 
 #[derive(Debug)]
 pub struct TrayEntry {
@@ -33,7 +33,7 @@ pub struct TrayMenuExt {
 type ClientCallback = Box<dyn FnOnce(Arc<system_tray::client::Client>) + Send + 'static>;
 #[derive(Debug)]
 pub struct TrayClient {
-    pub state_rx: WatchRx<TrayState>,
+    pub state_rx: watch::Receiver<TrayState>,
     client_sched_tx: tokio::sync::mpsc::UnboundedSender<ClientCallback>,
     _background: AbortOnDropHandle<()>,
 }
@@ -52,7 +52,7 @@ impl TrayClient {
     }
 }
 pub fn connect(reload_rx: ReloadRx) -> TrayClient {
-    let (state_tx, state_rx) = watch_chan(Default::default());
+    let (state_tx, state_rx) = watch::channel(Default::default());
     let (client_sched_tx, client_sched_rx) = tokio::sync::mpsc::unbounded_channel();
     TrayClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(
@@ -65,7 +65,7 @@ pub fn connect(reload_rx: ReloadRx) -> TrayClient {
     }
 }
 async fn run_bg(
-    state_tx: WatchTx<TrayState>,
+    state_tx: watch::Sender<TrayState>,
     client_sched_rx: tokio::sync::mpsc::UnboundedReceiver<ClientCallback>,
     mut reload_rx: ReloadRx,
 ) {
@@ -125,7 +125,7 @@ async fn events_to_reloads(mut tx: ReloadTx, mut rx: broadcast::Receiver<impl Cl
 async fn run_state_fetcher(
     state_mutex: Arc<Mutex<BaseMap>>,
     mut event_reload_rx: ReloadRx,
-    state_tx: WatchTx<TrayState>,
+    state_tx: watch::Sender<TrayState>,
     mut reload_rx: ReloadRx,
 ) {
     let fetch_blocking = move || {

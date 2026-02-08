@@ -1,16 +1,11 @@
 // TODO: Add ability to pause updates for when the bar is hidden
 
 use anyhow::Context as _;
-
-pub type WatchTx<T> = tokio::sync::watch::Sender<T>;
-pub type WatchRx<T> = tokio::sync::watch::Receiver<T>;
-pub fn watch_chan<T>(init: T) -> (WatchTx<T>, WatchRx<T>) {
-    tokio::sync::watch::channel(init)
-}
+use tokio::sync::watch;
 
 #[derive(Clone)]
 pub struct ReloadRx {
-    rx: WatchRx<()>,
+    rx: watch::Receiver<()>,
 }
 impl ReloadRx {
     #[must_use]
@@ -22,13 +17,13 @@ impl ReloadRx {
 }
 #[derive(Clone)]
 pub struct ReloadTx {
-    tx: WatchTx<()>,
+    tx: watch::Sender<()>,
 }
 impl ReloadTx {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            tx: WatchTx::new(()),
+            tx: watch::Sender::new(()),
         }
     }
     pub fn reload(&mut self) {

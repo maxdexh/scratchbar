@@ -13,7 +13,7 @@ use pulse::{
     proplist::Proplist,
     volume::ChannelVolumes,
 };
-use tokio::task::JoinSet;
+use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use std::{
@@ -22,7 +22,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use crate::utils::{ReloadRx, ResultExt, WatchRx, WatchTx, watch_chan};
+use crate::utils::{ReloadRx, ResultExt};
 
 #[derive(Debug, Clone, Default)]
 pub struct PulseState {
@@ -65,7 +65,7 @@ fn handle_iterate_result(res: IterateResult) -> anyhow::Result<()> {
 }
 
 fn run_blocking(
-    tx: WatchTx<PulseState>,
+    tx: watch::Sender<PulseState>,
     cancel: CancellationToken,
     awaiting_reload: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
@@ -106,7 +106,7 @@ fn run_blocking(
     fn update_and_send(
         kind: PulseDeviceKind,
         state: Rc<RefCell<PulseState>>,
-        tx: Rc<WatchTx<PulseState>>,
+        tx: Rc<watch::Sender<PulseState>>,
         context: &RefCell<Context>,
     ) {
         let name = {
@@ -282,12 +282,12 @@ async fn run_updater(mut update_rx: tokio::sync::mpsc::UnboundedReceiver<PulseUp
 }
 
 pub struct PulseClient {
-    pub state_rx: WatchRx<PulseState>,
+    pub state_rx: watch::Receiver<PulseState>,
     pub update_tx: tokio::sync::mpsc::UnboundedSender<PulseUpdate>,
     _background: AbortOnDropHandle<()>,
 }
 pub fn connect(reload_rx: ReloadRx) -> PulseClient {
-    let (state_tx, state_rx) = watch_chan(Default::default());
+    let (state_tx, state_rx) = watch::channel(Default::default());
     let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
     PulseClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(state_tx, update_rx, reload_rx))),
@@ -297,7 +297,7 @@ pub fn connect(reload_rx: ReloadRx) -> PulseClient {
 }
 
 async fn run_bg(
-    state_tx: WatchTx<PulseState>,
+    state_tx: watch::Sender<PulseState>,
     update_rx: tokio::sync::mpsc::UnboundedReceiver<PulseUpdate>,
     mut reload_rx: ReloadRx,
 ) {

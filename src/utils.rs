@@ -43,8 +43,6 @@ impl Drop for CancelDropGuard {
 }
 impl From<CancellationToken> for CancelDropGuard {
     fn from(inner: CancellationToken) -> Self {
-        //tokio::sync::watch::Receiver::changed;
-        //tokio::sync::watch::Sender::send;
         Self { inner }
     }
 }

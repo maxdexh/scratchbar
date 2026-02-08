@@ -137,8 +137,9 @@ fn fwd_log_self_exe() -> Option<std::process::Command> {
         .parse::<std::os::fd::RawFd>()
         .with_context(|| format!("{KITTY_FWD_VAR} is not a valid fd"))
         .ok_or_log()?;
-    // This makes me sad, but there is no way to just tell kitty to redirect stderr to the
-    // terminal's parent process
+
+    // SAFETY: This is not io safe, but there is no other way to do this
+    // (other than /proc/self/fd/fdnum, which just bypasses the unsafe keyword)
     let fwd = unsafe { <std::process::Stdio as std::os::fd::FromRawFd>::from_raw_fd(fwd_fd) };
     cmd.stderr(fwd);
 

@@ -1,18 +1,19 @@
 use crate::desktop::{BasicDesktopState, BasicWorkspace, WorkspaceId};
-use crate::utils::{ReloadRx, WatchRx, watch_chan};
-use crate::utils::{ResultExt, WatchTx};
+use crate::utils::ReloadRx;
+use crate::utils::ResultExt;
 use anyhow::Context;
 use futures::StreamExt;
 use hyprland::data::*;
 use hyprland::shared::{HyprData, HyprDataVec};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
 // TODO: Detailed state (for menu), including clients
 
 pub struct HyprClient {
-    pub basic_rx: WatchRx<BasicDesktopState>,
+    pub basic_rx: watch::Receiver<BasicDesktopState>,
     _background: AbortOnDropHandle<()>,
 }
 impl HyprClient {
@@ -29,7 +30,7 @@ impl HyprClient {
     }
 }
 
-async fn run_bg(basic_tx: WatchTx<BasicDesktopState>, mut reload_rx: ReloadRx) {
+async fn run_bg(basic_tx: watch::Sender<BasicDesktopState>, mut reload_rx: ReloadRx) {
     let ev_rx = hyprland::event_listener::EventStream::new()
         .filter_map(async |res| res.context("Hyprland error").ok_or_log());
     tokio::pin!(ev_rx);
@@ -126,7 +127,7 @@ async fn run_bg(basic_tx: WatchTx<BasicDesktopState>, mut reload_rx: ReloadRx) {
 }
 
 pub fn connect(reload_rx: ReloadRx) -> HyprClient {
-    let (basic_tx, basic_rx) = watch_chan(BasicDesktopState::default());
+    let (basic_tx, basic_rx) = watch::channel(BasicDesktopState::default());
     HyprClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(basic_tx, reload_rx))),
         basic_rx,

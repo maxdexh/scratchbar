@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
+use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 use zbus::proxy;
 
-use crate::utils::{ReloadRx, ResultExt, WatchRx, WatchTx, run_or_retry, watch_chan};
+use crate::utils::{ReloadRx, ResultExt, run_or_retry};
 
 macro_rules! declare_properties {
     (
@@ -156,11 +157,11 @@ trait UPower {
 }
 
 pub struct EnergyClient {
-    pub state_rx: WatchRx<UpowerState>,
+    pub state_rx: watch::Receiver<UpowerState>,
     _background: AbortOnDropHandle<()>,
 }
 
-async fn run_bg(state_tx: WatchTx<UpowerState>, mut reload_rx: ReloadRx) {
+async fn run_bg(state_tx: watch::Sender<UpowerState>, mut reload_rx: ReloadRx) {
     run_or_retry(
         async |(state_tx, reload_rx)| try_run_bg(state_tx, reload_rx).await,
         (state_tx, reload_rx.clone()),
@@ -172,7 +173,7 @@ async fn run_bg(state_tx: WatchTx<UpowerState>, mut reload_rx: ReloadRx) {
 }
 
 async fn try_run_bg(
-    state_tx: &WatchTx<UpowerState>,
+    state_tx: &watch::Sender<UpowerState>,
     reload_rx: &mut ReloadRx,
 ) -> anyhow::Result<()> {
     let dbus = zbus::Connection::system().await?;
@@ -240,7 +241,7 @@ async fn try_run_bg(
 }
 
 pub fn connect(reload_rx: ReloadRx) -> EnergyClient {
-    let (state_tx, state_rx) = watch_chan(Default::default());
+    let (state_tx, state_rx) = watch::channel(Default::default());
     EnergyClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(state_tx, reload_rx))),
         state_rx,
