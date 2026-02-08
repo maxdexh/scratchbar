@@ -2,8 +2,6 @@ use std::sync::Mutex;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use futures::Stream;
-use futures::StreamExt as _;
 use system_tray::data::BaseMap;
 use system_tray::item::StatusNotifierItem;
 use system_tray::menu::TrayMenu;
@@ -11,9 +9,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
-use ctrl::utils::{
-    ReloadRx, ReloadTx, ResultExt, UnbTx, WatchRx, WatchTx, run_or_retry, unb_chan, watch_chan,
-};
+use crate::utils::{ReloadRx, ReloadTx, ResultExt, WatchRx, WatchTx, run_or_retry, watch_chan};
 
 #[derive(Debug)]
 pub struct TrayEntry {
@@ -38,7 +34,7 @@ type ClientCallback = Box<dyn FnOnce(Arc<system_tray::client::Client>) + Send + 
 #[derive(Debug)]
 pub struct TrayClient {
     pub state_rx: WatchRx<TrayState>,
-    client_sched_tx: UnbTx<ClientCallback>,
+    client_sched_tx: tokio::sync::mpsc::UnboundedSender<ClientCallback>,
     _background: AbortOnDropHandle<()>,
 }
 impl TrayClient {
@@ -57,7 +53,7 @@ impl TrayClient {
 }
 pub fn connect(reload_rx: ReloadRx) -> TrayClient {
     let (state_tx, state_rx) = watch_chan(Default::default());
-    let (client_sched_tx, client_sched_rx) = unb_chan();
+    let (client_sched_tx, client_sched_rx) = tokio::sync::mpsc::unbounded_channel();
     TrayClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(
             state_tx,
@@ -70,7 +66,7 @@ pub fn connect(reload_rx: ReloadRx) -> TrayClient {
 }
 async fn run_bg(
     state_tx: WatchTx<TrayState>,
-    client_sched_rx: impl Stream<Item = ClientCallback> + Send + 'static,
+    client_sched_rx: tokio::sync::mpsc::UnboundedReceiver<ClientCallback>,
     mut reload_rx: ReloadRx,
 ) {
     let client = run_or_retry(
@@ -168,11 +164,10 @@ async fn run_state_fetcher(
 }
 async fn run_client_sched(
     client: system_tray::client::Client,
-    cb_rx: impl Stream<Item = ClientCallback>,
+    mut cb_rx: tokio::sync::mpsc::UnboundedReceiver<ClientCallback>,
 ) {
     let client = Arc::new(client);
-    tokio::pin!(cb_rx);
-    while let Some(cb) = cb_rx.next().await {
+    while let Some(cb) = cb_rx.recv().await {
         cb(client.clone());
     }
     log::warn!("Tray interact stream was closed");

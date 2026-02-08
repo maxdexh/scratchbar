@@ -1,14 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
+use crate::utils::{ReloadRx, ReloadTx, ResultExt as _, WatchRx, WatchTx, watch_chan};
 use anyhow::Context as _;
-use ctrl::{
-    api, tui,
-    utils::{
-        Callback, ReloadRx, ReloadTx, ResultExt as _, UnbRx, UnbTx, WatchRx, WatchTx, lock_mutex,
-        unb_chan, watch_chan,
-    },
-};
-use futures::StreamExt;
+use ctrl::{api, tui};
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -65,12 +59,18 @@ impl<K: std::hash::Hash + std::cmp::Eq + Clone, V> InteractTagRegistry<K, V> {
 struct InteractArgs {
     kind: tui::InteractKind,
 }
-type InteractCallback = Callback<InteractArgs, ()>;
+type InteractCallback = Arc<dyn Fn(InteractArgs) + Send + Sync + 'static>;
+fn interact_callback_with<C: Send + Sync + 'static>(
+    ctx: C,
+    f: impl Fn(&C, InteractArgs) + Send + Sync + 'static,
+) -> InteractCallback {
+    Arc::new(move |args| f(&ctx, args))
+}
 type RegTagCallback = (tui::InteractTag, Option<InteractCallback>);
 
 #[derive(Debug, Clone)]
 struct ModuleControllerTx {
-    tx: UnbTx<api::ControllerUpdate>,
+    tx: tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
 }
 impl ModuleControllerTx {
     fn set_menu(&self, menu: api::RegisterMenu) {
@@ -84,14 +84,14 @@ struct ModuleArgs {
     tui_tx: WatchTx<BarTuiElem>,
     reload_rx: ReloadRx,
     ctrl_tx: ModuleControllerTx,
-    tag_callback_tx: UnbTx<RegTagCallback>,
+    tag_callback_tx: tokio::sync::mpsc::UnboundedSender<RegTagCallback>,
     _unused: (),
 }
 
 struct BarModuleFactory {
     reload_tx: ReloadTx,
     ctrl_tx: ModuleControllerTx,
-    tag_callback_tx: UnbTx<RegTagCallback>,
+    tag_callback_tx: tokio::sync::mpsc::UnboundedSender<RegTagCallback>,
     tasks: JoinSet<()>,
 }
 impl BarModuleFactory {
@@ -122,7 +122,10 @@ impl BarModuleFactory {
     }
 }
 
-fn send_bar_tui(bar_tui: &[BarTuiElem], ctrl_tx: &UnbTx<api::ControllerUpdate>) {
+fn send_bar_tui(
+    bar_tui: &[BarTuiElem],
+    ctrl_tx: &tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
+) {
     let mut by_monitor = HashMap::new();
     let mut fallback = tui::StackBuilder::new(tui::Axis::X);
     for elem in bar_tui {
@@ -178,13 +181,13 @@ fn send_bar_tui(bar_tui: &[BarTuiElem], ctrl_tx: &UnbTx<api::ControllerUpdate>) 
 }
 
 pub async fn main(
-    ctrl_upd_tx: UnbTx<api::ControllerUpdate>,
-    mut ctrl_ev_rx: UnbRx<api::ControllerEvent>,
+    ctrl_upd_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
+    mut ctrl_ev_rx: tokio::sync::mpsc::UnboundedReceiver<api::ControllerEvent>,
 ) -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
     let mut reload_tx = ReloadTx::new();
 
-    let (tag_callback_tx, mut tag_callback_rx) = unb_chan();
+    let (tag_callback_tx, mut tag_callback_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut fac = BarModuleFactory {
         reload_tx: reload_tx.clone(),
         ctrl_tx: ModuleControllerTx {
@@ -194,15 +197,15 @@ pub async fn main(
         tasks: JoinSet::new(),
     };
 
-    let callbacks = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let callbacks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     {
         let callbacks = callbacks.clone();
         tokio::spawn(async move {
-            while let Some((tag, cb)) = tag_callback_rx.next().await {
+            while let Some((tag, cb)) = tag_callback_rx.recv().await {
                 if let Some(cb) = cb {
-                    lock_mutex(&callbacks).insert(tag, cb);
+                    callbacks.lock().await.insert(tag, cb);
                 } else {
-                    lock_mutex(&callbacks).remove(&tag);
+                    callbacks.lock().await.remove(&tag);
                 }
             }
         });
@@ -212,12 +215,12 @@ pub async fn main(
         // TODO: Reload on certain events
         let mut _reload_tx = reload_tx.clone();
         tokio::spawn(async move {
-            while let Some(ev) = ctrl_ev_rx.next().await {
+            while let Some(ev) = ctrl_ev_rx.recv().await {
                 match ev {
                     api::ControllerEvent::Interact(api::InteractEvent { kind, tag, .. }) => {
                         let callback: Option<InteractCallback> =
-                            lock_mutex(&callbacks).get(&tag).cloned();
-                        callback.inspect(|cb| cb.call(InteractArgs { kind }));
+                            callbacks.lock().await.get(&tag).cloned();
+                        callback.inspect(|cb| cb(InteractArgs { kind }));
                     }
                     ev => log::warn!("Unimplemented event handler: {ev:?}"),
                 }
@@ -336,7 +339,7 @@ async fn hypr_module(
                     )
                 };
 
-                let on_interact = InteractCallback::from_fn_ctx(
+                let on_interact = interact_callback_with(
                     (hypr.clone(), ws.id.clone()),
                     move |(hypr, ws_id), interact| {
                         if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
@@ -507,7 +510,7 @@ async fn pulse_module(
 
     let mut state_rx = pulse.state_rx.clone();
 
-    let on_interact = InteractCallback::from_fn_ctx(pulse.clone(), move |pulse, interact| {
+    let on_interact = interact_callback_with(pulse.clone(), move |pulse, interact| {
         pulse
             .update_tx
             .send(PulseUpdate {
@@ -647,7 +650,7 @@ async fn ppd_module(
 
     let interact_tag = mk_fresh_interact_tag();
 
-    let on_interact = InteractCallback::from_fn_ctx(ppd.clone(), |ppd, interact| {
+    let on_interact = interact_callback_with(ppd.clone(), |ppd, interact| {
         if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
             return;
         }
@@ -759,7 +762,7 @@ async fn tray_module(
 
                     let tray = tray.clone();
                     let addr = addr.clone();
-                    let icb = InteractCallback::from_fn(move |interact| {
+                    let icb = Arc::new(move |interact: InteractArgs| {
                         if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
                             return;
                         }

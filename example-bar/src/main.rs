@@ -3,13 +3,14 @@ extern crate bar_panel_controller as ctrl;
 mod clients;
 mod desktop;
 mod runner;
+mod utils;
 
 fn main() -> std::process::ExitCode {
     main_inner().unwrap_or(std::process::ExitCode::FAILURE)
 }
 fn main_inner() -> Option<std::process::ExitCode> {
+    use crate::utils::ResultExt as _;
     use anyhow::Context as _;
-    use ctrl::utils::ResultExt as _;
 
     ctrl::init_driver_logger();
 
@@ -20,8 +21,8 @@ fn main_inner() -> Option<std::process::ExitCode> {
         .ok_or_log()?;
     let _guard = runtime.enter();
 
-    let (ctrl_upd_tx, mut ctrl_upd_rx) = ctrl::utils::unb_chan();
-    let (ctrl_ev_tx, ctrl_ev_rx) = ctrl::utils::unb_chan();
+    let (ctrl_upd_tx, mut ctrl_upd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ctrl_ev_tx, ctrl_ev_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let mut required_tasks = tokio::task::JoinSet::new();
 
@@ -29,7 +30,7 @@ fn main_inner() -> Option<std::process::ExitCode> {
     required_tasks.spawn(async move {
         ctrl::api::run_driver_connection(
             move |ev| ctrl_ev_tx.send(ev).ok(),
-            async move || ctrl_upd_rx.inner.recv().await,
+            async move || ctrl_upd_rx.recv().await,
         )
         .await
         .context("Failed to connect to controller")

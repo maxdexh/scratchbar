@@ -2,8 +2,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use futures::Stream;
 
-use crate::utils::unb_chan;
-
 // FIXME: Mark and handle mirrored monitors
 #[derive(PartialEq, Clone, Debug)]
 pub struct MonitorInfo {
@@ -110,7 +108,10 @@ impl State {
 
 // FIXME: Use a watch channel instead
 pub fn connect() -> impl Stream<Item = MonitorEvent> {
-    let (tx, rx) = unb_chan();
+    let (tx, mut rx) = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, rx)
+    };
     std::thread::spawn(move || {
         let mut state = State::default();
         loop {
@@ -129,5 +130,5 @@ pub fn connect() -> impl Stream<Item = MonitorEvent> {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
-    rx
+    futures::stream::poll_fn(move |cx| rx.poll_recv(cx))
 }

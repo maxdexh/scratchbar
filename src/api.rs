@@ -5,7 +5,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio_util::{sync::CancellationToken, time::FutureExt};
 
-use crate::{tui, utils::ResultExt as _};
+use crate::{
+    tui,
+    utils::{ResultExt as _, with_mutex_lock},
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -136,13 +139,11 @@ pub(crate) async fn run_ipc_connection<
     }
     impl Shared {
         fn set_err(&self, err: anyhow::Error) {
-            let mut lock = crate::utils::lock_mutex(&self.err_slot);
-            if lock.is_some() {
-                drop(lock);
-                log::error!("{err:?}");
-                return;
-            }
-            *lock = Some(err);
+            with_mutex_lock(&self.err_slot, |slot| {
+                if slot.is_none() {
+                    *slot = Some(err)
+                }
+            });
         }
     }
     impl Drop for Shared {
@@ -178,10 +179,10 @@ pub(crate) async fn run_ipc_connection<
         && writer_tx.send(val).is_ok()
     {}
 
-    match crate::utils::lock_mutex(&shared.err_slot).take() {
+    with_mutex_lock(&shared.err_slot, |slot| match slot.take() {
         Some(err) => Err(err),
         None => Ok(()),
-    }
+    })
 }
 fn run_ipc_reader<R: serde::de::DeserializeOwned>(
     read: impl std::io::Read,

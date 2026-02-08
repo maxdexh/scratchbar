@@ -1,11 +1,9 @@
 use anyhow::{Context as _, anyhow, bail};
-use futures::Stream;
 use libpulse_binding::{
     self as pulse, context::introspect::ServerInfo, mainloop::standard::IterateResult,
     time::MicroSeconds, volume::Volume,
 };
 
-use futures::StreamExt as _;
 use pulse::{
     context::{
         Context, FlagSet, State,
@@ -24,9 +22,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use ctrl::utils::{
-    CancelDropGuard, ReloadRx, ResultExt, UnbTx, WatchRx, WatchTx, unb_chan, watch_chan,
-};
+use crate::utils::{ReloadRx, ResultExt, WatchRx, WatchTx, watch_chan};
 
 #[derive(Debug, Clone, Default)]
 pub struct PulseState {
@@ -242,10 +238,8 @@ fn avg_volume_frac(vol: &ChannelVolumes) -> f64 {
     avg as f64 / (normal - muted) as f64
 }
 
-async fn run_updater(update_rx: impl Stream<Item = PulseUpdate>) {
-    tokio::pin!(update_rx);
-
-    while let Some(PulseUpdate { kind, target }) = update_rx.next().await {
+async fn run_updater(mut update_rx: tokio::sync::mpsc::UnboundedReceiver<PulseUpdate>) {
+    while let Some(PulseUpdate { kind, target }) = update_rx.recv().await {
         let (device_name, set_mute_cmd, set_vol_cmd) = match target {
             PulseDeviceKind::Sink => ("@DEFAULT_SINK@", "set-sink-mute", "set-sink-volume"),
             PulseDeviceKind::Source => ("@DEFAULT_SOURCE@", "set-source-mute", "set-source-volume"),
@@ -289,12 +283,12 @@ async fn run_updater(update_rx: impl Stream<Item = PulseUpdate>) {
 
 pub struct PulseClient {
     pub state_rx: WatchRx<PulseState>,
-    pub update_tx: UnbTx<PulseUpdate>,
+    pub update_tx: tokio::sync::mpsc::UnboundedSender<PulseUpdate>,
     _background: AbortOnDropHandle<()>,
 }
 pub fn connect(reload_rx: ReloadRx) -> PulseClient {
     let (state_tx, state_rx) = watch_chan(Default::default());
-    let (update_tx, update_rx) = unb_chan();
+    let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
     PulseClient {
         _background: AbortOnDropHandle::new(tokio::spawn(run_bg(state_tx, update_rx, reload_rx))),
         state_rx,
@@ -304,17 +298,17 @@ pub fn connect(reload_rx: ReloadRx) -> PulseClient {
 
 async fn run_bg(
     state_tx: WatchTx<PulseState>,
-    update_rx: impl Stream<Item = PulseUpdate> + 'static + Send,
+    update_rx: tokio::sync::mpsc::UnboundedReceiver<PulseUpdate>,
     mut reload_rx: ReloadRx,
 ) {
     let mut tasks = JoinSet::<()>::new();
     tasks.spawn(run_updater(update_rx));
 
     let awaiting_reload = Arc::new(AtomicBool::new(false));
-    let auto_cancel = CancelDropGuard::new();
+    let cancel = CancellationToken::new();
     {
         let awaiting_reload = awaiting_reload.clone();
-        let cancel = auto_cancel.inner.clone();
+        let cancel = cancel.clone();
         // FIXME: Rerun on failure
         std::thread::spawn(|| {
             run_blocking(state_tx, cancel, awaiting_reload)
@@ -322,6 +316,7 @@ async fn run_bg(
                 .ok_or_log();
         });
     }
+    let _auto_cancel = cancel.drop_guard();
 
     tokio::spawn(async move {
         while let Some(()) = reload_rx.wait().await {

@@ -4,7 +4,7 @@ use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures::{Stream, StreamExt};
-use tokio::task::JoinSet;
+use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
@@ -12,10 +12,7 @@ use crate::{
     inst::{TermEvent, TermUpdate},
     monitors::MonitorInfo,
     tui,
-    utils::{
-        CancelDropGuard, ResultExt, UnbRx, UnbTx, WatchRx, WatchTx, run_or_retry, unb_chan,
-        watch_chan, with_mutex_lock,
-    },
+    utils::{CancelDropGuard, ResultExt, with_mutex_lock},
 };
 
 #[derive(Debug)]
@@ -23,7 +20,7 @@ struct BarMenu {
     kind: api::MenuKind,
     tui: tui::Elem,
 }
-type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, WatchTx<BarMenu>>>;
+type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, watch::Sender<BarMenu>>>;
 
 #[derive(Debug, Clone)]
 struct BarTuiState {
@@ -32,40 +29,39 @@ struct BarTuiState {
 }
 #[derive(Debug, Clone)]
 struct BarTuiStateTx {
-    tui: WatchTx<tui::Elem>,
-    hidden: WatchTx<bool>,
+    tui: watch::Sender<tui::Elem>,
+    hidden: watch::Sender<bool>,
 }
 #[derive(Debug)]
 struct BarTuiStates {
-    by_monitor: HashMap<Arc<str>, WatchTx<BarTuiStateTx>>,
+    by_monitor: HashMap<Arc<str>, watch::Sender<BarTuiStateTx>>,
     defaults: BarTuiStateTx,
 }
 impl BarTuiStates {
-    pub fn get_or_mk_monitor(&mut self, name: Arc<str>) -> &mut WatchTx<BarTuiStateTx> {
+    pub fn get_or_mk_monitor(&mut self, name: Arc<str>) -> &mut watch::Sender<BarTuiStateTx> {
         self.by_monitor
             .entry(name)
-            .or_insert_with(|| WatchTx::new(self.defaults.clone()))
+            .or_insert_with(|| watch::Sender::new(self.defaults.clone()))
     }
 }
 
 async fn run_controller(
     update_rx: impl Stream<Item = api::ControllerUpdate> + Send + 'static,
-    event_tx: UnbTx<api::ControllerEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
 ) {
     let mut required_tasks = tokio::task::JoinSet::new();
 
     let bar_tui_states = Arc::new(std::sync::Mutex::new(BarTuiStates {
         by_monitor: Default::default(),
         defaults: BarTuiStateTx {
-            tui: WatchTx::new(tui::Elem::empty()),
-            hidden: WatchTx::new(false),
+            tui: watch::Sender::new(tui::Elem::empty()),
+            hidden: watch::Sender::new(false),
         },
     }));
-    let (bar_menus_tx, bar_menus_rx) = watch_chan(BarMenus::default());
-
+    let bar_menus_tx = watch::Sender::new(BarMenus::default());
     required_tasks.spawn(run_controller_inner(
         bar_tui_states.clone(),
-        bar_menus_rx,
+        bar_menus_tx.subscribe(),
         event_tx.clone(),
     ));
 
@@ -97,12 +93,15 @@ async fn run_controller(
                                 false
                             }
                             cur => {
-                                cur.insert_entry(WatchTx::new(menu));
+                                cur.insert_entry(watch::Sender::new(menu));
                                 true
                             }
                         },
                         Entry::Vacant(entry) => {
-                            entry.insert_entry(HashMap::from_iter([(on_kind, WatchTx::new(menu))]));
+                            entry.insert_entry(HashMap::from_iter([(
+                                on_kind,
+                                watch::Sender::new(menu),
+                            )]));
                             true
                         }
                     });
@@ -111,7 +110,7 @@ async fn run_controller(
                     fn doit<T>(
                         bar_tui_states: &mut BarTuiStates,
                         val: T,
-                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut WatchTx<T>,
+                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut watch::Sender<T>,
                     ) {
                         let default_tx = get_tx(&mut bar_tui_states.defaults);
                         default_tx.send_replace(val);
@@ -150,7 +149,7 @@ async fn run_controller(
                         bar_tui_states: &mut BarTuiStates,
                         monitor: Arc<str>,
                         val: T,
-                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut WatchTx<T>,
+                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut watch::Sender<T>,
                     ) {
                         let default_tx = get_tx(&mut bar_tui_states.defaults).clone();
                         bar_tui_states
@@ -158,7 +157,7 @@ async fn run_controller(
                             .send_if_modified(|state| {
                                 let tx = get_tx(state);
                                 if tx.same_channel(&default_tx) {
-                                    *tx = WatchTx::new(val);
+                                    *tx = watch::Sender::new(val);
                                     true
                                 } else {
                                     tx.send_replace(val);
@@ -211,8 +210,8 @@ async fn run_controller(
 
 async fn run_controller_inner(
     bar_tui_states: Arc<std::sync::Mutex<BarTuiStates>>,
-    bar_menus_rx: WatchRx<BarMenus>,
-    event_tx: UnbTx<api::ControllerEvent>,
+    bar_menus_rx: watch::Receiver<BarMenus>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
 ) {
     // TODO: Consider moving this to BarTuiStates
     let mut monitors_auto_cancel = HashMap::new();
@@ -246,28 +245,31 @@ async fn run_controller_inner(
 struct RunMonitorArgs {
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
-    bar_state_tx: WatchTx<BarTuiStateTx>,
-    bar_menus_rx: WatchRx<BarMenus>,
-    event_tx: UnbTx<api::ControllerEvent>,
+    bar_state_tx: watch::Sender<BarTuiStateTx>,
+    bar_menus_rx: watch::Receiver<BarMenus>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
 }
-async fn run_monitor(args: RunMonitorArgs) {
+async fn run_monitor(mut args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
     let _auto_cancel = CancelDropGuard::from(args.cancel_monitor.clone());
 
-    run_or_retry(
-        try_run_monitor,
-        args,
-        |it| it.with_context(|| format!("Failed to run panels for monitor {monitor}")),
-        Duration::from_secs(10),
-        None,
-    )
-    .await;
+    loop {
+        const TIMEOUT: Duration = Duration::from_secs(20);
+        if let Some(()) = try_run_monitor(&mut args)
+            .await
+            .with_context(|| format!("Failed to run task. Retrying in {}s", TIMEOUT.as_secs()))
+            .ok_or_log()
+        {
+            break;
+        }
+        tokio::time::sleep(TIMEOUT).await;
+    }
     log::debug!("Exiting panel manager for monitor {monitor:?}");
 }
 
 struct Term {
-    term_ev_rx: UnbRx<TermEvent>,
-    term_upd_tx: UnbTx<TermUpdate>,
+    term_ev_rx: tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
+    term_upd_tx: tokio::sync::mpsc::UnboundedSender<TermUpdate>,
     sizes: tui::Sizes,
     layout: Option<tui::RenderedLayout>,
 }
@@ -284,10 +286,10 @@ enum Upd {
 struct StartedMonitorEnv {
     bar: Term,
     menu: Term,
-    intern_upd_rx: UnbRx<Upd>,
-    bar_tui_rx: WatchRx<tui::Elem>,
-    bar_hide_rx: WatchRx<bool>,
-    event_tx: UnbTx<api::ControllerEvent>,
+    intern_upd_rx: tokio::sync::mpsc::UnboundedReceiver<Upd>,
+    bar_tui_rx: watch::Receiver<tui::Elem>,
+    bar_hide_rx: watch::Receiver<bool>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
 }
 
 async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
@@ -333,7 +335,7 @@ const HORIZONTAL_PADDING: u16 = 4;
 async fn run_monitor_main(
     monitor: MonitorInfo,
     mut env: StartedMonitorEnv,
-    bar_menus_rx: WatchRx<BarMenus>,
+    bar_menus_rx: watch::Receiver<BarMenus>,
 ) -> anyhow::Result<std::convert::Infallible> {
     #[derive(Debug)]
     struct ShowMenu {
@@ -354,9 +356,9 @@ async fn run_monitor_main(
         let mut bar_vis_changed = false;
 
         let upd = tokio::select! {
-            Some(ev) = env.bar.term_ev_rx.next() => Upd::Term(TermKind::Bar, ev),
-            Some(ev) = env.menu.term_ev_rx.next() => Upd::Term(TermKind::Menu, ev),
-            Some(upd) = env.intern_upd_rx.next() => upd,
+            Some(ev) = env.bar.term_ev_rx.recv() => Upd::Term(TermKind::Bar, ev),
+            Some(ev) = env.menu.term_ev_rx.recv() => Upd::Term(TermKind::Menu, ev),
+            Some(upd) = env.intern_upd_rx.recv() => upd,
             Ok(()) = env.bar_hide_rx.changed() => {
                 let hidden = *env.bar_hide_rx.borrow_and_update();
                 bar_vis_changed = hidden != std::mem::replace(&mut bar_tui_state.hidden, hidden);
@@ -634,13 +636,19 @@ async fn init_term(
     extra_envs: impl IntoIterator<Item = (OsString, OsString)>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<Term> {
-    let (term_upd_tx, term_upd_rx) = unb_chan();
-    let (term_ev_tx, mut term_ev_rx) = unb_chan();
+    let (term_upd_tx, mut term_upd_rx) = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, rx)
+    };
+    let (term_ev_tx, mut term_ev_rx) = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, rx)
+    };
 
     crate::inst::start_generic_panel(
         &sock_path,
         &log_name,
-        term_upd_rx,
+        futures::stream::poll_fn(move |cx| term_upd_rx.poll_recv(cx)),
         extra_args,
         extra_envs,
         term_ev_tx,
@@ -649,7 +657,7 @@ async fn init_term(
     .await?;
 
     let sizes = loop {
-        match term_ev_rx.next().await {
+        match term_ev_rx.recv().await {
             Some(TermEvent::Sizes(sizes)) => break sizes,
             Some(ev) => {
                 log::error!("Ignoring term event {ev:?}. The first event should be _::Sizes");
@@ -675,7 +683,10 @@ async fn try_init_monitor(
 ) -> anyhow::Result<StartedMonitorEnv> {
     let monitor = args.monitor.clone();
 
-    let (intern_upd_tx, intern_upd_rx) = unb_chan();
+    let (intern_upd_tx, intern_upd_rx) = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, rx)
+    };
 
     let tmpdir = tokio::task::spawn_blocking(TempDir::new).await??;
 
@@ -823,8 +834,8 @@ async fn try_init_monitor(
         }
     });
 
-    let (bar_tui_tx, bar_tui_rx) = watch_chan(tui::Elem::empty());
-    let (bar_hide_tx, bar_hide_rx) = watch_chan(false);
+    let (bar_tui_tx, bar_tui_rx) = watch::channel(tui::Elem::empty());
+    let (bar_hide_tx, bar_hide_rx) = watch::channel(false);
     {
         let mut bar_state_tx_rx = args.bar_state_tx.subscribe();
         required_tasks.spawn(async move {
@@ -953,16 +964,26 @@ pub fn ctrl_main() -> Option<std::process::ExitCode> {
             .flatten()
     };
 
-    let (update_tx, update_rx) = unb_chan();
-    let (event_tx, mut event_rx) = unb_chan();
+    let (update_tx, mut update_rx) = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, rx)
+    };
+    let (event_tx, mut event_rx) = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, rx)
+    };
     runtime.spawn(crate::api::run_ipc_connection(
         driver_socket,
         move |upd| update_tx.send(upd).ok(),
-        async move || event_rx.next().await,
+        async move || event_rx.recv().await,
     ));
 
     let main_task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
-        run_controller(update_rx, event_tx).await;
+        run_controller(
+            futures::stream::poll_fn(move |cx| update_rx.poll_recv(cx)),
+            event_tx,
+        )
+        .await;
         // FIXME: Return exit code
         ExitCode::SUCCESS
     }));

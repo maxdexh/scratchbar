@@ -1,7 +1,7 @@
 mod ipc;
 
 use crate::tui;
-use crate::utils::{CancelDropGuard, ResultExt as _, UnbTx, unb_chan};
+use crate::utils::{CancelDropGuard, ResultExt as _};
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -20,7 +20,7 @@ pub async fn start_generic_panel(
     upd_rx: impl Stream<Item = TermUpdate> + 'static + Send,
     extra_args: impl IntoIterator<Item: AsRef<OsStr>>,
     extra_envs: impl IntoIterator<Item = (OsString, OsString)>,
-    term_ev_tx: UnbTx<TermEvent>,
+    term_ev_tx: tokio::sync::mpsc::UnboundedSender<TermEvent>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let socket = tokio::net::UnixListener::bind(sock_path)?;
@@ -90,7 +90,7 @@ pub async fn start_generic_panel(
 }
 async fn run_term_inst_mgr(
     connection: tokio::net::UnixStream,
-    ev_tx: UnbTx<TermEvent>,
+    ev_tx: tokio::sync::mpsc::UnboundedSender<TermEvent>,
     updates: impl Stream<Item = TermUpdate> + Send + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -193,8 +193,11 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
             .context("Failed to connect to socket")?;
         let (read, write) = socket.into_split();
 
-        let (upd_tx, ev_rx);
-        (ev_tx, ev_rx) = unb_chan::<TermEvent>();
+        let (upd_tx, mut ev_rx);
+        (ev_tx, ev_rx) = {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (tx, rx)
+        };
         (upd_tx, upd_rx) = std::sync::mpsc::channel::<TermUpdate>();
 
         tasks.spawn(ipc::read_cobs_sock(
@@ -204,7 +207,11 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
             },
             cancel.clone(),
         ));
-        tasks.spawn(ipc::write_cobs_sock(write, ev_rx, cancel.clone()));
+        tasks.spawn(ipc::write_cobs_sock(
+            write,
+            futures::stream::poll_fn(move |cx| ev_rx.poll_recv(cx)),
+            cancel.clone(),
+        ));
     }
 
     crossterm::execute!(

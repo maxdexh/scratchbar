@@ -12,7 +12,7 @@ mod inst;
 mod logging;
 mod monitors;
 pub mod tui;
-pub mod utils;
+mod utils;
 
 pub fn init_driver_logger() {
     logging::init_logger("DRIVER".into());
