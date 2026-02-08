@@ -282,7 +282,7 @@ impl Render for Stack {
         tot
     }
 }
-impl Render for BlockBuilder {
+impl Render for Block {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let Borders {
             top,
@@ -307,18 +307,35 @@ impl Render for BlockBuilder {
             )?;
         }
 
+        fn apply_opt_style(style: Option<&Style>, d: impl fmt::Display) -> impl fmt::Display {
+            fmt::from_fn(move |f| {
+                if let Some(style) = style {
+                    style.begin(f)?;
+                }
+                write!(f, "{d}")?;
+                if let Some(style) = style {
+                    style.end(f)?;
+                }
+                Ok(())
+            })
+        }
         let mut horiz_border = |l: &str, r: &str, y: u16| {
-            let m = self.border_style.apply(
-                self.border_set.horizontal.repeat(
-                    area.size
+            let m = apply_opt_style(
+                self.border_style.as_ref(),
+                fmt::from_fn(|f| {
+                    for _ in 0..area
+                        .size
                         .x
                         .saturating_sub(left.into())
                         .saturating_sub(right.into())
-                        .into(),
-                ),
+                    {
+                        write!(f, "{}", self.border_set.horizontal)?;
+                    }
+                    Ok(())
+                }),
             );
-            let l = self.border_style.apply(if left { l } else { "" });
-            let r = self.border_style.apply(if right { r } else { "" });
+            let l = apply_opt_style(self.border_style.as_ref(), if left { l } else { "" });
+            let r = apply_opt_style(self.border_style.as_ref(), if right { r } else { "" });
 
             crossterm::queue!(
                 ctx.writer,
@@ -351,9 +368,10 @@ impl Render for BlockBuilder {
                 crossterm::queue!(
                     ctx.writer,
                     crossterm::cursor::MoveTo(x, y),
-                    crossterm::style::Print(
-                        self.border_style.apply(&self.border_set.vertical as &str)
-                    ),
+                    crossterm::style::Print(apply_opt_style(
+                        self.border_style.as_ref(),
+                        &self.border_set.vertical as &str
+                    )),
                 )?;
             }
             Ok(())
@@ -380,7 +398,7 @@ impl Render for BlockBuilder {
         size
     }
 }
-impl BlockBuilder {
+impl Block {
     fn extra_dim(&self) -> Vec2<u16> {
         let Borders {
             top,
@@ -395,79 +413,163 @@ impl BlockBuilder {
     }
 }
 
+pub(crate) struct PlainTextWriter {
+    lines: StackBuilder,
+    cur_line: String,
+    content_offset: usize,
+    opts: TextOptions,
+}
 impl Style {
-    pub fn apply(self, d: impl std::fmt::Display) -> impl std::fmt::Display {
-        use crossterm::style::{StyledContent, Stylize};
-
+    pub(crate) fn begin(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        use crossterm::Command as _;
         let Self {
             fg,
             bg,
-            modifier:
-                Modifier {
-                    bold,
-                    dim,
-                    italic,
-                    underline,
-                    hidden,
-                    strike,
-                    __non_exhaustive: (),
-                },
+            modifiers,
             underline_color,
-            __non_exhaustive: (),
+            #[expect(deprecated)]
+                __non_exhaustive_struct_update: (),
         } = self;
 
-        let mut styled = StyledContent::new(Default::default(), d);
-        if bold {
-            styled = styled.bold();
-        }
-        if dim {
-            styled = styled.dim();
-        }
-        if italic {
-            styled = styled.italic();
-        }
-        if underline {
-            styled = styled.underlined();
-        }
-        if hidden {
-            styled = styled.hidden();
-        }
-        if strike {
-            styled = styled.crossed_out();
+        if let Some(bg) = bg {
+            crossterm::style::SetBackgroundColor(bg.to_crossterm()).write_ansi(f)?;
         }
         if let Some(fg) = fg {
-            styled = styled.with(fg);
+            crossterm::style::SetForegroundColor(fg.to_crossterm()).write_ansi(f)?;
         }
-        if let Some(bg) = bg {
-            styled = styled.on(bg);
+        if let Some(ul) = underline_color {
+            crossterm::style::SetUnderlineColor(ul.to_crossterm()).write_ansi(f)?;
         }
-        if let Some(col) = underline_color {
-            styled = styled.underline(col);
+
+        if let Some(&Modifiers {
+            bold,
+            dim,
+            italic,
+            underline,
+            hidden,
+            strike,
+            #[expect(deprecated)]
+                __non_exhaustive_struct_update: (),
+        }) = modifiers.as_ref()
+        {
+            let mut attrs = crossterm::style::Attributes::none();
+            if bold {
+                attrs.set(crossterm::style::Attribute::Bold);
+            }
+            if dim {
+                attrs.set(crossterm::style::Attribute::Dim);
+            }
+            if italic {
+                attrs.set(crossterm::style::Attribute::Italic);
+            }
+            if underline {
+                attrs.set(crossterm::style::Attribute::Underlined);
+            }
+            if hidden {
+                attrs.set(crossterm::style::Attribute::Hidden);
+            }
+            if strike {
+                attrs.set(crossterm::style::Attribute::CrossedOut);
+            }
+            crossterm::style::SetAttributes(attrs).write_ansi(f)?;
         }
-        styled
+
+        Ok(())
+    }
+    pub(crate) fn end(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        // Just reset everything. We do not support nesting TextOptions,
+        // so we do not need to worry about the things crossterm's
+        // StyledContent has to worry about
+        crossterm::Command::write_ansi(&crossterm::style::ResetColor, f)
     }
 }
-impl KittyTextSize {
-    pub fn apply(self, inner: impl std::fmt::Display) -> impl std::fmt::Display {
-        let Self { s, w, n, d, v, h } = self;
-        fmt::from_fn(move |f: &mut std::fmt::Formatter| {
-            write!(f, "\x1b]66;s={}", s.unwrap_or(1))?;
-            if let Some(w) = w {
-                write!(f, ":w={w}")?;
+impl PlainTextWriter {
+    fn finish_line(&mut self) {
+        let (open, content) = self.cur_line.split_at(self.content_offset);
+
+        let content_width = unicode_width::UnicodeWidthStr::width(content);
+
+        let mut line = {
+            let open = open.into();
+            std::mem::replace(&mut self.cur_line, open)
+        };
+
+        if let Some(style) = &self.opts.style {
+            style.end(&mut line).unwrap();
+        }
+
+        self.lines.fit(
+            ElemKind::Print {
+                raw: line,
+                size: Vec2 {
+                    x: content_width.try_into().unwrap_or(u16::MAX),
+                    y: 1,
+                },
             }
-            if let Some(n) = n {
-                write!(f, ":n={n}")?;
-            }
-            if let Some(d) = d {
-                write!(f, ":d={d}")?;
-            }
-            if let Some(v) = v {
-                write!(f, ":v={v}")?;
-            }
-            if let Some(h) = h {
-                write!(f, ":h={h}")?;
-            }
-            write!(f, ";{inner}\x07")
-        })
+            .into(),
+        )
+    }
+    pub fn finish(mut self) -> Elem {
+        self.finish_line();
+        self.lines.build()
+    }
+    pub fn push_str(&mut self, s: &str) {
+        // FIXME: ESCAPE
+        // TODO: Implement handling for \r\n (requires remembering whether
+        // last char was \r).
+        // NOTE: We want this method to be invariant to splitting the string,
+        // which is not possible with str::lines(), since it ignores trailing empty lines.
+        let mut lines = s.split('\n');
+        if let Some(ext_cur) = lines.next() {
+            self.cur_line.push_str(ext_cur);
+        }
+        for new_line in lines {
+            self.finish_line();
+            self.cur_line.push_str(new_line);
+        }
+    }
+    pub fn with_opts(opts: TextOptions) -> Self {
+        let mut cur_line = String::new();
+        if let Some(style) = &opts.style {
+            style.begin(&mut cur_line).unwrap();
+        }
+        Self {
+            content_offset: cur_line.len(),
+            cur_line,
+            opts,
+            lines: StackBuilder::new(Axis::Y),
+        }
+    }
+}
+impl fmt::Write for PlainTextWriter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.push_str(s);
+        Ok(())
+    }
+}
+impl Color {
+    fn to_crossterm(&self) -> crossterm::style::Color {
+        type Out = crossterm::style::Color;
+        match *self {
+            Self::Reset => Out::Reset,
+            Self::Black => Out::Black,
+            Self::DarkGrey => Out::DarkGrey,
+            Self::Red => Out::Red,
+            Self::DarkRed => Out::DarkRed,
+            Self::Green => Out::Green,
+            Self::DarkGreen => Out::DarkGreen,
+            Self::Yellow => Out::Yellow,
+            Self::DarkYellow => Out::DarkYellow,
+            Self::Blue => Out::Blue,
+            Self::DarkBlue => Out::DarkBlue,
+            Self::Magenta => Out::Magenta,
+            Self::DarkMagenta => Out::DarkMagenta,
+            Self::Cyan => Out::Cyan,
+            Self::DarkCyan => Out::DarkCyan,
+            Self::White => Out::White,
+            Self::Grey => Out::Grey,
+            Self::Rgb { r, g, b } => Out::Rgb { r, g, b },
+            Self::AnsiValue(v) => Out::AnsiValue(v),
+        }
     }
 }

@@ -7,12 +7,6 @@ use tokio_util::{sync::CancellationToken, time::FutureExt};
 
 use crate::{tui, utils::ResultExt as _};
 
-macro_rules! warn_non_exhaustive {
-    () => {
-        "This hidden field is not part of the public API. It only serves to make it non_exhaustive while allowing struct update syntax."
-    };
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ControllerUpdate {
@@ -62,6 +56,7 @@ pub struct RegisterMenu {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegisterMenuOptions {
     // TODO: Option on whether to apply update to already open tui
+    // TODO: Option to set font size of menu / other options temporarily / run commands when menu is shown / hidden?
     #[doc(hidden)]
     #[deprecated = warn_non_exhaustive!()]
     pub __non_exhaustive_struct_update: (),

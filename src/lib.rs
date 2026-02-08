@@ -1,6 +1,11 @@
 pub extern crate image;
 pub extern crate log;
 
+macro_rules! warn_non_exhaustive {
+    () => {
+        "This hidden field is not part of the public API. It only serves to make it non_exhaustive while allowing struct update syntax."
+    };
+}
 pub mod api;
 mod controller;
 mod inst;

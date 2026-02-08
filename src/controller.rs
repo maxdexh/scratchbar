@@ -80,7 +80,7 @@ async fn run_controller(
                     menu_kind,
                     options:
                         api::RegisterMenuOptions {
-                            #[allow(deprecated)]
+                            #[expect(deprecated)]
                             __non_exhaustive_struct_update,
                         },
                 }) => {
@@ -126,7 +126,7 @@ async fn run_controller(
                                 tui,
                                 options:
                                     api::SetBarTuiOptions {
-                                        #[allow(deprecated)]
+                                        #[expect(deprecated)]
                                         __non_exhaustive_struct_update,
                                     },
                             }) => {
@@ -173,7 +173,7 @@ async fn run_controller(
                                 tui,
                                 options:
                                     api::SetBarTuiOptions {
-                                        #[allow(deprecated)]
+                                        #[expect(deprecated)]
                                         __non_exhaustive_struct_update,
                                     },
                             }) => {
@@ -194,7 +194,7 @@ async fn run_controller(
                     tui,
                     options:
                         api::SetBarTuiOptions {
-                            #[allow(deprecated)]
+                            #[expect(deprecated)]
                             __non_exhaustive_struct_update,
                         },
                 }) => with_mutex_lock(&bar_tui_states, |bar_tui_states| {

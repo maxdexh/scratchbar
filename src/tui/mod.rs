@@ -11,7 +11,7 @@ enum ElemKind {
     Print { raw: String, size: Vec2<u16> },
     Image(Image),
     Stack(Stack),
-    Block(BlockBuilder),
+    Block(Block),
     MinSize { size: Vec2<u16>, elem: Elem },
     Interact(InteractElem),
 }
@@ -25,6 +25,11 @@ pub struct InteractElem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Elem(Arc<ElemKind>);
+impl Default for Elem {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct InteractTag(Arc<[u8]>);
@@ -83,8 +88,8 @@ impl Elem {
         .into()
     }
 
-    pub fn build_block(init: impl FnOnce(&mut BlockBuilder)) -> Self {
-        let mut builder = BlockBuilder {
+    pub fn build_block(init: impl FnOnce(&mut Block)) -> Self {
+        let mut builder = Block {
             borders: Default::default(),
             border_style: Default::default(),
             border_set: LineSet::normal(),
@@ -93,10 +98,45 @@ impl Elem {
         init(&mut builder);
         ElemKind::Block(builder).into()
     }
+    #[deprecated]
     pub fn build_stack(axis: Axis, init: impl FnOnce(&mut StackBuilder)) -> Self {
         let mut builder = StackBuilder::new(axis);
         init(&mut builder);
         builder.build()
+    }
+    pub fn raw_print(raw: impl fmt::Display, size: Vec2<u16>) -> Self {
+        ElemKind::Print {
+            raw: raw.to_string(),
+            size,
+        }
+        .into()
+    }
+    pub fn text(plain: impl fmt::Display, opts: impl Into<TextOptions>) -> Self {
+        let mut writer = PlainTextWriter::with_opts(opts.into());
+        fmt::write(&mut writer, format_args!("{plain}")).unwrap();
+        writer.finish()
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct TextOptions {
+    pub style: Option<Style>,
+    //pub sizing: Option<KittyTextSize>,
+    #[deprecated = warn_non_exhaustive!()]
+    #[doc(hidden)]
+    pub __non_exhaustive_struct_update: (),
+}
+impl From<Style> for TextOptions {
+    fn from(value: Style) -> Self {
+        Self {
+            style: Some(value),
+            ..Default::default()
+        }
+    }
+}
+impl From<Modifiers> for TextOptions {
+    fn from(value: Modifiers) -> Self {
+        Style::from(value).into()
     }
 }
 
@@ -113,7 +153,7 @@ impl StackBuilder {
         }
     }
     pub fn fit(&mut self, elem: Elem) {
-        self.push(StackItem {
+        self.parts.push(StackItem {
             fill_weight: 0,
             elem,
         });
@@ -131,116 +171,21 @@ impl StackBuilder {
             size
         }));
     }
-    pub fn push(&mut self, item: StackItem) {
-        self.parts.push(item);
-    }
     pub fn build(self) -> Elem {
         let Self { axis, parts } = self;
-        ElemKind::Stack(Stack {
-            axis,
-            parts: parts.into(),
-        })
-        .into()
+        ElemKind::Stack(Stack { axis, parts }).into()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+    pub fn delete_last(&mut self) {
+        self.parts.pop();
     }
 }
 
 impl From<Stack> for Elem {
     fn from(value: Stack) -> Self {
         ElemKind::Stack(value).into()
-    }
-}
-impl<D: fmt::Display> From<RawPrint<D>> for Elem {
-    fn from(value: RawPrint<D>) -> Self {
-        let RawPrint { raw, size } = value;
-        ElemKind::Print {
-            raw: raw.to_string(),
-            size,
-        }
-        .into()
-    }
-}
-impl<S: fmt::Display> From<PlainLines<S>> for Elem {
-    #[track_caller]
-    fn from(value: PlainLines<S>) -> Self {
-        Elem::build_stack(Axis::Y, |stack| {
-            for line in value.text.to_string().lines() {
-                stack.fit(RawPrint::plain(line).styled(value.style).into())
-            }
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RawPrint<D> {
-    raw: D,
-    size: Vec2<u16>,
-}
-impl<D> RawPrint<D> {
-    #[track_caller]
-    pub fn plain(text: D) -> Self
-    where
-        D: AsRef<str>,
-    {
-        // FIXME: Strip control characters
-        let s = text.as_ref();
-        if s.chars().any(|c| c.is_ascii_control()) {
-            log::warn!("Plain text {s:?} should not contain ascii control chars");
-        }
-        Self {
-            size: Vec2 {
-                x: unicode_width::UnicodeWidthStr::width(s)
-                    .try_into()
-                    .unwrap_or(u16::MAX),
-                y: 1,
-            },
-            raw: text,
-        }
-    }
-
-    pub fn center_symbol(sym: D, width: u16) -> RawPrint<impl fmt::Display>
-    where
-        D: fmt::Display,
-    {
-        RawPrint {
-            raw: KittyTextSize::center_width(width).apply(sym),
-            size: Vec2 { x: width, y: 1 },
-        }
-    }
-
-    pub fn styled(self, style: Style) -> RawPrint<impl fmt::Display>
-    where
-        D: fmt::Display,
-    {
-        let Self { size, raw } = self;
-        RawPrint {
-            size,
-            raw: style.apply(raw),
-        }
-    }
-
-    pub fn map_display<T>(self, f: impl FnOnce(D) -> T) -> RawPrint<T> {
-        RawPrint {
-            raw: f(self.raw),
-            size: self.size,
-        }
-    }
-}
-
-#[derive(Default, Debug)]
-pub struct PlainLines<S> {
-    text: S,
-    style: Style,
-}
-impl<S> PlainLines<S> {
-    pub fn new(text: S) -> Self {
-        Self {
-            text,
-            style: Default::default(),
-        }
-    }
-    pub fn styled(mut self, style: Style) -> Self {
-        self.style = style;
-        self
     }
 }
 
@@ -305,29 +250,30 @@ impl std::ops::Deref for RgbaImageWrap {
 }
 impl fmt::Debug for RgbaImageWrap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut hasher = std::hash::DefaultHasher::new();
-        std::hash::Hasher::write(&mut hasher, &self.0);
-        let hash = std::hash::Hasher::finish(&hasher);
         f.debug_struct("RgbaImage")
             .field("width", &self.width())
             .field("height", &self.height())
-            .field("hash", &hash)
+            .field("hash", &{
+                let mut hasher = std::hash::DefaultHasher::new();
+                std::hash::Hasher::write(&mut hasher, &self.0);
+                std::hash::Hasher::finish(&hasher)
+            })
             .finish()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockBuilder {
-    borders: Borders,
-    border_style: Style,
-    border_set: LineSet,
-    inner: Option<Elem>,
+pub struct Block {
+    pub borders: Borders,
+    pub border_style: Option<Style>,
+    pub border_set: LineSet,
+    pub inner: Option<Elem>,
 }
-impl BlockBuilder {
+impl Block {
     pub fn set_borders_at(&mut self, borders: Borders) {
         self.borders = borders;
     }
     pub fn set_style(&mut self, style: Style) {
-        self.border_style = style;
+        self.border_style = Some(style);
     }
     pub fn set_lines(&mut self, lines: LineSet) {
         self.border_set = lines;
@@ -358,29 +304,61 @@ impl Borders {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Stack {
     axis: Axis,
-    parts: Arc<[StackItem]>,
+    parts: Vec<StackItem>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StackItem {
+struct StackItem {
     fill_weight: u16,
     elem: Elem,
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+// FIXME: Remove serialize, convert to Print
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Style {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
-    pub modifier: Modifier,
+    pub modifiers: Option<Modifiers>,
     pub underline_color: Option<Color>,
 
     #[doc(hidden)]
-    pub __non_exhaustive: (),
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
 }
-pub type Color = crossterm::style::Color;
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[repr(Rust, packed)]
-pub struct Modifier {
+impl From<Modifiers> for Style {
+    fn from(modifier: Modifiers) -> Self {
+        Self {
+            modifiers: Some(modifier),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Color {
+    Reset,
+    Black,
+    DarkGrey,
+    Red,
+    DarkRed,
+    Green,
+    DarkGreen,
+    Yellow,
+    DarkYellow,
+    Blue,
+    DarkBlue,
+    Magenta,
+    DarkMagenta,
+    Cyan,
+    DarkCyan,
+    White,
+    Grey,
+    Rgb { r: u8, g: u8, b: u8 },
+    AnsiValue(u8),
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct Modifiers {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
@@ -389,33 +367,8 @@ pub struct Modifier {
     pub strike: bool,
 
     #[doc(hidden)]
-    pub __non_exhaustive: (),
-}
-
-// TODO: enums
-#[derive(Default, Debug, Clone, Copy)]
-pub struct KittyTextSize {
-    pub s: Option<u16>,
-    pub w: Option<u16>,
-    pub n: Option<u16>,
-    pub d: Option<u16>,
-    pub v: Option<u16>,
-    pub h: Option<u16>,
-}
-impl KittyTextSize {
-    pub fn center_width(width: u16) -> Self {
-        // https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
-        // - w      sets the width of the multicell
-        // - h      ceter the text horizontally
-        // - n,d    use fractional scale of 1:1. kitty ignores w without this
-        Self {
-            w: Some(width),
-            h: Some(2),
-            d: Some(1),
-            n: Some(1),
-            ..Default::default()
-        }
-    }
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
