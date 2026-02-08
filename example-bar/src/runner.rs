@@ -210,7 +210,7 @@ pub async fn main(
 
     {
         // TODO: Reload on certain events
-        let mut reload_tx = reload_tx.clone();
+        let mut _reload_tx = reload_tx.clone();
         tokio::spawn(async move {
             while let Some(ev) = ctrl_ev_rx.next().await {
                 match ev {
@@ -371,6 +371,7 @@ async fn hypr_module(
         tui_tx.send_replace(BarTuiElem::ByMonitor(by_monitor));
     }
 }
+
 async fn time_module(
     ModuleArgs {
         tui_tx,
@@ -379,24 +380,17 @@ async fn time_module(
         ..
     }: ModuleArgs,
 ) {
-    use chrono::{Datelike, Timelike};
-    use std::time::Duration;
+    fn make_calendar(month: chrono::NaiveDate) -> Option<tui::Elem> {
+        let title = month.format("%B %Y").to_string();
 
-    let interact_tag = mk_fresh_interact_tag();
-
-    let interact_tag_clone = interact_tag.clone();
-    let mk_menu = move || {
-        let now = chrono::Local::now().date_naive();
-        let title = now.format("%B %Y").to_string();
-
-        let first_day_offset = now
+        let first_day_offset = month
             .with_day(1)
             .map(|first| first.weekday() as u16)
             .context("Failed to set day")
             .ok_or_log()?;
 
         let num_weeks = usize::div_ceil(
-            usize::from(now.num_days_in_month()) + usize::from(first_day_offset),
+            usize::from(month.num_days_in_month()) + usize::from(first_day_offset),
             7,
         );
 
@@ -410,9 +404,9 @@ async fn time_module(
         )
         .collect();
 
-        for n0 in 0u16..now.num_days_in_month().into() {
+        for n0 in 0u16..month.num_days_in_month().into() {
             let n1 = n0 + 1;
-            let day = now
+            let day = month
                 .with_day(n1.into())
                 .with_context(|| format!("Failed to set day {n1}"))
                 .ok_or_log()?;
@@ -421,7 +415,7 @@ async fn time_module(
             let item = &mut lines[usize::from(week_in_month)][day.weekday() as usize];
             *item = {
                 let it = tui::RawPrint::plain(format!("{n1:>2}"));
-                if now == day {
+                if month == day {
                     it.styled(tui::Style {
                         fg: Some(tui::Color::Green),
                         ..Default::default()
@@ -436,7 +430,7 @@ async fn time_module(
         let weekday_line =
             ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map(|d| tui::RawPrint::plain(d).into());
 
-        let elem = tui::Elem::build_stack(tui::Axis::Y, |vstack| {
+        let tui = tui::Elem::build_stack(tui::Axis::Y, |vstack| {
             vstack.fit(
                 tui::RawPrint::plain(title)
                     .styled(tui::Style {
@@ -462,18 +456,24 @@ async fn time_module(
                 }));
             }
         });
-        Some(api::RegisterMenu {
-            on_tag: interact_tag_clone.clone(),
-            on_kind: tui::InteractKind::Hover,
-            tui: elem,
-            menu_kind: api::MenuKind::Tooltip,
-            options: Default::default(),
-        })
-    };
+        Some(tui)
+    }
+    use chrono::{Datelike, Timelike};
+    use std::time::Duration;
+
+    let interact_tag = mk_fresh_interact_tag();
+
+    let interact_tag_clone = interact_tag.clone();
     let _menu_task = AbortOnDropHandle::new({
         tokio::spawn(async move {
-            if let Some(menu) = mk_menu() {
-                ctrl_tx.set_menu(menu);
+            if let Some(tui) = make_calendar(chrono::Local::now().date_naive()) {
+                ctrl_tx.set_menu(api::RegisterMenu {
+                    on_tag: interact_tag_clone.clone(),
+                    on_kind: tui::InteractKind::Hover,
+                    tui,
+                    menu_kind: api::MenuKind::Tooltip,
+                    options: Default::default(),
+                });
             }
             // FIXME: Schedule regular update
         })
