@@ -332,19 +332,44 @@ const EDGE: &str = "top";
 const VERTICAL_PADDING: bool = true;
 const HORIZONTAL_PADDING: u16 = 4;
 
+#[derive(Debug)]
+struct ShowMenu {
+    kind: api::MenuKind,
+    pix_location: tui::Vec2<u32>,
+    cached_size: tui::Vec2<u16>,
+    sizing: tui::SizingArgs,
+    tui: tui::Elem,
+    receiver: watch::Receiver<BarMenu>,
+}
+impl ShowMenu {
+    fn mk_recv(
+        mut receiver: watch::Receiver<BarMenu>,
+        pix_location: tui::Vec2<u32>,
+        env: &StartedMonitorEnv,
+    ) -> Self {
+        let sizing = tui::SizingArgs {
+            font_size: env.menu.sizes.font_size(),
+        };
+        let (tui, kind) = {
+            let BarMenu { tui, kind } = &*receiver.borrow_and_update();
+            (tui.clone(), kind.internal_clone())
+        };
+        Self {
+            cached_size: tui::calc_min_size(&tui, &sizing),
+            sizing,
+            tui,
+            kind,
+            pix_location,
+            receiver,
+        }
+    }
+}
+// FIXME: This function is way too large
 async fn run_monitor_main(
     monitor: MonitorInfo,
     mut env: StartedMonitorEnv,
     bar_menus_rx: watch::Receiver<BarMenus>,
 ) -> anyhow::Result<std::convert::Infallible> {
-    #[derive(Debug)]
-    struct ShowMenu {
-        kind: api::MenuKind,
-        pix_location: tui::Vec2<u32>,
-        cached_size: tui::Vec2<u16>,
-        sizing: tui::SizingArgs,
-        tui: tui::Elem,
-    }
     let mut show_menu = None::<ShowMenu>;
     let mut bar_tui_state = BarTuiState {
         tui: tui::Elem::empty(),
@@ -359,6 +384,12 @@ async fn run_monitor_main(
             Some(ev) = env.bar.term_ev_rx.recv() => Upd::Term(TermKind::Bar, ev),
             Some(ev) = env.menu.term_ev_rx.recv() => Upd::Term(TermKind::Menu, ev),
             Some(upd) = env.intern_upd_rx.recv() => upd,
+            Some(Ok(())) = async { Some(show_menu.as_mut()?.receiver.changed().await) } => {
+                let ShowMenu { pix_location, receiver, .. } = show_menu.unwrap();
+                show_menu = Some(ShowMenu::mk_recv(receiver, pix_location, &env));
+                rerender_menu = true;
+                Upd::Noop
+            },
             Ok(()) = env.bar_hide_rx.changed() => {
                 let hidden = *env.bar_hide_rx.borrow_and_update();
                 bar_vis_changed = hidden != std::mem::replace(&mut bar_tui_state.hidden, hidden);
@@ -436,19 +467,8 @@ async fn run_monitor_main(
                             }
 
                             if let Some(menu) = menu {
-                                let sizing = tui::SizingArgs {
-                                    font_size: env.menu.sizes.font_size(),
-                                };
-                                // FIXME: remember receiver (Also update on change of bar_menus_rx)
-                                // Use a seperate task for the menu to do this
-                                let tui = menu.borrow().tui.clone();
-                                show_menu = Some(ShowMenu {
-                                    cached_size: tui::calc_min_size(&tui, &sizing),
-                                    sizing,
-                                    tui,
-                                    kind: menu.borrow().kind.internal_clone(),
-                                    pix_location,
-                                });
+                                show_menu =
+                                    Some(ShowMenu::mk_recv(menu.subscribe(), pix_location, &env));
                                 rerender_menu = true;
                             }
                         }
@@ -499,13 +519,14 @@ async fn run_monitor_main(
                 bar_tui_changed = true;
             }
 
-            if let Some(ShowMenu {
+            if let Some(&ShowMenu {
                 pix_location: location,
                 cached_size: cached_tui_size,
                 ref tui,
                 ref sizing,
                 kind: _,
-            }) = show_menu
+                receiver: _,
+            }) = show_menu.as_ref()
             {
                 // HACK: This minimizes the rounding error for some reason (as far as I can tell).
                 let scale = (monitor.scale * 1000.0).ceil() / 1000.0;
