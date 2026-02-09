@@ -75,7 +75,7 @@ async fn run_controller(
                     tui,
                     menu_kind,
                     options:
-                        api::RegisterMenuOptions {
+                        api::RegisterMenuOpts {
                             #[expect(deprecated)]
                             __non_exhaustive_struct_update,
                         },
@@ -124,7 +124,7 @@ async fn run_controller(
                             api::BarUpdate::SetTui(api::SetBarTui {
                                 tui,
                                 options:
-                                    api::SetBarTuiOptions {
+                                    api::SetBarTuiOpts {
                                         #[expect(deprecated)]
                                         __non_exhaustive_struct_update,
                                     },
@@ -171,7 +171,7 @@ async fn run_controller(
                             api::BarUpdate::SetTui(api::SetBarTui {
                                 tui,
                                 options:
-                                    api::SetBarTuiOptions {
+                                    api::SetBarTuiOpts {
                                         #[expect(deprecated)]
                                         __non_exhaustive_struct_update,
                                     },
@@ -192,7 +192,7 @@ async fn run_controller(
                 api::ControllerUpdate::SetDefaultTui(api::SetBarTui {
                     tui,
                     options:
-                        api::SetBarTuiOptions {
+                        api::SetBarTuiOpts {
                             #[expect(deprecated)]
                             __non_exhaustive_struct_update,
                         },

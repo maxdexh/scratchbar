@@ -44,12 +44,9 @@ pub async fn start_generic_panel(
         .context("Failed to accept socket connection")?;
 
     tokio::spawn(async move {
-        let mut mgr = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(run_term_inst_mgr(
-            socket,
-            term_ev_tx,
-            upd_rx,
-            cancel.clone(),
-        )));
+        let mut mgr = tokio_util::task::AbortOnDropHandle::<()>::new(tokio::spawn(
+            run_term_inst_mgr(socket, term_ev_tx, upd_rx, cancel.clone()),
+        ));
         tokio::select! {
             exit_res = child.wait() => {
                 exit_res.context("Failed to wait for terminal exit").ok_or_log();
@@ -93,7 +90,7 @@ async fn run_term_inst_mgr(
     ev_tx: tokio::sync::mpsc::UnboundedSender<TermEvent>,
     updates: impl Stream<Item = TermUpdate> + Send + 'static,
     cancel: CancellationToken,
-) -> anyhow::Result<()> {
+) {
     let _auto_cancel = CancelDropGuard::from(cancel.clone());
     let mut tasks = JoinSet::<()>::new();
     // TODO: Await stream
@@ -113,13 +110,12 @@ async fn run_term_inst_mgr(
         cancel.clone(),
     ));
 
-    if let Some(Err(err)) = tasks.join_next().await {
-        log::error!("Error with task: {err}");
-    }
+    let Some(res) = tasks.join_next().await else {
+        unreachable!()
+    };
+    res.context("Error with task").ok_or_log();
     cancel.cancel();
     tasks.join_all().await;
-
-    Ok(())
 }
 
 const KITTY_FWD_VAR: &str = "KITTY_STDIO_FORWARDED";
@@ -139,7 +135,8 @@ fn fwd_log_self_exe() -> Option<std::process::Command> {
         .ok_or_log()?;
 
     // SAFETY: This is not io safe, but there is no other way to do this
-    // (other than /proc/self/fd/fdnum, which just bypasses the unsafe keyword)
+    // (other than /proc/self/fd/fdnum, which bypasses using `unsafe` without being any safer)
+    // TODO: Consider logging over a socket instead.
     let fwd = unsafe { <std::process::Stdio as std::os::fd::FromRawFd>::from_raw_fd(fwd_fd) };
     cmd.stderr(fwd);
 

@@ -4,6 +4,7 @@ use crate::{
     clients,
     driver::{BarTuiElem, InteractTagRegistry, ModuleArgs, interact_callback_with},
     utils::ResultExt as _,
+    xtui,
 };
 use ctrl::tui;
 
@@ -32,15 +33,15 @@ pub async fn hypr_module(
             let (_, (tui, tui_active)) = ws_reg.get_or_init(&ws.id, |tag| {
                 let mk = |fg| {
                     let mk2 = |style| tui::Elem::text(ws.name.clone(), style);
-                    mk2(tui::Style {
+                    mk2(tui::TextStyle {
                         fg: Clone::clone(&fg),
                         ..Default::default()
                     })
                     .interactive_hover(
                         tag.clone(),
-                        mk2(tui::Style {
+                        mk2(tui::TextStyle {
                             fg,
-                            modifiers: Some(tui::Modifiers {
+                            modifiers: Some(tui::TextModifiers {
                                 underline: true,
                                 ..Default::default()
                             }),
@@ -62,14 +63,14 @@ pub async fn hypr_module(
                     .send((tag.clone(), Some(on_interact)))
                     .ok_or_debug();
 
-                (mk(None), mk(Some(tui::Color::Green)))
+                (mk(None), mk(Some(tui::TermColor::Green)))
             });
 
             let wss = by_monitor
                 .entry(monitor)
-                .or_insert_with(|| tui::StackBuilder::new(tui::Axis::X));
+                .or_insert_with(|| xtui::StackBuilder::new(tui::Axis::X));
 
-            wss.fit(if ws.is_active {
+            wss.push(if ws.is_active {
                 tui_active.clone()
             } else {
                 tui.clone()

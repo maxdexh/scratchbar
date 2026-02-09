@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::tui::*;
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Area {
+pub(crate) struct Area {
     pub pos: Vec2<u16>,
     pub size: Vec2<u16>,
 }
@@ -25,45 +25,15 @@ impl Area {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Vec2<T> {
-    pub x: T,
-    pub y: T,
-}
 impl<T> Vec2<T> {
-    pub fn combine<U, R>(self, other: Vec2<U>, mut f: impl FnMut(T, U) -> R) -> Vec2<R> {
+    pub(crate) fn combine<U, R>(self, other: Vec2<U>, mut f: impl FnMut(T, U) -> R) -> Vec2<R> {
         Vec2 {
             x: f(self.x, other.x),
             y: f(self.y, other.y),
         }
     }
 }
-impl<T> std::ops::Index<Axis> for Vec2<T> {
-    type Output = T;
 
-    fn index(&self, index: Axis) -> &Self::Output {
-        let Self { x, y } = self;
-        match index {
-            Axis::X => x,
-            Axis::Y => y,
-        }
-    }
-}
-impl<T> std::ops::IndexMut<Axis> for Vec2<T> {
-    fn index_mut(&mut self, index: Axis) -> &mut Self::Output {
-        let Self { x, y } = self;
-        match index {
-            Axis::X => x,
-            Axis::Y => y,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Axis {
-    X,
-    Y,
-}
 impl Axis {
     pub fn other(self) -> Self {
         match self {
@@ -79,7 +49,7 @@ pub(super) struct StoredInteractive {
     has_hover: bool,
 }
 impl StoredInteractive {
-    pub fn new(elem: &InteractElem) -> Self {
+    pub fn new(elem: &InteractRepr) -> Self {
         Self {
             has_hover: elem.hovered.is_some(),
             tag: elem.tag.clone(),
@@ -87,13 +57,13 @@ impl StoredInteractive {
     }
 }
 #[derive(Debug)]
-pub struct RenderedLayout {
+pub(crate) struct RenderedLayout {
     pub(super) widgets: Vec<(Area, StoredInteractive)>,
     pub(super) last_mouse_pos: Option<Vec2<u16>>,
     pub(super) last_hover_elem: Option<StoredInteractive>,
 }
 
-pub struct MouseEventResult {
+pub(crate) struct MouseEventResult {
     pub kind: InteractKind,
     pub tag: Option<InteractTag>,
     pub empty: bool,
@@ -103,7 +73,7 @@ pub struct MouseEventResult {
 }
 
 impl RenderedLayout {
-    pub(super) fn insert(&mut self, area: Area, elem: &InteractElem) {
+    pub(super) fn insert(&mut self, area: Area, elem: &InteractRepr) {
         self.widgets.push((area, StoredInteractive::new(elem)));
     }
 
@@ -119,9 +89,7 @@ impl RenderedLayout {
         event: crossterm::event::MouseEvent,
         font_size: Vec2<u16>,
     ) -> MouseEventResult {
-        use crossterm::event::*;
-
-        let MouseEvent {
+        let crossterm::event::MouseEvent {
             kind,
             column,
             row,
@@ -135,9 +103,12 @@ impl RenderedLayout {
         type DR = Direction;
         type IK = InteractKind;
         type MK = crossterm::event::MouseEventKind;
+        type MB = crossterm::event::MouseButton;
 
         let kind = match kind {
-            MK::Down(button) => IK::Click(button.into()),
+            MK::Down(MB::Left) => IK::Click(MouseButton::Left),
+            MK::Down(MB::Right) => IK::Click(MouseButton::Right),
+            MK::Down(MB::Middle) => IK::Click(MouseButton::Middle),
             MK::ScrollDown => IK::Scroll(DR::Down),
             MK::ScrollUp => IK::Scroll(DR::Up),
             MK::ScrollLeft => IK::Scroll(DR::Left),
@@ -185,37 +156,6 @@ impl RenderedLayout {
             pix_location,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MouseButton {
-    Left,
-    Right,
-    Middle,
-}
-impl From<crossterm::event::MouseButton> for MouseButton {
-    fn from(value: crossterm::event::MouseButton) -> Self {
-        type MB = crossterm::event::MouseButton;
-        match value {
-            MB::Left => Self::Left,
-            MB::Right => Self::Right,
-            MB::Middle => Self::Middle,
-        }
-    }
-}
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum InteractKind {
-    Click(MouseButton),
-    Scroll(Direction),
-    Hover,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

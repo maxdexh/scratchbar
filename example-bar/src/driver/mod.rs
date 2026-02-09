@@ -6,7 +6,10 @@ mod tray;
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::utils::{ReloadRx, ReloadTx, ResultExt as _};
+use crate::{
+    utils::{ReloadRx, ReloadTx, ResultExt as _},
+    xtui,
+};
 use ctrl::{api, tui};
 use tokio::{sync::watch, task::JoinSet};
 
@@ -131,12 +134,12 @@ fn send_bar_tui(
     ctrl_tx: &tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
 ) {
     let mut by_monitor = HashMap::new();
-    let mut fallback = tui::StackBuilder::new(tui::Axis::X);
+    let mut fallback = xtui::StackBuilder::new(tui::Axis::X);
     for elem in bar_tui {
         match elem {
             BarTuiElem::Shared(elem) => {
                 for stack in by_monitor.values_mut().chain(Some(&mut fallback)) {
-                    stack.fit(elem.clone());
+                    stack.push(elem.clone());
                 }
             }
             BarTuiElem::ByMonitor(elems) => {
@@ -144,7 +147,7 @@ fn send_bar_tui(
                     by_monitor
                         .entry(mtr.clone())
                         .or_insert_with(|| fallback.clone())
-                        .fit(elem.clone());
+                        .push(elem.clone());
                 }
             }
             BarTuiElem::Hide => {}
@@ -240,21 +243,21 @@ pub async fn driver_main(
         fac.spawn(tray::tray_module),
         fac.fixed(BarTuiElem::Spacing(3)),
         fac.spawn_with(
-            pulse::PulseModuleCtx {
+            pulse::PulseModuleArgs {
                 pulse: pulse.clone(),
                 device_kind: clients::pulse::PulseDeviceKind::Source,
-                muted_sym: tui::Elem::text(" ", tui::TextOptions::default()),
-                unmuted_sym: crate::xtui::tui_center_symbol("", 2),
+                muted_sym: tui::Elem::text(" ", tui::TextOpts::default()),
+                unmuted_sym: xtui::tui_center_symbol("", 2),
             },
             pulse::pulse_module,
         ),
         fac.fixed(BarTuiElem::Spacing(3)),
         fac.spawn_with(
-            pulse::PulseModuleCtx {
+            pulse::PulseModuleArgs {
                 pulse,
                 device_kind: clients::pulse::PulseDeviceKind::Sink,
-                muted_sym: tui::Elem::text(" ", tui::TextOptions::default()),
-                unmuted_sym: tui::Elem::text(" ", tui::TextOptions::default()),
+                muted_sym: tui::Elem::text(" ", tui::TextOpts::default()),
+                unmuted_sym: tui::Elem::text(" ", tui::TextOpts::default()),
             },
             pulse::pulse_module,
         ),

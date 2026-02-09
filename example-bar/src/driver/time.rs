@@ -1,6 +1,7 @@
 use crate::{
     driver::{BarTuiElem, ModuleArgs, mk_fresh_interact_tag},
     utils::ResultExt as _,
+    xtui,
 };
 use anyhow::Context as _;
 use ctrl::{api, tui};
@@ -26,25 +27,25 @@ pub async fn time_module(
             .ok_or_log()?
             .weekday() as u16;
 
-        let mut tui_ystack = tui::StackBuilder::new(tui::Axis::Y);
-        tui_ystack.fit(tui::Elem::text(
+        let mut tui_ystack = xtui::StackBuilder::new(tui::Axis::Y);
+        tui_ystack.push(tui::Elem::text(
             title,
-            tui::Modifiers {
+            tui::TextModifiers {
                 bold: true,
                 ..Default::default()
             },
         ));
-        tui_ystack.fit({
-            let mut xstack = tui::StackBuilder::new(tui::Axis::X);
+        tui_ystack.push({
+            let mut xstack = xtui::StackBuilder::new(tui::Axis::X);
             for day in WEEK_DAYS {
-                xstack.fit(tui::Elem::text(day, tui::TextOptions::default()));
+                xstack.push(tui::Elem::text(day, tui::TextOpts::default()));
                 xstack.spacing(1);
             }
             xstack.delete_last();
             xstack.build()
         });
 
-        let mut week_xstack = tui::StackBuilder::new(tui::Axis::X);
+        let mut week_xstack = xtui::StackBuilder::new(tui::Axis::X);
         week_xstack.spacing(3 * first_weekday_offset);
         for d0 in 0u16..month.num_days_in_month().into() {
             let d1 = d0.checked_add(1).context("Overflow").ok_or_log()?;
@@ -54,23 +55,23 @@ pub async fn time_module(
                 .ok_or_log()?;
 
             let text = format!("{d1:>2}");
-            week_xstack.fit(tui::Elem::text(
+            week_xstack.push(tui::Elem::text(
                 text,
-                tui::Style {
-                    fg: (day == today).then_some(tui::Color::Green),
+                tui::TextStyle {
+                    fg: (day == today).then_some(tui::TermColor::Green),
                     ..Default::default()
                 },
             ));
 
             if day.weekday() == chrono::Weekday::Sun {
-                tui_ystack.fit(week_xstack.build());
-                week_xstack = tui::StackBuilder::new(tui::Axis::X);
+                tui_ystack.push(week_xstack.build());
+                week_xstack = xtui::StackBuilder::new(tui::Axis::X);
             } else {
                 week_xstack.spacing(1);
             }
         }
         if !week_xstack.is_empty() {
-            tui_ystack.fit(week_xstack.build());
+            tui_ystack.push(week_xstack.build());
         }
 
         Some(tui_ystack.build())
@@ -100,7 +101,7 @@ pub async fn time_module(
         let now = chrono::Local::now();
         let minute = now.minute();
         if prev_minutes != minute {
-            let tui = tui::Elem::text(now.format("%H:%M %d/%m"), tui::TextOptions::default())
+            let tui = tui::Elem::text(now.format("%H:%M %d/%m"), tui::TextOpts::default())
                 .interactive(interact_tag.clone());
 
             tui_tx.send_replace(BarTuiElem::Shared(tui));

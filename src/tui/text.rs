@@ -1,42 +1,42 @@
 use crate::tui::*;
 
 #[derive(Default, Debug, Clone)]
-pub struct TextOptions {
-    pub style: Option<Style>,
+pub struct TextOpts {
+    pub style: Option<TextStyle>,
     pub trim_trailing_line: bool,
     //pub sizing: Option<KittyTextSize>,
     #[deprecated = warn_non_exhaustive!()]
     #[doc(hidden)]
     pub __non_exhaustive_struct_update: (),
 }
-impl From<Style> for TextOptions {
-    fn from(value: Style) -> Self {
+impl From<TextStyle> for TextOpts {
+    fn from(value: TextStyle) -> Self {
         Self {
             style: Some(value),
             ..Default::default()
         }
     }
 }
-impl From<Modifiers> for TextOptions {
-    fn from(value: Modifiers) -> Self {
-        Style::from(value).into()
+impl From<TextModifiers> for TextOpts {
+    fn from(value: TextModifiers) -> Self {
+        TextStyle::from(value).into()
     }
 }
 
 // FIXME: Remove serialize, convert to Print
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct Style {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub modifiers: Option<Modifiers>,
-    pub underline_color: Option<Color>,
+pub struct TextStyle {
+    pub fg: Option<TermColor>,
+    pub bg: Option<TermColor>,
+    pub modifiers: Option<TextModifiers>,
+    pub underline_color: Option<TermColor>,
 
     #[doc(hidden)]
     #[deprecated = warn_non_exhaustive!()]
     pub __non_exhaustive_struct_update: (),
 }
-impl From<Modifiers> for Style {
-    fn from(modifier: Modifiers) -> Self {
+impl From<TextModifiers> for TextStyle {
+    fn from(modifier: TextModifiers) -> Self {
         Self {
             modifiers: Some(modifier),
             ..Default::default()
@@ -46,7 +46,7 @@ impl From<Modifiers> for Style {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum Color {
+pub enum TermColor {
     Reset,
     Black,
     DarkGrey,
@@ -69,7 +69,7 @@ pub enum Color {
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct Modifiers {
+pub struct TextModifiers {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
@@ -83,12 +83,12 @@ pub struct Modifiers {
 }
 
 pub(crate) struct PlainTextWriter {
-    lines: StackBuilder,
+    lines: Vec<StackItemRepr>,
     cur_line: String,
     content_offset: usize,
-    opts: TextOptions,
+    opts: TextOpts,
 }
-impl Style {
+impl TextStyle {
     pub(crate) fn begin(&self, f: &mut impl fmt::Write) -> fmt::Result {
         use crossterm::Command as _;
         let Self {
@@ -110,7 +110,7 @@ impl Style {
             crossterm::style::SetUnderlineColor(ul.to_crossterm()).write_ansi(f)?;
         }
 
-        if let Some(&Modifiers {
+        if let Some(&TextModifiers {
             bold,
             dim,
             italic,
@@ -146,9 +146,6 @@ impl Style {
         Ok(())
     }
     pub(crate) fn end(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        // Just reset everything. We do not support nesting TextOptions,
-        // so we do not need to worry about the things crossterm's
-        // StyledContent has to worry about
         crossterm::Command::write_ansi(&crossterm::style::ResetColor, f)
     }
 }
@@ -167,8 +164,8 @@ impl PlainTextWriter {
             style.end(&mut line).unwrap();
         }
 
-        self.lines.fit(
-            ElemKind::Print {
+        self.lines.push(StackItemRepr {
+            elem: ElemRepr::Print {
                 raw: line,
                 size: Vec2 {
                     x: content_width.try_into().unwrap_or(u16::MAX),
@@ -176,11 +173,16 @@ impl PlainTextWriter {
                 },
             }
             .into(),
-        )
+            fill_weight: 0,
+        })
     }
     pub fn finish(mut self) -> Elem {
         self.finish_line();
-        self.lines.build()
+        ElemRepr::Stack(StackRepr {
+            axis: Axis::Y,
+            items: self.lines,
+        })
+        .into()
     }
     pub fn push_str(&mut self, s: &str) {
         // FIXME: ESCAPE
@@ -197,7 +199,7 @@ impl PlainTextWriter {
             self.cur_line.push_str(new_line);
         }
     }
-    pub fn with_opts(opts: TextOptions) -> Self {
+    pub fn with_opts(opts: TextOpts) -> Self {
         let mut cur_line = String::new();
         if let Some(style) = &opts.style {
             style.begin(&mut cur_line).unwrap();
@@ -206,7 +208,7 @@ impl PlainTextWriter {
             content_offset: cur_line.len(),
             cur_line,
             opts,
-            lines: StackBuilder::new(Axis::Y),
+            lines: Vec::new(),
         }
     }
 }
@@ -216,7 +218,7 @@ impl fmt::Write for PlainTextWriter {
         Ok(())
     }
 }
-impl Color {
+impl TermColor {
     fn to_crossterm(&self) -> crossterm::style::Color {
         type Out = crossterm::style::Color;
         match *self {

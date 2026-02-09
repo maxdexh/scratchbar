@@ -4,22 +4,23 @@ use crate::{
     clients,
     driver::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
     utils::ResultExt as _,
+    xtui,
 };
 use ctrl::tui;
 
-pub struct PulseModuleCtx {
+pub struct PulseModuleArgs {
     pub pulse: Arc<clients::pulse::PulseClient>,
     pub device_kind: clients::pulse::PulseDeviceKind,
     pub muted_sym: tui::Elem,
     pub unmuted_sym: tui::Elem,
 }
 pub async fn pulse_module(
-    PulseModuleCtx {
+    PulseModuleArgs {
         pulse,
         device_kind,
         muted_sym,
         unmuted_sym,
-    }: PulseModuleCtx,
+    }: PulseModuleArgs,
     ModuleArgs {
         tui_tx,
         tag_callback_tx,
@@ -68,15 +69,15 @@ pub async fn pulse_module(
         drop(state);
 
         tui_tx.send_replace(BarTuiElem::Shared({
-            let mut stack = tui::StackBuilder::new(tui::Axis::X);
-            stack.fit(if muted {
+            let mut stack = xtui::StackBuilder::new(tui::Axis::X);
+            stack.push(if muted {
                 muted_sym.clone()
             } else {
                 unmuted_sym.clone()
             });
-            stack.fit(tui::Elem::text(
+            stack.push(tui::Elem::text(
                 format!("{:>3}%", (volume * 100.0).round() as u32),
-                tui::TextOptions::default(),
+                tui::TextOpts::default(),
             ));
             stack.build().interactive(interact_tag.clone())
         }));

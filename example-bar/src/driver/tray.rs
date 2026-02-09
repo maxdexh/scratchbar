@@ -4,6 +4,7 @@ use crate::{
     clients,
     driver::{BarTuiElem, InteractArgs, InteractTagRegistry, ModuleArgs, mk_fresh_interact_tag},
     utils::ResultExt as _,
+    xtui,
 };
 use anyhow::Context as _;
 use ctrl::{api, tui};
@@ -26,7 +27,7 @@ pub async fn tray_module(
     while state_rx.changed().await.is_ok() {
         let state = state_rx.borrow_and_update().clone();
 
-        let mut tui_stack = tui::StackBuilder::new(tui::Axis::X);
+        let mut tui_stack = xtui::StackBuilder::new(tui::Axis::X);
         for TrayEntry { addr, item, menu } in state.entries.iter() {
             let (tag, ()) = entry_reg.get_or_init(addr, |_| ());
 
@@ -39,13 +40,13 @@ pub async fn tray_module(
             }) = item.tool_tip.as_ref()
             {
                 let menu_tui = {
-                    let mut menu_tui_stack = tui::StackBuilder::new(tui::Axis::Y);
-                    menu_tui_stack.fit({
-                        let mut hstack = tui::StackBuilder::new(tui::Axis::X);
+                    let mut menu_tui_stack = xtui::StackBuilder::new(tui::Axis::Y);
+                    menu_tui_stack.push({
+                        let mut hstack = xtui::StackBuilder::new(tui::Axis::X);
                         hstack.fill(1, tui::Elem::empty());
-                        hstack.fit(tui::Elem::text(
+                        hstack.push(tui::Elem::text(
                             title,
-                            tui::Modifiers {
+                            tui::TextModifiers {
                                 bold: true,
                                 ..Default::default()
                             },
@@ -53,7 +54,7 @@ pub async fn tray_module(
                         hstack.fill(1, tui::Elem::empty());
                         hstack.build()
                     });
-                    menu_tui_stack.fit(tui::Elem::text(description, tui::TextOptions::default()));
+                    menu_tui_stack.push(tui::Elem::text(description, tui::TextOpts::default()));
                     menu_tui_stack.build()
                 };
                 ctrl_tx.set_menu(api::RegisterMenu {
@@ -105,14 +106,15 @@ pub async fn tray_module(
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
                     menu_kind: api::MenuKind::Context,
-                    tui: tui::Elem::build_block(|block| {
-                        block.set_borders_at(tui::Borders::all());
-                        block.set_style(tui::Style {
-                            fg: Some(tui::Color::DarkGrey),
+                    tui: tui::Elem::block(tui::BlockOpts {
+                        border_style: Some(tui::TextStyle {
+                            fg: Some(tui::TermColor::DarkGrey),
                             ..Default::default()
-                        });
-                        block.set_lines(tui::LineSet::thick());
-                        block.set_inner(menu_tui);
+                        }),
+                        borders: tui::BlockBorders::all(),
+                        lines: tui::BlockLineSet::thick(),
+                        inner: Some(menu_tui),
+                        ..Default::default()
                     }),
                     options: Default::default(),
                 });
@@ -143,7 +145,7 @@ pub async fn tray_module(
                     *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
                 }
 
-                tui_stack.fit(
+                tui_stack.push(
                     tui::Elem::image(
                         img, //
                         tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
@@ -167,15 +169,16 @@ pub async fn tray_module(
                 visible: true,
                 menu_type: MenuType::Separator,
                 ..
-            } => tui::Elem::build_block(|block| {
-                block.set_borders_at(tui::Borders {
+            } => tui::Elem::block(tui::BlockOpts {
+                borders: tui::BlockBorders {
                     top: true,
                     ..Default::default()
-                });
-                block.set_style(tui::Style {
-                    fg: Some(tui::Color::DarkGrey),
+                },
+                border_style: Some(tui::TextStyle {
+                    fg: Some(tui::TermColor::DarkGrey),
                     ..Default::default()
-                });
+                }),
+                ..Default::default()
             }),
             MenuItem {
                 id,
@@ -192,7 +195,7 @@ pub async fn tray_module(
                 disposition: _, // TODO: what to do with this?
                 submenu: _,
             } => {
-                let mut stack = tui::StackBuilder::new(tui::Axis::X);
+                let mut stack = xtui::StackBuilder::new(tui::Axis::X);
                 stack.spacing(depth + 1);
                 if let Some(icon) = icon_data
                     && let Some(img) = ctrl::image::load_from_memory_with_format(
@@ -202,13 +205,13 @@ pub async fn tray_module(
                     .context("Systray icon has invalid png data")
                     .ok_or_log()
                 {
-                    stack.fit(tui::Elem::image(
+                    stack.push(tui::Elem::image(
                         img.into_rgba8(),
                         tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
                     ));
                     stack.spacing(1);
                 }
-                stack.fit(tui::Elem::text(label, tui::TextOptions::default()));
+                stack.push(tui::Elem::text(label, tui::TextOpts::default()));
                 // FIXME: Add hover
                 stack.build().interactive(mk_interact(*id))
             }
@@ -222,9 +225,9 @@ pub async fn tray_module(
         Some(if item.submenu.is_empty() {
             main_elem
         } else {
-            let mut stack = tui::StackBuilder::new(tui::Axis::Y);
-            stack.fit(main_elem);
-            stack.fit(tray_menu_to_tui(depth + 1, &item.submenu, mk_interact));
+            let mut stack = xtui::StackBuilder::new(tui::Axis::Y);
+            stack.push(main_elem);
+            stack.push(tray_menu_to_tui(depth + 1, &item.submenu, mk_interact));
             stack.build()
         })
     }
@@ -234,10 +237,10 @@ pub async fn tray_module(
         items: &[system_tray::menu::MenuItem],
         mk_interact: &impl Fn(i32) -> tui::InteractTag,
     ) -> tui::Elem {
-        let mut stack = tui::StackBuilder::new(tui::Axis::Y);
+        let mut stack = xtui::StackBuilder::new(tui::Axis::Y);
         for item in items {
             if let Some(item) = tray_menu_item_to_tui(depth, item, mk_interact) {
-                stack.fit(item)
+                stack.push(item)
             }
         }
         stack.build()

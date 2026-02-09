@@ -1,40 +1,73 @@
 mod render;
-pub use render::*;
+pub(crate) use render::*;
 mod layout;
-pub use layout::*;
+pub(crate) use layout::*;
 mod text;
 pub use text::*;
+
+mod repr;
+use repr::*;
 
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 
-#[derive(Debug, Serialize, Deserialize)]
-enum ElemKind {
-    Print { raw: String, size: Vec2<u16> },
-    Image(Image),
-    Stack(Stack),
-    Block(Block),
-    MinSize { size: Vec2<u16>, elem: Elem },
-    Interact(InteractElem),
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InteractElem {
-    tag: InteractTag,
-    normal: Elem,
-    hovered: Option<Elem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Elem(Arc<ElemKind>);
-impl Default for Elem {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
+pub struct Elem(Arc<ElemRepr>);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct InteractTag(Arc<[u8]>);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vec2<T> {
+    pub x: T,
+    pub y: T,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Axis {
+    X,
+    Y,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum InteractKind {
+    Click(MouseButton),
+    Scroll(Direction),
+    Hover,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl<T> std::ops::Index<Axis> for Vec2<T> {
+    type Output = T;
+
+    fn index(&self, index: Axis) -> &Self::Output {
+        let Self { x, y } = self;
+        match index {
+            Axis::X => x,
+            Axis::Y => y,
+        }
+    }
+}
+impl<T> std::ops::IndexMut<Axis> for Vec2<T> {
+    fn index_mut(&mut self, index: Axis) -> &mut Self::Output {
+        let Self { x, y } = self;
+        match index {
+            Axis::X => x,
+            Axis::Y => y,
+        }
+    }
+}
 
 impl InteractTag {
     pub fn from_bytes(bytes: &[u8]) -> Self {
@@ -42,15 +75,9 @@ impl InteractTag {
     }
 }
 
-impl From<ElemKind> for Elem {
-    fn from(value: ElemKind) -> Self {
-        Self(Arc::new(value))
-    }
-}
-
 impl Elem {
     pub fn with_min_size(self, min_size: Vec2<u16>) -> Self {
-        ElemKind::MinSize {
+        ElemRepr::MinSize {
             size: min_size,
             elem: self,
         }
@@ -58,14 +85,23 @@ impl Elem {
     }
 
     pub fn empty() -> Self {
-        ElemKind::Print {
+        ElemRepr::Print {
             raw: Default::default(),
             size: Default::default(),
         }
         .into()
     }
+
+    pub fn spacing(axis: Axis, len: u16) -> Self {
+        Elem::empty().with_min_size({
+            let mut size = Vec2::default();
+            size[axis] = len;
+            size
+        })
+    }
+
     pub fn image(img: image::RgbaImage, sizing: ImageSizeMode) -> Self {
-        ElemKind::Image(Image {
+        ElemRepr::Image(ImageRepr {
             img: RgbaImageWrap(img),
             sizing,
         })
@@ -73,7 +109,7 @@ impl Elem {
     }
 
     pub fn interactive(self, tag: InteractTag) -> Self {
-        ElemKind::Interact(InteractElem {
+        ElemRepr::Interact(InteractRepr {
             tag,
             normal: self,
             hovered: None,
@@ -82,7 +118,7 @@ impl Elem {
     }
 
     pub fn interactive_hover(self, tag: InteractTag, hovered: Elem) -> Self {
-        ElemKind::Interact(InteractElem {
+        ElemRepr::Interact(InteractRepr {
             tag,
             normal: self,
             hovered: Some(hovered),
@@ -90,187 +126,125 @@ impl Elem {
         .into()
     }
 
-    pub fn build_block(init: impl FnOnce(&mut Block)) -> Self {
-        let mut builder = Block {
-            borders: Default::default(),
-            border_style: Default::default(),
-            border_set: LineSet::normal(),
-            inner: None,
-        };
-        init(&mut builder);
-        ElemKind::Block(builder).into()
+    pub fn block(opts: BlockOpts) -> Self {
+        let BlockOpts {
+            borders,
+            border_style,
+            lines: border_set,
+            inner,
+            #[expect(deprecated)]
+                __non_exhaustive_struct_update: (),
+        } = opts;
+
+        ElemRepr::Block(BlockRepr {
+            borders,
+            border_style: border_style.map(Into::into).unwrap_or_default(),
+            border_set,
+            inner,
+        })
+        .into()
     }
-    #[deprecated]
-    pub fn build_stack(axis: Axis, init: impl FnOnce(&mut StackBuilder)) -> Self {
-        let mut builder = StackBuilder::new(axis);
-        init(&mut builder);
-        builder.build()
-    }
+
     pub fn raw_print(raw: impl fmt::Display, size: Vec2<u16>) -> Self {
-        ElemKind::Print {
+        ElemRepr::Print {
             raw: raw.to_string(),
             size,
         }
         .into()
     }
-    pub fn text(plain: impl fmt::Display, opts: impl Into<TextOptions>) -> Self {
+
+    pub fn text(plain: impl fmt::Display, opts: impl Into<TextOpts>) -> Self {
         let mut writer = PlainTextWriter::with_opts(opts.into());
         fmt::write(&mut writer, format_args!("{plain}")).unwrap();
         writer.finish()
     }
+
+    pub fn stack(
+        axis: Axis,
+        items: impl IntoIterator<Item: Into<StackItem>>,
+        opts: StackOpts,
+    ) -> Self {
+        let StackOpts {
+            #[expect(deprecated)]
+                __non_exhaustive_struct_update: (),
+        } = opts;
+
+        let items = items
+            .into_iter()
+            .map(|item| {
+                let StackItem {
+                    elem,
+                    opts:
+                        StackItemOpts {
+                            fill_weight,
+                            #[expect(deprecated)]
+                                __non_exhaustive_struct_update: (),
+                        },
+                } = item.into();
+
+                StackItemRepr { fill_weight, elem }
+            })
+            .collect();
+
+        ElemRepr::Stack(StackRepr { axis, items }).into()
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct StackBuilder {
-    axis: Axis,
-    parts: Vec<StackItem>,
+pub struct StackItem {
+    pub elem: Elem,
+    pub opts: StackItemOpts,
 }
-impl StackBuilder {
-    pub fn new(axis: Axis) -> Self {
+impl From<Elem> for StackItem {
+    fn from(elem: Elem) -> Self {
         Self {
-            axis,
-            parts: Default::default(),
+            elem,
+            opts: Default::default(),
         }
     }
-    pub fn fit(&mut self, elem: Elem) {
-        self.parts.push(StackItem {
-            fill_weight: 0,
-            elem,
-        });
-    }
-    pub fn fill(&mut self, weight: u16, elem: Elem) {
-        self.parts.push(StackItem {
-            fill_weight: weight,
-            elem,
-        });
-    }
-    pub fn spacing(&mut self, len: u16) {
-        self.fit(Elem::empty().with_min_size({
-            let mut size = Vec2::default();
-            size[self.axis] = len;
-            size
-        }));
-    }
-    pub fn build(self) -> Elem {
-        let Self { axis, parts } = self;
-        ElemKind::Stack(Stack { axis, parts }).into()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.parts.is_empty()
-    }
-    pub fn delete_last(&mut self) {
-        self.parts.pop();
-    }
 }
-
-impl From<Stack> for Elem {
-    fn from(value: Stack) -> Self {
-        ElemKind::Stack(value).into()
-    }
+#[derive(Default, Debug, Clone)]
+pub struct StackItemOpts {
+    pub fill_weight: u16,
+    // TODO: Spacing
+    #[deprecated = warn_non_exhaustive!()]
+    #[doc(hidden)]
+    pub __non_exhaustive_struct_update: (),
+}
+#[derive(Default, Debug, Clone)]
+pub struct StackOpts {
+    #[deprecated = warn_non_exhaustive!()]
+    #[doc(hidden)]
+    // TODO: Spacing
+    pub __non_exhaustive_struct_update: (),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ImageSizeMode {
     FillAxis(Axis, u16),
 }
 
-mod image_serialize {
-    use std::borrow::Cow;
-
-    use super::RgbaImageWrap;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize)]
-    pub struct RgbaImageDefer<'a> {
-        width: u32,
-        height: u32,
-        buf: Cow<'a, [u8]>,
-    }
-
-    impl Serialize for RgbaImageWrap {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            RgbaImageDefer {
-                width: self.width(),
-                height: self.height(),
-                buf: self.as_raw().into(),
-            }
-            .serialize(serializer)
-        }
-    }
-    impl<'de> Deserialize<'de> for RgbaImageWrap {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            let RgbaImageDefer { width, height, buf } = Deserialize::deserialize(deserializer)?;
-            image::RgbaImage::from_raw(width, height, buf.into())
-                .ok_or_else(|| {
-                    serde::de::Error::custom("Image buffer is smaller than image dimensions")
-                })
-                .map(Self)
-        }
-    }
-}
-struct RgbaImageWrap(image::RgbaImage);
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Image {
-    img: RgbaImageWrap,
-    sizing: ImageSizeMode,
-}
-
-impl std::ops::Deref for RgbaImageWrap {
-    type Target = image::RgbaImage;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl fmt::Debug for RgbaImageWrap {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RgbaImage")
-            .field("width", &self.width())
-            .field("height", &self.height())
-            .field("hash", &{
-                let mut hasher = std::hash::DefaultHasher::new();
-                std::hash::Hasher::write(&mut hasher, &self.0);
-                std::hash::Hasher::finish(&hasher)
-            })
-            .finish()
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Block {
-    pub borders: Borders,
-    pub border_style: Option<Style>,
-    pub border_set: LineSet,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BlockOpts {
+    pub borders: BlockBorders,
+    pub border_style: Option<TextStyle>,
+    pub lines: BlockLineSet,
     pub inner: Option<Elem>,
-}
-impl Block {
-    pub fn set_borders_at(&mut self, borders: Borders) {
-        self.borders = borders;
-    }
-    pub fn set_style(&mut self, style: Style) {
-        self.border_style = Some(style);
-    }
-    pub fn set_lines(&mut self, lines: LineSet) {
-        self.border_set = lines;
-    }
-    pub fn set_inner(&mut self, inner: Elem) {
-        self.inner = Some(inner);
-    }
+
+    #[deprecated = warn_non_exhaustive!()]
+    #[doc(hidden)]
+    pub __non_exhaustive_struct_update: (),
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Borders {
+pub struct BlockBorders {
     pub top: bool,
     pub bottom: bool,
     pub left: bool,
     pub right: bool,
 }
-impl Borders {
+impl BlockBorders {
     pub fn all() -> Self {
         Self {
             top: true,
@@ -281,25 +255,16 @@ impl Borders {
     }
 }
 
+// TODO: Decide on the internals of LineSet.
+// Currently only single-width strings work
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Stack {
-    axis: Axis,
-    parts: Vec<StackItem>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StackItem {
-    fill_weight: u16,
-    elem: Elem,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LineSet {
-    pub vertical: Arc<str>,
-    pub horizontal: Arc<str>,
-    pub top_right: Arc<str>,
-    pub top_left: Arc<str>,
-    pub bottom_right: Arc<str>,
-    pub bottom_left: Arc<str>,
+pub struct BlockLineSet {
+    vertical: Arc<str>,
+    horizontal: Arc<str>,
+    top_right: Arc<str>,
+    top_left: Arc<str>,
+    bottom_right: Arc<str>,
+    bottom_left: Arc<str>,
 }
 
 macro_rules! lazy_str {
@@ -311,7 +276,12 @@ macro_rules! lazy_str {
     }};
 }
 
-impl LineSet {
+impl Default for BlockLineSet {
+    fn default() -> Self {
+        Self::normal()
+    }
+}
+impl BlockLineSet {
     pub fn normal() -> Self {
         Self {
             vertical: lazy_str!("│"),

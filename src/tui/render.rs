@@ -14,14 +14,13 @@ pub(super) struct RenderCtx<'a, W> {
     layout: &'a mut RenderedLayout,
 }
 #[derive(Debug, Clone)]
-pub struct SizingArgs {
+pub(crate) struct SizingArgs {
     pub font_size: Vec2<u16>,
 }
-
-pub fn calc_min_size(elem: &Elem, args: &SizingArgs) -> Vec2<u16> {
+pub(crate) fn calc_min_size(elem: &Elem, args: &SizingArgs) -> Vec2<u16> {
     elem.calc_min_size(args)
 }
-pub fn render(
+pub(crate) fn render(
     elem: &Elem,
     area: Area,
     writer: &mut impl Write,
@@ -59,7 +58,7 @@ impl Render for Elem {
         self.0.calc_min_size(args)
     }
 }
-impl Render for ElemKind {
+impl Render for ElemRepr {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         crossterm::queue!(
             ctx.writer,
@@ -108,7 +107,7 @@ impl Render for ElemKind {
     }
 }
 
-impl Image {
+impl ImageRepr {
     // Aspect ratio of the image in cells
     fn img_cell_ratio(&self, sizing: &SizingArgs) -> f64 {
         let Vec2 {
@@ -154,7 +153,7 @@ impl Image {
         }
     }
 }
-impl Render for Image {
+impl Render for ImageRepr {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let img_cell_ratio = self.img_cell_ratio(ctx.sizing);
         let (fill_axis, fill_axis_len) = Self::max_fit_to_fill_axis(area.size, img_cell_ratio);
@@ -204,12 +203,12 @@ impl Render for Image {
         }
     }
 }
-impl Render for Stack {
+impl Render for StackRepr {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
-        let mut lens = Vec::with_capacity(self.parts.len());
+        let mut lens = Vec::with_capacity(self.items.len());
         let mut total_weight = 0u64;
         let mut rem_len = Some(area.size[self.axis]);
-        for part in self.parts.iter() {
+        for part in self.items.iter() {
             total_weight += u64::from(part.fill_weight);
             let len = part.elem.calc_min_size(ctx.sizing)[self.axis];
             if let Some(rlen) = rem_len {
@@ -217,7 +216,7 @@ impl Render for Stack {
             }
             lens.push(len)
         }
-        assert_eq!(lens.len(), self.parts.len());
+        assert_eq!(lens.len(), self.items.len());
 
         let tot_fill_len = rem_len.unwrap_or_else(|| {
             log::warn!("Stack does not fit into {area:?}: {self:?}");
@@ -227,7 +226,7 @@ impl Render for Stack {
         if total_weight > 0 {
             let mut rem_fill_len = tot_fill_len;
 
-            for (part, len) in self.parts.iter().zip(&mut lens) {
+            for (part, len) in self.items.iter().zip(&mut lens) {
                 let extra_len = u16::try_from(
                     u64::from(tot_fill_len) * u64::from(part.fill_weight) / total_weight,
                 )
@@ -242,7 +241,7 @@ impl Render for Stack {
             }
             if rem_fill_len > 0 {
                 let mut fills: Vec<_> = self
-                    .parts
+                    .items
                     .iter()
                     .zip(&mut lens)
                     .filter_map(|(part, len)| {
@@ -257,7 +256,7 @@ impl Render for Stack {
         }
 
         let mut offset = 0;
-        for (part, len) in self.parts.iter().zip(lens) {
+        for (part, len) in self.items.iter().zip(lens) {
             let mut subarea = area;
             subarea.size[self.axis] = len;
             subarea.pos[self.axis] += offset;
@@ -272,7 +271,7 @@ impl Render for Stack {
 
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         let mut tot = Vec2::default();
-        for part in self.parts.iter() {
+        for part in self.items.iter() {
             let size = part.elem.calc_min_size(args);
 
             tot[self.axis] = size[self.axis].saturating_add(tot[self.axis]);
@@ -282,16 +281,31 @@ impl Render for Stack {
         tot
     }
 }
-impl Render for Block {
+impl Render for BlockRepr {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
-        let Borders {
+        let Self {
+            borders,
+            border_style,
+            border_set:
+                BlockLineSet {
+                    vertical,
+                    horizontal,
+                    top_right,
+                    top_left,
+                    bottom_right,
+                    bottom_left,
+                },
+            inner,
+        } = self;
+
+        let BlockBorders {
             top,
             bottom,
             left,
             right,
-        } = self.borders;
+        } = *borders;
 
-        if let Some(inner) = &self.inner {
+        if let Some(inner) = inner {
             inner.render(
                 ctx,
                 Area {
@@ -307,35 +321,21 @@ impl Render for Block {
             )?;
         }
 
-        fn apply_opt_style(style: Option<&Style>, d: impl fmt::Display) -> impl fmt::Display {
-            fmt::from_fn(move |f| {
-                if let Some(style) = style {
-                    style.begin(f)?;
-                }
-                write!(f, "{d}")?;
-                if let Some(style) = style {
-                    style.end(f)?;
+        let mut horiz_border = |l: &str, r: &str, y: u16| {
+            let m = border_style.apply(fmt::from_fn(|f| {
+                for _ in 0..area
+                    .size
+                    .x
+                    .saturating_sub(left.into())
+                    .saturating_sub(right.into())
+                {
+                    write!(f, "{horizontal}")?;
                 }
                 Ok(())
-            })
-        }
-        let mut horiz_border = |l: &str, r: &str, y: u16| {
-            let m = apply_opt_style(
-                self.border_style.as_ref(),
-                fmt::from_fn(|f| {
-                    for _ in 0..area
-                        .size
-                        .x
-                        .saturating_sub(left.into())
-                        .saturating_sub(right.into())
-                    {
-                        write!(f, "{}", self.border_set.horizontal)?;
-                    }
-                    Ok(())
-                }),
-            );
-            let l = apply_opt_style(self.border_style.as_ref(), if left { l } else { "" });
-            let r = apply_opt_style(self.border_style.as_ref(), if right { r } else { "" });
+            }));
+
+            let l = border_style.apply(if left { l } else { "" });
+            let r = border_style.apply(if right { r } else { "" });
 
             crossterm::queue!(
                 ctx.writer,
@@ -344,18 +344,10 @@ impl Render for Block {
             )
         };
         if top {
-            horiz_border(
-                &self.border_set.top_left,
-                &self.border_set.top_right,
-                area.pos.y,
-            )?;
+            horiz_border(top_left, top_right, area.pos.y)?;
         }
         if bottom {
-            horiz_border(
-                &self.border_set.bottom_left,
-                &self.border_set.bottom_right,
-                area.y_bottom(),
-            )?;
+            horiz_border(bottom_left, bottom_right, area.y_bottom())?;
         }
         let mut vert_border = |x: u16| -> std::io::Result<()> {
             let lo = area.pos.y.saturating_add(top.into());
@@ -368,10 +360,7 @@ impl Render for Block {
                 crossterm::queue!(
                     ctx.writer,
                     crossterm::cursor::MoveTo(x, y),
-                    crossterm::style::Print(apply_opt_style(
-                        self.border_style.as_ref(),
-                        &self.border_set.vertical as &str
-                    )),
+                    crossterm::style::Print(border_style.apply(vertical as &str)),
                 )?;
             }
             Ok(())
@@ -398,9 +387,9 @@ impl Render for Block {
         size
     }
 }
-impl Block {
+impl BlockRepr {
     fn extra_dim(&self) -> Vec2<u16> {
-        let Borders {
+        let BlockBorders {
             top,
             bottom,
             left,
@@ -410,5 +399,14 @@ impl Block {
             x: u16::from(left) + u16::from(right),
             y: u16::from(top) + u16::from(bottom),
         }
+    }
+}
+impl StyleRepr {
+    fn apply(&self, d: impl fmt::Display) -> impl fmt::Display {
+        let Self {
+            begin: open,
+            end: close,
+        } = self;
+        fmt::from_fn(move |f| write!(f, "{open}{d}{close}"))
     }
 }

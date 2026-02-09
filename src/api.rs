@@ -33,10 +33,10 @@ impl From<SetBarTui> for BarUpdate {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SetBarTui {
     pub tui: tui::Elem,
-    pub options: SetBarTuiOptions,
+    pub options: SetBarTuiOpts,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SetBarTuiOptions {
+pub struct SetBarTuiOpts {
     #[doc(hidden)]
     #[deprecated = warn_non_exhaustive!()]
     pub __non_exhaustive_struct_update: (),
@@ -54,10 +54,10 @@ pub struct RegisterMenu {
     pub on_kind: tui::InteractKind,
     pub tui: tui::Elem,
     pub menu_kind: MenuKind,
-    pub options: RegisterMenuOptions,
+    pub options: RegisterMenuOpts,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct RegisterMenuOptions {
+pub struct RegisterMenuOpts {
     // TODO: Option on whether to apply update to already open tui
     // TODO: Option to set font size of menu / other options temporarily / run commands when menu is shown / hidden?
     #[doc(hidden)]
