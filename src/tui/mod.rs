@@ -2,8 +2,10 @@ mod render;
 pub use render::*;
 mod layout;
 pub use layout::*;
-use serde::{Deserialize, Serialize};
+mod text;
+pub use text::*;
 
+use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,28 +117,6 @@ impl Elem {
         let mut writer = PlainTextWriter::with_opts(opts.into());
         fmt::write(&mut writer, format_args!("{plain}")).unwrap();
         writer.finish()
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct TextOptions {
-    pub style: Option<Style>,
-    //pub sizing: Option<KittyTextSize>,
-    #[deprecated = warn_non_exhaustive!()]
-    #[doc(hidden)]
-    pub __non_exhaustive_struct_update: (),
-}
-impl From<Style> for TextOptions {
-    fn from(value: Style) -> Self {
-        Self {
-            style: Some(value),
-            ..Default::default()
-        }
-    }
-}
-impl From<Modifiers> for TextOptions {
-    fn from(value: Modifiers) -> Self {
-        Style::from(value).into()
     }
 }
 
@@ -310,65 +290,6 @@ struct Stack {
 struct StackItem {
     fill_weight: u16,
     elem: Elem,
-}
-
-// FIXME: Remove serialize, convert to Print
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct Style {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub modifiers: Option<Modifiers>,
-    pub underline_color: Option<Color>,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
-}
-impl From<Modifiers> for Style {
-    fn from(modifier: Modifiers) -> Self {
-        Self {
-            modifiers: Some(modifier),
-            ..Default::default()
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum Color {
-    Reset,
-    Black,
-    DarkGrey,
-    Red,
-    DarkRed,
-    Green,
-    DarkGreen,
-    Yellow,
-    DarkYellow,
-    Blue,
-    DarkBlue,
-    Magenta,
-    DarkMagenta,
-    Cyan,
-    DarkCyan,
-    White,
-    Grey,
-    Rgb { r: u8, g: u8, b: u8 },
-    AnsiValue(u8),
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct Modifiers {
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub hidden: bool,
-    pub strike: bool,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

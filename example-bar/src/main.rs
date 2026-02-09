@@ -2,8 +2,9 @@ extern crate bar_panel_controller as ctrl;
 
 mod clients;
 mod desktop;
-mod runner;
+mod driver;
 mod utils;
+mod xtui;
 
 fn main() -> std::process::ExitCode {
     main_inner().unwrap_or(std::process::ExitCode::FAILURE)
@@ -26,7 +27,7 @@ fn main_inner() -> Option<std::process::ExitCode> {
 
     let mut required_tasks = tokio::task::JoinSet::new();
 
-    required_tasks.spawn(async move { Some(runner::main(ctrl_upd_tx, ctrl_ev_rx).await) });
+    required_tasks.spawn(async move { Some(driver::driver_main(ctrl_upd_tx, ctrl_ev_rx).await) });
     required_tasks.spawn(async move {
         ctrl::api::run_driver_connection(
             move |ev| ctrl_ev_tx.send(ev).ok(),

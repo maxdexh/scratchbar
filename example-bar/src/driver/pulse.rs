@@ -1,0 +1,84 @@
+use std::sync::Arc;
+
+use crate::{
+    clients,
+    driver::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
+    utils::ResultExt as _,
+};
+use ctrl::tui;
+
+pub struct PulseModuleCtx {
+    pub pulse: Arc<clients::pulse::PulseClient>,
+    pub device_kind: clients::pulse::PulseDeviceKind,
+    pub muted_sym: tui::Elem,
+    pub unmuted_sym: tui::Elem,
+}
+pub async fn pulse_module(
+    PulseModuleCtx {
+        pulse,
+        device_kind,
+        muted_sym,
+        unmuted_sym,
+    }: PulseModuleCtx,
+    ModuleArgs {
+        tui_tx,
+        tag_callback_tx,
+        ..
+    }: ModuleArgs,
+) {
+    use crate::clients::pulse::*;
+
+    let mut state_rx = pulse.state_rx.clone();
+
+    let on_interact = interact_callback_with(pulse.clone(), move |pulse, interact| {
+        pulse
+            .update_tx
+            .send(PulseUpdate {
+                target: device_kind,
+                kind: match interact.kind {
+                    tui::InteractKind::Click(tui::MouseButton::Left) => PulseUpdateKind::ToggleMute,
+                    tui::InteractKind::Click(tui::MouseButton::Right) => {
+                        PulseUpdateKind::ResetVolume
+                    }
+                    tui::InteractKind::Scroll(direction) => PulseUpdateKind::VolumeDelta(
+                        2 * match direction {
+                            tui::Direction::Up => 1,
+                            tui::Direction::Down => -1,
+                            tui::Direction::Left => -1,
+                            tui::Direction::Right => 1,
+                        },
+                    ),
+                    _ => return,
+                },
+            })
+            .ok_or_log();
+    });
+
+    let interact_tag = mk_fresh_interact_tag();
+    tag_callback_tx
+        .send((interact_tag.clone(), Some(on_interact)))
+        .ok_or_log();
+
+    while let Some(()) = state_rx.changed().await.ok_or_debug() {
+        let state = state_rx.borrow_and_update();
+        let &PulseDeviceState { volume, muted, .. } = match device_kind {
+            PulseDeviceKind::Sink => &state.sink,
+            PulseDeviceKind::Source => &state.source,
+        };
+        drop(state);
+
+        tui_tx.send_replace(BarTuiElem::Shared({
+            let mut stack = tui::StackBuilder::new(tui::Axis::X);
+            stack.fit(if muted {
+                muted_sym.clone()
+            } else {
+                unmuted_sym.clone()
+            });
+            stack.fit(tui::Elem::text(
+                format!("{:>3}%", (volume * 100.0).round() as u32),
+                tui::TextOptions::default(),
+            ));
+            stack.build().interactive(interact_tag.clone())
+        }));
+    }
+}

@@ -286,13 +286,17 @@ pub struct PulseClient {
     pub update_tx: tokio::sync::mpsc::UnboundedSender<PulseUpdate>,
     _background: AbortOnDropHandle<()>,
 }
-pub fn connect(reload_rx: ReloadRx) -> PulseClient {
-    let (state_tx, state_rx) = watch::channel(Default::default());
-    let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
-    PulseClient {
-        _background: AbortOnDropHandle::new(tokio::spawn(run_bg(state_tx, update_rx, reload_rx))),
-        state_rx,
-        update_tx,
+impl PulseClient {
+    pub fn connect(reload_rx: ReloadRx) -> Self {
+        let (state_tx, state_rx) = watch::channel(Default::default());
+        let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            _background: AbortOnDropHandle::new(tokio::spawn(run_bg(
+                state_tx, update_rx, reload_rx,
+            ))),
+            state_rx,
+            update_tx,
+        }
     }
 }
 
