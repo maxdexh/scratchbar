@@ -77,8 +77,6 @@ pub fn init_logger(log_name: String) {
     }
 }
 
-// FIXME: Move most of this function to controller and mgr respectively?
-// I.e. only keep the formatter around in common
 fn try_init_logger() -> anyhow::Result<()> {
     use flexi_logger::*;
 

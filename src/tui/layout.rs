@@ -69,6 +69,7 @@ pub(crate) struct MouseEventResult {
     pub empty: bool,
     pub changed: bool,
     pub rerender: bool,
+    pub has_hover: bool,
     pub pix_location: Vec2<u32>,
 }
 
@@ -125,6 +126,7 @@ impl RenderedLayout {
                 kind,
                 empty: true,
                 tag: None,
+                has_hover: false,
                 pix_location: Vec2 {
                     x: u32::from(pos.x) * font_w,
                     y: u32::from(pos.y) * font_h,
@@ -153,6 +155,7 @@ impl RenderedLayout {
             empty: false,
             changed,
             rerender,
+            has_hover: elem.has_hover,
             pix_location,
         }
     }

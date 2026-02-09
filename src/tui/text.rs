@@ -4,7 +4,7 @@ use crate::tui::*;
 pub struct TextOpts {
     pub style: Option<TextStyle>,
     pub trim_trailing_line: bool,
-    //pub sizing: Option<KittyTextSize>,
+    // TODO: Sizing support
     #[deprecated = warn_non_exhaustive!()]
     #[doc(hidden)]
     pub __non_exhaustive_struct_update: (),
@@ -154,7 +154,9 @@ impl PlainTextWriter {
     fn finish_line(&mut self) {
         let (open, content) = self.cur_line.split_at(self.style_content_offset);
 
-        let content_width = unicode_width::UnicodeWidthStr::width(content);
+        let content_width = unicode_width::UnicodeWidthStr::width(content)
+            .try_into()
+            .unwrap_or(u16::MAX);
 
         let mut line = {
             let open = open.into();
@@ -169,7 +171,7 @@ impl PlainTextWriter {
             elem: ElemRepr::Print {
                 raw: line,
                 size: Vec2 {
-                    x: content_width.try_into().unwrap_or(u16::MAX),
+                    x: content_width,
                     y: 1,
                 },
             }

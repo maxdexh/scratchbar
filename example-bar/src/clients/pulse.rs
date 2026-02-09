@@ -250,7 +250,6 @@ async fn run_updater(mut update_rx: tokio::sync::mpsc::UnboundedReceiver<PulseUp
             it
         };
         let output = match kind {
-            // FIXME: Task pooling/buffer_unordered
             PulseUpdateKind::VolumeDelta(vol_delta) => {
                 pactl()
                     .args([set_vol_cmd, device_name, &format!("{vol_delta:+}%")])

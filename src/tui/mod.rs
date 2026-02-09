@@ -162,12 +162,12 @@ impl Elem {
     pub fn stack(
         axis: Axis,
         items: impl IntoIterator<Item: Into<StackItem>>,
-        opts: StackOpts,
+        opts: impl Into<StackOpts>,
     ) -> Self {
         let StackOpts {
             #[expect(deprecated)]
                 __non_exhaustive_struct_update: (),
-        } = opts;
+        } = opts.into();
 
         let items = items
             .into_iter()

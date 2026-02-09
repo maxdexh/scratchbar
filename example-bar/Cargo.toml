@@ -18,7 +18,6 @@ hyprland = { version = "0.4.0-beta.3", features = [
     "listener",
 ], default-features = false }
 log = "0.4.29"
-flexi_logger = "0.31.7"
 serde = { version = "1.0.228", features = ["rc"] }
 zbus = "5.13.2"
 libpulse-binding = "2.30.1"

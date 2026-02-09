@@ -6,6 +6,23 @@ pub fn tui_center_symbol(sym: impl std::fmt::Display, width: u16) -> tui::Elem {
         tui::Vec2 { x: width, y: 1 },
     )
 }
+pub fn underline_hovered(
+    text: impl std::fmt::Display,
+    base: impl Into<tui::TextOpts>,
+    tag: tui::InteractTag,
+) -> tui::Elem {
+    let opts = base.into();
+
+    let mut hovered_opts = opts.clone();
+    hovered_opts
+        .style
+        .get_or_insert_default()
+        .modifiers
+        .get_or_insert_default()
+        .underline = true;
+
+    tui::Elem::text(&text, opts).interactive_hover(tag, tui::Elem::text(&text, hovered_opts))
+}
 
 #[derive(Clone, Debug)]
 pub struct StackBuilder {

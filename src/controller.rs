@@ -387,6 +387,7 @@ async fn run_monitor_main(
                         empty,
                         changed,
                         rerender,
+                        has_hover,
                         pix_location,
                     } = layout.interpret_mouse_event(ev, env.bar.sizes.font_size());
                     let is_hover = kind == tui::InteractKind::Hover;
@@ -399,7 +400,6 @@ async fn run_monitor_main(
                         rerender_menu = true;
                     }
 
-                    // FIXME: Forcibly open menu for on bar hover if none is available
                     if rerender {
                         match term_kind {
                             TermKind::Menu => rerender_menu = true,
@@ -408,36 +408,49 @@ async fn run_monitor_main(
                     }
 
                     if changed || !is_hover {
-                        if empty
-                            && term_kind == TermKind::Bar
-                            && let Some(menu) = &show_menu
-                            && (!is_hover || matches!(&menu.kind, api::MenuKind::Tooltip))
-                        {
-                            show_menu = None;
-                            rerender_menu = true;
-                        }
+                        if term_kind == TermKind::Bar {
+                            if empty
+                                && let Some(menu) = &show_menu
+                                && (!is_hover || matches!(&menu.kind, api::MenuKind::Tooltip))
+                            {
+                                show_menu = None;
+                                rerender_menu = true;
+                            }
 
-                        if let Some(tag) = tag.as_ref()
-                            && let Some(menu) = bar_menus_rx
-                                .borrow()
-                                .get(tag)
-                                .and_then(|tag_menus| tag_menus.get(&kind))
-                                .cloned()
-                        {
-                            let sizing = tui::SizingArgs {
-                                font_size: env.menu.sizes.font_size(),
-                            };
-                            // FIXME: remember receiver (Also update on change of bar_menus_rx)
-                            // Use a seperate task for the menu to do this
-                            let tui = menu.borrow().tui.clone();
-                            show_menu = Some(ShowMenu {
-                                cached_size: tui::calc_min_size(&tui, &sizing),
-                                sizing,
-                                tui,
-                                kind: menu.borrow().kind.internal_clone(),
-                                pix_location,
+                            let mut menu = tag.as_ref().and_then(|tag| {
+                                bar_menus_rx
+                                    .borrow()
+                                    .get(tag)
+                                    .and_then(|tag_menus| tag_menus.get(&kind))
+                                    .cloned()
                             });
-                            rerender_menu = true;
+                            // If the element has a hovered version, then it needs to have a menu,
+                            // since we have no way to tell when the bar loses focus.
+                            // TODO: This is not necessary if the bar has focus-policy=on-demand,
+                            // but that is currently not supported.
+                            if has_hover && menu.is_none() {
+                                menu = Some(watch::Sender::new(BarMenu {
+                                    kind: api::MenuKind::Tooltip,
+                                    tui: tui::Elem::empty().with_min_size(tui::Vec2 { x: 1, y: 1 }),
+                                }));
+                            }
+
+                            if let Some(menu) = menu {
+                                let sizing = tui::SizingArgs {
+                                    font_size: env.menu.sizes.font_size(),
+                                };
+                                // FIXME: remember receiver (Also update on change of bar_menus_rx)
+                                // Use a seperate task for the menu to do this
+                                let tui = menu.borrow().tui.clone();
+                                show_menu = Some(ShowMenu {
+                                    cached_size: tui::calc_min_size(&tui, &sizing),
+                                    sizing,
+                                    tui,
+                                    kind: menu.borrow().kind.internal_clone(),
+                                    pix_location,
+                                });
+                                rerender_menu = true;
+                            }
                         }
 
                         if let Some(tag) = tag {

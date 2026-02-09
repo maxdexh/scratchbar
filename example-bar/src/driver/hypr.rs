@@ -32,21 +32,13 @@ pub async fn hypr_module(
 
             let (_, (tui, tui_active)) = ws_reg.get_or_init(&ws.id, |tag| {
                 let mk = |fg| {
-                    let mk2 = |style| tui::Elem::text(ws.name.clone(), style);
-                    mk2(tui::TextStyle {
-                        fg: Clone::clone(&fg),
-                        ..Default::default()
-                    })
-                    .interactive_hover(
-                        tag.clone(),
-                        mk2(tui::TextStyle {
-                            fg,
-                            modifiers: Some(tui::TextModifiers {
-                                underline: true,
-                                ..Default::default()
-                            }),
+                    xtui::underline_hovered(
+                        &ws.name,
+                        tui::TextStyle {
+                            fg: Clone::clone(&fg),
                             ..Default::default()
-                        }),
+                        },
+                        tag.clone(),
                     )
                 };
 
