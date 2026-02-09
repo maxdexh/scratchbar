@@ -83,10 +83,11 @@ pub struct TextModifiers {
 }
 
 pub(crate) struct PlainTextWriter {
+    opts: TextOpts,
     lines: Vec<StackItemRepr>,
     cur_line: String,
-    content_offset: usize,
-    opts: TextOpts,
+    style_content_offset: usize,
+    ignore_lf: bool,
 }
 impl TextStyle {
     pub(crate) fn begin(&self, f: &mut impl fmt::Write) -> fmt::Result {
@@ -151,7 +152,7 @@ impl TextStyle {
 }
 impl PlainTextWriter {
     fn finish_line(&mut self) {
-        let (open, content) = self.cur_line.split_at(self.content_offset);
+        let (open, content) = self.cur_line.split_at(self.style_content_offset);
 
         let content_width = unicode_width::UnicodeWidthStr::width(content);
 
@@ -184,19 +185,35 @@ impl PlainTextWriter {
         })
         .into()
     }
-    pub fn push_str(&mut self, s: &str) {
-        // FIXME: ESCAPE
-        // TODO: Implement handling for \r\n (requires remembering whether
-        // last char was \r).
-        // NOTE: We want this method to be invariant to splitting the string,
-        // which is not possible with str::lines(), since it ignores trailing empty lines.
-        let mut lines = s.split('\n');
-        if let Some(ext_cur) = lines.next() {
-            self.cur_line.push_str(ext_cur);
+    pub fn push_str(&mut self, mut s: &str) {
+        if self.ignore_lf && s.bytes().next() == Some(b'\n') {
+            s = &s[1..];
         }
-        for new_line in lines {
-            self.finish_line();
-            self.cur_line.push_str(new_line);
+
+        self.cur_line.reserve(s.len());
+        while let Some((chunk, rest)) = s.split_once(|c: char| c.is_ascii_control()) {
+            let control = s.as_bytes()[chunk.len()];
+            s = rest;
+
+            self.cur_line.push_str(chunk);
+
+            let ignore_lf = std::mem::replace(&mut self.ignore_lf, false);
+            match control {
+                b'\r' => {
+                    self.finish_line();
+                    self.ignore_lf = true;
+                }
+                b'\n' => {
+                    if !ignore_lf || !chunk.is_empty() {
+                        self.finish_line();
+                    }
+                }
+                _ => self.cur_line.push('�'),
+            }
+        }
+        self.cur_line.push_str(s);
+        if !s.is_empty() {
+            self.ignore_lf = false;
         }
     }
     pub fn with_opts(opts: TextOpts) -> Self {
@@ -205,10 +222,11 @@ impl PlainTextWriter {
             style.begin(&mut cur_line).unwrap();
         }
         Self {
-            content_offset: cur_line.len(),
+            style_content_offset: cur_line.len(),
             cur_line,
             opts,
             lines: Vec::new(),
+            ignore_lf: false,
         }
     }
 }
