@@ -35,3 +35,10 @@ serde_json = { version = "1.0.149", features = ["raw_value"] }
 base64 = "0.22.1"
 tokio-util = { version = "0.7.18", features = ["rt", "time"] }
 unicode-width = "0.2.2"
+
+[[bin]]
+name = "bar-panel-controller"
+required-features = ["__bin"]
+
+[features]
+__bin = []

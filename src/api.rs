@@ -70,6 +70,7 @@ pub enum MenuKind {
     Tooltip,
     Context,
 }
+#[cfg(feature = "__bin")]
 impl MenuKind {
     pub(crate) fn internal_clone(&self) -> Self {
         match self {
@@ -94,27 +95,23 @@ pub struct InteractEvent {
 }
 
 pub struct Error(anyhow::Error);
-const _: () = {
-    use std::fmt;
-
-    impl fmt::Debug for Error {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            fmt::Debug::fmt(&self.0, f)
-        }
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
     }
-    impl fmt::Display for Error {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            fmt::Debug::fmt(&self.0, f)
-        }
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
     }
-    impl std::error::Error for Error {}
-};
+}
+impl std::error::Error for Error {}
 
 pub async fn run_driver_connection(
     tx: impl Fn(ControllerEvent) -> Option<()> + 'static + Send,
     rx: impl AsyncFnMut() -> Option<ControllerUpdate> + 'static + Send,
 ) -> Result<(), Error> {
-    let sock_path = std::env::var_os(crate::controller::CONTROLLER_SOCK_PATH_VAR)
+    let sock_path = std::env::var_os(crate::driver_ipc::CONTROLLER_SOCK_PATH_VAR)
         .context("Missing socket path env var")
         .map_err(Error)?;
     let socket = std::os::unix::net::UnixStream::connect(sock_path)

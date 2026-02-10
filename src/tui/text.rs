@@ -90,10 +90,8 @@ impl PlainTextWriter {
         self.lines.push(StackItemRepr {
             elem: ElemRepr::Print {
                 raw: line,
-                size: Vec2 {
-                    x: content_width,
-                    y: 1,
-                },
+                width: content_width,
+                height: 1,
             }
             .into(),
             fill_weight: 0,

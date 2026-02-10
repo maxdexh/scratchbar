@@ -117,7 +117,9 @@ impl BlockBorders {
 
 // TODO: Decide on the internals of LineSet. Currently only single-width strings work
 // It would be cool if we could make multi-character borders work, e.g. to use
-// alternating +=+=+=+ borders,
+// alternating +=+=+=+ borders. Ideally, ElemRepr would have a Fill variant that
+// just fills whatever area it is rendered to with some symbols. Then we can represent
+// blocks as stacks and fills.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockLineSet {
     pub(crate) vertical: Arc<str>,
@@ -239,7 +241,8 @@ pub struct Elem(pub(crate) Arc<ElemRepr>);
 impl Elem {
     pub fn with_min_size(self, min_size: Size) -> Self {
         ElemRepr::MinSize {
-            size: min_size.into(),
+            width: min_size.width,
+            height: min_size.height,
             elem: self,
         }
         .into()
@@ -248,7 +251,8 @@ impl Elem {
     pub fn empty() -> Self {
         ElemRepr::Print {
             raw: Default::default(),
-            size: Default::default(),
+            width: 0,
+            height: 0,
         }
         .into()
     }
@@ -309,7 +313,8 @@ impl Elem {
     pub fn raw_print(raw: impl fmt::Display, size: Size) -> Self {
         ElemRepr::Print {
             raw: raw.to_string(),
-            size: size.into(),
+            width: size.width,
+            height: size.height,
         }
         .into()
     }

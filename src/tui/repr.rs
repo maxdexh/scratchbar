@@ -6,8 +6,16 @@ use crate::tui::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum ElemRepr {
-    Print { raw: String, size: Vec2<u16> },
-    MinSize { size: Vec2<u16>, elem: Elem },
+    Print {
+        raw: String,
+        width: u16,
+        height: u16,
+    },
+    MinSize {
+        elem: Elem,
+        width: u16,
+        height: u16,
+    },
     Image(ImageRepr),
     Stack(StackRepr),
     Block(BlockRepr),

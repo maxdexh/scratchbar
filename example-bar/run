@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 if [[ -v NO_DEBUG ]]; then
-  profile=()
+    profile=()
 else
-  profile="--debug"
+    profile="--debug"
 fi
 
 cd -- "$(dirname "$0")/.."
 
 PATH="$PWD/target/installdir/bin:$PATH"
-cargo install $profile --offline --path . --root target/installdir "$@" || exit 1
+cargo install $profile --offline --path . --root target/installdir --features=__bin "$@" || exit 1
 cargo install $profile --offline --path ./example-bar --root target/installdir "$@" || exit 1
 bar-panel-controller example-bar

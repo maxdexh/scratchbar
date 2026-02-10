@@ -918,7 +918,6 @@ async fn try_init_monitor(
     })
 }
 
-pub(crate) const CONTROLLER_SOCK_PATH_VAR: &str = "BAR_INTERNAL_SOCK_PATH";
 pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
     use std::process::ExitCode;
 
@@ -945,7 +944,7 @@ pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
         let child = tokio::process::Command::new(driver)
             .kill_on_drop(true)
             .args(std::env::args_os().skip(2))
-            .env(CONTROLLER_SOCK_PATH_VAR, sock_path)
+            .env(crate::driver_ipc::CONTROLLER_SOCK_PATH_VAR, sock_path)
             .spawn()
             .ok_or_log()?;
 

@@ -9,13 +9,19 @@ macro_rules! warn_non_exhaustive {
 pub mod api;
 pub mod tui;
 
-mod controller;
-mod inst;
+mod driver_ipc;
 mod logging;
-mod monitors;
 mod utils;
 
+#[cfg(feature = "__bin")]
+mod controller;
+#[cfg(feature = "__bin")]
+mod inst;
+#[cfg(feature = "__bin")]
+mod monitors;
+
 #[doc(hidden)]
+#[cfg(feature = "__bin")]
 pub fn __main() -> std::process::ExitCode {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(crate::inst::INTERNAL_INST_ARG))

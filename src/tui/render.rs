@@ -100,8 +100,21 @@ impl Render for ElemRepr {
             Self::Stack(subdiv) => subdiv.calc_min_size(args),
             Self::Image(image) => image.calc_min_size(args),
             Self::Block(block) => block.calc_min_size(args),
-            Self::Print { size, .. } => *size,
-            Self::MinSize { size, elem } => elem.calc_min_size(args).combine(*size, std::cmp::max),
+            &Self::Print { width, height, .. } => Vec2 {
+                x: width,
+                y: height,
+            },
+            &Self::MinSize {
+                width,
+                height,
+                ref elem,
+            } => elem.calc_min_size(args).combine(
+                Vec2 {
+                    x: width,
+                    y: height,
+                },
+                std::cmp::max,
+            ),
             Self::Interact(elem) => elem.normal.calc_min_size(args),
         }
     }
