@@ -10,7 +10,7 @@ pub(crate) const PROC_LOG_NAME_VAR: &str = "BAR_TERM_INSTANCE_NAME";
 
 #[derive(Serialize, Deserialize, Debug)]
 #[non_exhaustive]
-pub enum TermUpdate {
+pub(crate) enum TermUpdate {
     Print(Vec<u8>),
     Flush,
     RemoteControl(Vec<OsString>),
@@ -18,7 +18,7 @@ pub enum TermUpdate {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum TermEvent {
+pub(crate) enum TermEvent {
     Crossterm(crossterm::event::Event),
     Sizes(crate::tui::Sizes),
     FocusChange { is_focused: bool },

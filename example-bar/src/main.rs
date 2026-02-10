@@ -13,7 +13,7 @@ fn main_inner() -> Option<std::process::ExitCode> {
     use crate::utils::ResultExt as _;
     use anyhow::Context as _;
 
-    ctrl::init_driver_logger();
+    ctrl::api::init_driver_logger();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

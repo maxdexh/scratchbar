@@ -38,7 +38,7 @@ struct BarTuiStates {
     defaults: BarTuiStateTx,
 }
 impl BarTuiStates {
-    pub fn get_or_mk_monitor(&mut self, name: Arc<str>) -> &mut watch::Sender<BarTuiStateTx> {
+    fn get_or_mk_monitor(&mut self, name: Arc<str>) -> &mut watch::Sender<BarTuiStateTx> {
         self.by_monitor
             .entry(name)
             .or_insert_with(|| watch::Sender::new(self.defaults.clone()))
@@ -918,8 +918,8 @@ async fn try_init_monitor(
     })
 }
 
-pub const CONTROLLER_SOCK_PATH_VAR: &str = "BAR_INTERNAL_SOCK_PATH";
-pub fn ctrl_main() -> Option<std::process::ExitCode> {
+pub(crate) const CONTROLLER_SOCK_PATH_VAR: &str = "BAR_INTERNAL_SOCK_PATH";
+pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
     use std::process::ExitCode;
 
     use anyhow::Context as _;

@@ -1,86 +1,6 @@
+use std::fmt;
+
 use crate::tui::*;
-
-#[derive(Default, Debug, Clone)]
-pub struct TextOpts {
-    pub style: Option<TextStyle>,
-    pub trim_trailing_line: bool,
-    // TODO: Sizing support
-    #[deprecated = warn_non_exhaustive!()]
-    #[doc(hidden)]
-    pub __non_exhaustive_struct_update: (),
-}
-impl From<TextStyle> for TextOpts {
-    fn from(value: TextStyle) -> Self {
-        Self {
-            style: Some(value),
-            ..Default::default()
-        }
-    }
-}
-impl From<TextModifiers> for TextOpts {
-    fn from(value: TextModifiers) -> Self {
-        TextStyle::from(value).into()
-    }
-}
-
-// FIXME: Remove serialize, convert to Print
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct TextStyle {
-    pub fg: Option<TermColor>,
-    pub bg: Option<TermColor>,
-    pub modifiers: Option<TextModifiers>,
-    pub underline_color: Option<TermColor>,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
-}
-impl From<TextModifiers> for TextStyle {
-    fn from(modifier: TextModifiers) -> Self {
-        Self {
-            modifiers: Some(modifier),
-            ..Default::default()
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum TermColor {
-    Reset,
-    Black,
-    DarkGrey,
-    Red,
-    DarkRed,
-    Green,
-    DarkGreen,
-    Yellow,
-    DarkYellow,
-    Blue,
-    DarkBlue,
-    Magenta,
-    DarkMagenta,
-    Cyan,
-    DarkCyan,
-    White,
-    Grey,
-    Rgb { r: u8, g: u8, b: u8 },
-    AnsiValue(u8),
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct TextModifiers {
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub hidden: bool,
-    pub strike: bool,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
-}
 
 pub(crate) struct PlainTextWriter {
     opts: TextOpts,
@@ -179,7 +99,7 @@ impl PlainTextWriter {
             fill_weight: 0,
         })
     }
-    pub fn finish(mut self) -> Elem {
+    pub(crate) fn finish(mut self) -> Elem {
         self.finish_line();
         ElemRepr::Stack(StackRepr {
             axis: Axis::Y,
@@ -187,7 +107,7 @@ impl PlainTextWriter {
         })
         .into()
     }
-    pub fn push_str(&mut self, mut s: &str) {
+    pub(crate) fn push_str(&mut self, mut s: &str) {
         if self.ignore_lf && s.bytes().next() == Some(b'\n') {
             s = &s[1..];
         }
@@ -218,7 +138,7 @@ impl PlainTextWriter {
             self.ignore_lf = false;
         }
     }
-    pub fn with_opts(opts: TextOpts) -> Self {
+    pub(crate) fn with_opts(opts: TextOpts) -> Self {
         let mut cur_line = String::new();
         if let Some(style) = &opts.style {
             style.begin(&mut cur_line).unwrap();

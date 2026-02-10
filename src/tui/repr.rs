@@ -1,3 +1,5 @@
+use std::{fmt, sync::Arc};
+
 use serde::{Deserialize, Serialize};
 
 use crate::tui::*;
@@ -93,7 +95,7 @@ const _: () = {
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
-    pub struct RgbaImageDefer<'a> {
+    struct RgbaImageDefer<'a> {
         width: u32,
         height: u32,
         buf: Cow<'a, [u8]>,

@@ -12,9 +12,9 @@ use futures::{Stream, StreamExt as _};
 use tokio::task::JoinSet;
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
-pub use ipc::{TermEvent, TermUpdate};
+pub(crate) use ipc::{TermEvent, TermUpdate};
 
-pub async fn start_generic_panel(
+pub(crate) async fn start_generic_panel(
     sock_path: &Path,
     log_name: &str,
     upd_rx: impl Stream<Item = TermUpdate> + 'static + Send,
@@ -144,8 +144,8 @@ fn fwd_log_self_exe() -> Option<std::process::Command> {
     Some(cmd)
 }
 
-pub const INTERNAL_INST_ARG: &str = "--internal-inst";
-pub fn inst_main() -> Option<ExitCode> {
+pub(crate) const INTERNAL_INST_ARG: &str = "--internal-inst";
+pub(crate) fn inst_main() -> Option<ExitCode> {
     let (log_name, res) =
         match std::env::var(ipc::PROC_LOG_NAME_VAR).context("Bad log name env var") {
             Ok(name) => (name, Ok(())),

@@ -61,7 +61,7 @@ fn format_log(
     )
 }
 
-pub fn init_logger(log_name: String) {
+pub(crate) fn init_logger(log_name: String) {
     _ = PROC_NAME.set(log_name.clone());
     match try_init_logger() {
         Ok(_) => log::info!("Started logger"),

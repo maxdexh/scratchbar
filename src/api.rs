@@ -84,6 +84,7 @@ impl MenuKind {
 pub enum ControllerEvent {
     Interact(InteractEvent),
     // TODO: Add monitor change event
+    // TODO: Menu closed
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -231,4 +232,8 @@ fn run_ipc_writer<T: serde::Serialize>(
         write.flush()?;
     }
     Ok(())
+}
+
+pub fn init_driver_logger() {
+    crate::logging::init_logger("DRIVER".into());
 }

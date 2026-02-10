@@ -4,7 +4,7 @@ use futures::Stream;
 
 // FIXME: Mark and handle mirrored monitors
 #[derive(PartialEq, Clone, Debug)]
-pub struct MonitorInfo {
+pub(crate) struct MonitorInfo {
     pub name: Arc<str>,
     pub scale: f64,
     pub width: u32,
@@ -13,18 +13,18 @@ pub struct MonitorInfo {
 
 // FIXME: Just send current state through watch channel, let receiver handle diffs
 #[derive(Debug, Default, Clone)]
-pub struct MonitorEvent {
+pub(crate) struct MonitorEvent {
     data: Arc<HashMap<Arc<str>, MonitorInfo>>,
     prev: Arc<HashMap<Arc<str>, MonitorInfo>>,
 }
 impl MonitorEvent {
-    pub fn removed(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn removed(&self) -> impl Iterator<Item = &str> {
         self.prev
             .keys()
             .filter(|&it| !self.data.contains_key(it))
             .map(|name| &**name)
     }
-    pub fn added_or_changed(&self) -> impl Iterator<Item = &MonitorInfo> {
+    pub(crate) fn added_or_changed(&self) -> impl Iterator<Item = &MonitorInfo> {
         self.data
             .values()
             .filter(|&it| self.prev.get(&it.name).is_none_or(|v| v != it))
@@ -107,7 +107,7 @@ impl State {
 }
 
 // FIXME: Use a watch channel instead
-pub fn connect() -> impl Stream<Item = MonitorEvent> {
+pub(crate) fn connect() -> impl Stream<Item = MonitorEvent> {
     let (tx, mut rx) = {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (tx, rx)

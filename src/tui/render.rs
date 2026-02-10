@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{fmt, io::Write};
 
 use crate::tui::*;
 

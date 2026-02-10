@@ -1,5 +1,5 @@
-pub extern crate image;
-pub extern crate log;
+pub extern crate image; // FIXME: Remove
+pub extern crate log; // FIXME: Feature flag
 
 macro_rules! warn_non_exhaustive {
     () => {
@@ -7,16 +7,13 @@ macro_rules! warn_non_exhaustive {
     };
 }
 pub mod api;
+pub mod tui;
+
 mod controller;
 mod inst;
 mod logging;
 mod monitors;
-pub mod tui;
 mod utils;
-
-pub fn init_driver_logger() {
-    logging::init_logger("DRIVER".into());
-}
 
 #[doc(hidden)]
 pub fn __main() -> std::process::ExitCode {

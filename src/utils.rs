@@ -1,6 +1,6 @@
 use tokio_util::sync::CancellationToken;
 
-pub trait ResultExt {
+pub(crate) trait ResultExt {
     type Ok;
     fn ok_or_log(self) -> Option<Self::Ok>;
     fn ok_or_debug(self) -> Option<Self::Ok>;
@@ -33,7 +33,7 @@ impl<T, E: Into<anyhow::Error>> ResultExt for Result<T, E> {
     }
 }
 
-pub struct CancelDropGuard {
+pub(crate) struct CancelDropGuard {
     pub inner: CancellationToken,
 }
 impl Drop for CancelDropGuard {
@@ -47,6 +47,6 @@ impl From<CancellationToken> for CancelDropGuard {
     }
 }
 
-pub fn with_mutex_lock<T, U>(mutex: &std::sync::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
+pub(crate) fn with_mutex_lock<T, U>(mutex: &std::sync::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
     f(&mut mutex.lock().unwrap_or_else(|poison| poison.into_inner()))
 }

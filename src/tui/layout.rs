@@ -25,19 +25,39 @@ impl From<Vec2<u16>> for Size {
         }
     }
 }
+impl<T> std::ops::Index<Axis> for Vec2<T> {
+    type Output = T;
+
+    fn index(&self, index: Axis) -> &Self::Output {
+        let Self { x, y } = self;
+        match index {
+            Axis::X => x,
+            Axis::Y => y,
+        }
+    }
+}
+impl<T> std::ops::IndexMut<Axis> for Vec2<T> {
+    fn index_mut(&mut self, index: Axis) -> &mut Self::Output {
+        let Self { x, y } = self;
+        match index {
+            Axis::X => x,
+            Axis::Y => y,
+        }
+    }
+}
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Area {
     pub pos: Vec2<u16>,
     pub size: Vec2<u16>,
 }
 impl Area {
-    pub fn y_bottom(&self) -> u16 {
+    pub(crate) fn y_bottom(&self) -> u16 {
         self.pos.y.saturating_add(self.size.y).saturating_sub(1)
     }
-    pub fn x_right(&self) -> u16 {
+    pub(crate) fn x_right(&self) -> u16 {
         self.pos.x.saturating_add(self.size.x).saturating_sub(1)
     }
-    pub fn contains(self, pos: Vec2<u16>) -> bool {
+    pub(crate) fn contains(self, pos: Vec2<u16>) -> bool {
         pos.x
             .checked_sub(self.pos.x)
             .is_some_and(|it| it < self.size.x)
@@ -57,22 +77,13 @@ impl<T> Vec2<T> {
     }
 }
 
-impl Axis {
-    pub fn other(self) -> Self {
-        match self {
-            Self::X => Self::Y,
-            Self::Y => Self::X,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct StoredInteractive {
     tag: InteractTag,
     has_hover: bool,
 }
 impl StoredInteractive {
-    pub fn new(elem: &InteractRepr) -> Self {
+    pub(crate) fn new(elem: &InteractRepr) -> Self {
         Self {
             has_hover: elem.hovered.is_some(),
             tag: elem.tag.clone(),
@@ -101,14 +112,14 @@ impl RenderedLayout {
         self.widgets.push((area, StoredInteractive::new(elem)));
     }
 
-    pub fn ext_focus_loss(&mut self) -> bool {
+    pub(crate) fn ext_focus_loss(&mut self) -> bool {
         let changed = self.last_hover_elem.as_ref().is_some_and(|it| it.has_hover);
         self.last_mouse_pos = None;
         self.last_hover_elem = None;
         changed
     }
 
-    pub fn interpret_mouse_event(
+    pub(crate) fn interpret_mouse_event(
         &mut self,
         event: crossterm::event::MouseEvent,
         font_size: Vec2<u16>,
@@ -185,12 +196,12 @@ impl RenderedLayout {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sizes {
+pub(crate) struct Sizes {
     pub cell_size: Vec2<u16>,
     pub pix_size: Vec2<u16>,
 }
 impl Sizes {
-    pub fn font_size(self) -> Vec2<u16> {
+    pub(crate) fn font_size(self) -> Vec2<u16> {
         let Self {
             cell_size: Vec2 { x: w, y: h },
             pix_size: Vec2 { x: pw, y: ph },
@@ -200,7 +211,7 @@ impl Sizes {
             y: ph / h,
         }
     }
-    pub fn query() -> anyhow::Result<Option<Self>> {
+    pub(crate) fn query() -> anyhow::Result<Option<Self>> {
         let crossterm::terminal::WindowSize {
             rows,
             columns,
