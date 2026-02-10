@@ -17,10 +17,10 @@ pub struct Elem(Arc<ElemRepr>);
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct InteractTag(Arc<[u8]>);
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Vec2<T> {
-    pub x: T,
-    pub y: T,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Size {
+    pub width: u16,
+    pub height: u16,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Axis {
@@ -76,9 +76,9 @@ impl InteractTag {
 }
 
 impl Elem {
-    pub fn with_min_size(self, min_size: Vec2<u16>) -> Self {
+    pub fn with_min_size(self, min_size: Size) -> Self {
         ElemRepr::MinSize {
-            size: min_size,
+            size: min_size.into(),
             elem: self,
         }
         .into()
@@ -96,7 +96,7 @@ impl Elem {
         Elem::empty().with_min_size({
             let mut size = Vec2::default();
             size[axis] = len;
-            size
+            size.into()
         })
     }
 
@@ -145,10 +145,10 @@ impl Elem {
         .into()
     }
 
-    pub fn raw_print(raw: impl fmt::Display, size: Vec2<u16>) -> Self {
+    pub fn raw_print(raw: impl fmt::Display, size: Size) -> Self {
         ElemRepr::Print {
             raw: raw.to_string(),
-            size,
+            size: size.into(),
         }
         .into()
     }

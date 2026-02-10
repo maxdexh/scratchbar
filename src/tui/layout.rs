@@ -2,6 +2,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::tui::*;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Vec2<T> {
+    pub x: T,
+    pub y: T,
+}
+impl From<Size> for Vec2<u16> {
+    fn from(value: Size) -> Self {
+        let Size { width, height } = value;
+        Self {
+            x: width,
+            y: height,
+        }
+    }
+}
+impl From<Vec2<u16>> for Size {
+    fn from(value: Vec2<u16>) -> Self {
+        let Vec2 { x, y } = value;
+        Self {
+            width: x,
+            height: y,
+        }
+    }
+}
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Area {
     pub pos: Vec2<u16>,

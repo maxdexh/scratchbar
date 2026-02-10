@@ -462,7 +462,10 @@ async fn run_monitor_main(
                             if has_hover && menu.is_none() {
                                 menu = Some(watch::Sender::new(BarMenu {
                                     kind: api::MenuKind::Tooltip,
-                                    tui: tui::Elem::empty().with_min_size(tui::Vec2 { x: 1, y: 1 }),
+                                    tui: tui::Elem::empty().with_min_size(tui::Size {
+                                        width: 1,
+                                        height: 1,
+                                    }),
                                 }));
                             }
 
