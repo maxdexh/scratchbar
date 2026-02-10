@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 
-if [[ -v NO_DEBUG ]]; then
-    profile=()
-else
-    profile="--debug"
-fi
+set -euo pipefail
 
 cd -- "$(dirname "$0")/.."
 
 PATH="$PWD/target/installdir/bin:$PATH"
-cargo install $profile --offline --path . --root target/installdir --features=__bin "$@" || exit 1
-cargo install $profile --offline --path ./example-bar --root target/installdir "$@" || exit 1
-bar-panel-controller example-bar
+controller_bin="$(cargo build --message-format=json --bin bar-panel-controller --features=__bin "$@" | jq -r -c 'select(.target.name == "bar-panel-controller") | .executable')"
+example_bin="$(cargo build --message-format=json -p example-bar "$@" | jq -r -c 'select(.target.name == "example-bar") | .executable')"
+exec "${controller_bin:?}" "${example_bin:?}"

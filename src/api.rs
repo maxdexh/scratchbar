@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio_util::{sync::CancellationToken, time::FutureExt};
 
 use crate::{
     tui,
@@ -133,7 +132,7 @@ pub(crate) async fn run_ipc_connection<
     struct Shared {
         socket: Arc<std::os::unix::net::UnixStream>,
         err_slot: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
-        on_stop: CancellationToken,
+        abort_fut: futures::future::AbortHandle,
     }
     impl Shared {
         fn set_err(&self, err: anyhow::Error) {
@@ -149,16 +148,30 @@ pub(crate) async fn run_ipc_connection<
             if let Err(err) = self.socket.shutdown(std::net::Shutdown::Both) {
                 log::error!("{err}");
             }
-            self.on_stop.cancel();
+            self.abort_fut.abort();
         }
     }
+
+    let (abort_handle, abort_reg) = futures::future::AbortHandle::new_pair();
     let shared = Shared {
         socket: Arc::new(socket),
         err_slot: Default::default(),
-        on_stop: CancellationToken::new(),
+        abort_fut: abort_handle,
     };
 
     let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+
+    let fut_shared = shared.clone();
+    let fut = futures::future::Abortable::new(
+        async move {
+            let _guard = fut_shared;
+            while let Some(val) = rx().await
+                && writer_tx.send(val).is_ok()
+            {}
+        },
+        abort_reg,
+    );
+
     let writer_shared = shared.clone();
     std::thread::spawn(move || {
         if let Err(err) = run_ipc_writer(&*writer_shared.socket, &writer_rx) {
@@ -173,9 +186,9 @@ pub(crate) async fn run_ipc_connection<
         }
     });
 
-    while let Some(Some(val)) = rx().with_cancellation_token(&shared.on_stop).await
-        && writer_tx.send(val).is_ok()
-    {}
+    fut.await
+        .map_err(|_| anyhow::anyhow!("controller connection aborted"))
+        .ok_or_debug();
 
     with_mutex_lock(&shared.err_slot, |slot| match slot.take() {
         Some(err) => Err(err),

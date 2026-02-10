@@ -7,38 +7,42 @@ edition = "2024"
 members = ["example-bar"]
 
 [dependencies]
+# Public dependencies
+log = "0.4.29"
+
+# Lib/Bin internal dependencies
+image = { version = "0.25.9", default-features = false, features = [
+  "png",
+  "serde",
+] }
 crossterm = { version = "0.29.0", default-features = false, features = [
-    "event-stream",
-    "serde",
+  "event-stream",
+  "serde",
 ] }
 anyhow = "1.0.100"
 flexi_logger = "0.31.7"
-futures = { version = "0.3.31", default-features = false }
-image = { version = "0.25.9", default-features = false, features = [
-    "png",
-    "serde",
-] }
-log = "0.4.29"
 serde = { version = "1.0.228", features = ["rc"] }
-tokio = { version = "1.49.0", features = [
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "signal",
-    "io-util",
-    "process",
-    "fs",
-] }
 postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
 tempfile = "3.24.0"
-serde_json = { version = "1.0.149", features = ["raw_value"] }
-base64 = "0.22.1"
-tokio-util = { version = "0.7.18", features = ["rt", "time"] }
 unicode-width = "0.2.2"
+futures = { version = "0.3.31", default-features = false, features = ["alloc"] }
 
-[[bin]]
-name = "bar-panel-controller"
-required-features = ["__bin"]
+# Bin dependencies
+tokio = { version = "1.49.0", features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "io-util",
+  "process",
+  "fs",
+], optional = true }
+tokio-util = { version = "0.7.18", features = ["rt", "time"], optional = true }
+serde_json = { version = "1.0.149", features = ["raw_value"], optional = true }
+base64 = { version = "0.22.1", optional = true }
 
 [features]
-__bin = []
+# It would be really nice if we could enable this automatically when building the binary of this package,
+# but there does not seem to be a way to do this. `required-feature` just gives an error when trying to 
+# build without it, but also causes `cargo check` to silently skip the binary.
+__bin = ["dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:base64"]

@@ -1,6 +1,5 @@
 use std::ffi::OsString;
 
-use crate::utils::CancelDropGuard;
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
@@ -29,7 +28,7 @@ pub(crate) async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
     tx: impl Fn(T),
     cancel: CancellationToken,
 ) {
-    let auto_cancel = CancelDropGuard::from(cancel);
+    let _auto_cancel = cancel.drop_guard_ref();
     async {
         use tokio::io::AsyncBufReadExt as _;
         let mut read = tokio::io::BufReader::new(read);
@@ -59,7 +58,7 @@ pub(crate) async fn read_cobs_sock<T: serde::de::DeserializeOwned>(
             buf.clear();
         }
     }
-    .with_cancellation_token(&auto_cancel.inner)
+    .with_cancellation_token(&cancel)
     .await;
 }
 
@@ -68,7 +67,7 @@ pub(crate) async fn write_cobs_sock<T: serde::Serialize>(
     stream: impl Stream<Item = T>,
     cancel: CancellationToken,
 ) {
-    let auto_cancel = CancelDropGuard::from(cancel);
+    let _auto_cancel = cancel.drop_guard_ref();
     async {
         use tokio::io::AsyncWriteExt as _;
         tokio::pin!(stream);
@@ -88,6 +87,6 @@ pub(crate) async fn write_cobs_sock<T: serde::Serialize>(
             }
         }
     }
-    .with_cancellation_token(&auto_cancel.inner)
+    .with_cancellation_token(&cancel)
     .await;
 }

@@ -1,7 +1,7 @@
 mod ipc;
 
 use crate::tui;
-use crate::utils::{CancelDropGuard, ResultExt as _};
+use crate::utils::ResultExt as _;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -91,7 +91,7 @@ async fn run_term_inst_mgr(
     updates: impl Stream<Item = TermUpdate> + Send + 'static,
     cancel: CancellationToken,
 ) {
-    let _auto_cancel = CancelDropGuard::from(cancel.clone());
+    let _auto_cancel = cancel.drop_guard_ref();
     let mut tasks = JoinSet::<()>::new();
     // TODO: Await stream
 
@@ -270,10 +270,10 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
 
     let cancel_blocking = cancel.clone();
     std::thread::spawn(move || {
-        let auto_cancel = CancelDropGuard::from(cancel_blocking);
+        let _auto_cancel = cancel_blocking.drop_guard_ref();
         use std::io::Write as _;
         let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
-        while !auto_cancel.inner.is_cancelled()
+        while !cancel_blocking.is_cancelled()
             && let Ok(upd) = upd_rx.recv()
         {
             match upd {

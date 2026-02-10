@@ -1,5 +1,3 @@
-use tokio_util::sync::CancellationToken;
-
 pub(crate) trait ResultExt {
     type Ok;
     fn ok_or_log(self) -> Option<Self::Ok>;
@@ -30,20 +28,6 @@ impl<T, E: Into<anyhow::Error>> ResultExt for Result<T, E> {
                 None
             }
         }
-    }
-}
-
-pub(crate) struct CancelDropGuard {
-    pub inner: CancellationToken,
-}
-impl Drop for CancelDropGuard {
-    fn drop(&mut self) {
-        self.inner.cancel();
-    }
-}
-impl From<CancellationToken> for CancelDropGuard {
-    fn from(inner: CancellationToken) -> Self {
-        Self { inner }
     }
 }
 

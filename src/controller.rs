@@ -12,7 +12,7 @@ use crate::{
     inst::{TermEvent, TermUpdate},
     monitors::MonitorInfo,
     tui,
-    utils::{CancelDropGuard, ResultExt, with_mutex_lock},
+    utils::{ResultExt, with_mutex_lock},
 };
 
 #[derive(Debug)]
@@ -213,8 +213,8 @@ async fn run_controller_inner(
     bar_menus_rx: watch::Receiver<BarMenus>,
     event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
 ) {
-    // TODO: Consider moving this to BarTuiStates
-    let mut monitors_auto_cancel = HashMap::new();
+    // TODO: Consider moving this to BarTuiStates to ensure consistent data
+    let mut monitors_auto_cancel = HashMap::<Arc<str>, tokio_util::sync::DropGuard>::new();
 
     let mut monitor_rx = crate::monitors::connect();
 
@@ -235,7 +235,7 @@ async fn run_controller_inner(
                     bar_menus_rx: bar_menus_rx.clone(),
                     event_tx: event_tx.clone(),
                 }));
-                monitors_auto_cancel.insert(monitor.name.clone(), CancelDropGuard::from(cancel));
+                monitors_auto_cancel.insert(monitor.name.clone(), cancel.drop_guard());
             }
         });
     }
@@ -251,7 +251,7 @@ struct RunMonitorArgs {
 }
 async fn run_monitor(mut args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
-    let _auto_cancel = CancelDropGuard::from(args.cancel_monitor.clone());
+    let _auto_cancel = args.cancel_monitor.clone().drop_guard();
 
     loop {
         const TIMEOUT: Duration = Duration::from_secs(20);
@@ -297,7 +297,7 @@ async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
 
     let mut required_tasks = JoinSet::<anyhow::Result<std::convert::Infallible>>::new();
     let cancel = args.cancel_monitor.child_token();
-    let _auto_cancel = CancelDropGuard::from(cancel.clone());
+    let _auto_cancel = cancel.clone().drop_guard();
     let env = try_init_monitor(args, &mut required_tasks, &cancel).await?;
     required_tasks.spawn(run_monitor_main(
         args.monitor.clone(),
