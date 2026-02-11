@@ -77,7 +77,7 @@ async fn run_controller(
                     options:
                         api::RegisterMenuOpts {
                             #[expect(deprecated)]
-                            __non_exhaustive_struct_update,
+                                __non_exhaustive_struct_update: (),
                         },
                 }) => {
                     use std::collections::hash_map::Entry;
@@ -126,7 +126,7 @@ async fn run_controller(
                                 options:
                                     api::SetBarTuiOpts {
                                         #[expect(deprecated)]
-                                        __non_exhaustive_struct_update,
+                                            __non_exhaustive_struct_update: (),
                                     },
                             }) => {
                                 doit(bar_tui_states, tui, |state| &mut state.tui);
@@ -173,7 +173,7 @@ async fn run_controller(
                                 options:
                                     api::SetBarTuiOpts {
                                         #[expect(deprecated)]
-                                        __non_exhaustive_struct_update,
+                                            __non_exhaustive_struct_update: (),
                                     },
                             }) => {
                                 doit(bar_tui_states, monitor_name, tui, |state| &mut state.tui);
@@ -194,7 +194,7 @@ async fn run_controller(
                     options:
                         api::SetBarTuiOpts {
                             #[expect(deprecated)]
-                            __non_exhaustive_struct_update,
+                                __non_exhaustive_struct_update: (),
                         },
                 }) => with_mutex_lock(&bar_tui_states, |bar_tui_states| {
                     bar_tui_states.defaults.tui.send_replace(tui);

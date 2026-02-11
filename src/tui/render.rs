@@ -130,7 +130,7 @@ impl ImageRepr {
 
         // Aspect ratio of the image in cells
         std::ops::Mul::mul(
-            f64::from(self.img.width()) / f64::from(self.img.height()),
+            f64::from(self.dimensions.x) / f64::from(self.dimensions.y),
             f64::from(font_h) / f64::from(font_w),
         )
     }
@@ -187,8 +187,8 @@ impl Render for ImageRepr {
         write!(
             ctx.writer,
             "\x1b_Ga=T,f=32,C=1,s={},v={},{}={};",
-            self.img.width(),
-            self.img.height(),
+            self.dimensions.x,
+            self.dimensions.y,
             match fill_axis {
                 Axis::X => "c",
                 Axis::Y => "r",
@@ -200,7 +200,7 @@ impl Render for ImageRepr {
                 &mut ctx.writer,
                 &base64::engine::general_purpose::STANDARD,
             );
-            encoder_writer.write_all(self.img.as_raw())?;
+            encoder_writer.write_all(&self.buf)?;
         }
         write!(ctx.writer, "\x1b\\")?;
 
@@ -209,8 +209,8 @@ impl Render for ImageRepr {
 
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         let img_cell_ratio = self.img_cell_ratio(args);
-        match self.sizing {
-            ImageSizeMode::FillAxis(axis, len) => {
+        match self.layout {
+            ImageLayoutMode::FillAxis(axis, len) => {
                 Self::fill_axis_to_min_size(axis, len, img_cell_ratio)
             }
         }

@@ -1,4 +1,3 @@
-pub extern crate image; // FIXME: Remove
 pub extern crate log; // FIXME: Feature flag
 
 macro_rules! warn_non_exhaustive {
@@ -8,6 +7,19 @@ macro_rules! warn_non_exhaustive {
 }
 pub mod api;
 pub mod tui;
+
+pub struct WrappedError(anyhow::Error);
+impl std::fmt::Debug for WrappedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+impl std::fmt::Display for WrappedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+impl std::error::Error for WrappedError {}
 
 mod driver_ipc;
 mod logging;

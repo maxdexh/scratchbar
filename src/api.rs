@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::{
-    tui,
+    WrappedError, tui,
     utils::{ResultExt as _, with_mutex_lock},
 };
 
@@ -93,31 +93,20 @@ pub struct InteractEvent {
     pub tag: tui::InteractTag,
 }
 
-pub struct Error(anyhow::Error);
-impl std::fmt::Debug for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0, f)
-    }
-}
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0, f)
-    }
-}
-impl std::error::Error for Error {}
-
 pub async fn run_driver_connection(
     tx: impl Fn(ControllerEvent) -> Option<()> + 'static + Send,
     rx: impl AsyncFnMut() -> Option<ControllerUpdate> + 'static + Send,
-) -> Result<(), Error> {
+) -> Result<(), WrappedError> {
     let sock_path = std::env::var_os(crate::driver_ipc::CONTROLLER_SOCK_PATH_VAR)
         .context("Missing socket path env var")
-        .map_err(Error)?;
+        .map_err(WrappedError)?;
     let socket = std::os::unix::net::UnixStream::connect(sock_path)
         .context("Failed to connect to controller socket")
-        .map_err(Error)?;
+        .map_err(WrappedError)?;
 
-    run_ipc_connection(socket, tx, rx).await.map_err(Error)
+    run_ipc_connection(socket, tx, rx)
+        .await
+        .map_err(WrappedError)
 }
 
 pub(crate) async fn run_ipc_connection<

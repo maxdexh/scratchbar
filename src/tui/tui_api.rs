@@ -79,9 +79,9 @@ pub struct StackOpts {
     pub __non_exhaustive_struct_update: (),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum ImageSizeMode {
+pub enum ImageLayoutMode {
     FillAxis(Axis, u16),
 }
 
@@ -238,6 +238,23 @@ impl BlockLineSet {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Elem(pub(crate) Arc<ElemRepr>);
 
+#[derive(Debug)]
+pub struct RgbaImage {
+    pub buf: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub layout: ImageLayoutMode,
+    pub opts: ImageOpts,
+}
+
+#[derive(Debug, Default)]
+pub struct ImageOpts {
+    // TODO: Alt elem
+    #[deprecated = warn_non_exhaustive!()]
+    #[doc(hidden)]
+    __non_exhaustive_struct_update: (),
+}
+
 impl Elem {
     pub fn with_min_size(self, min_size: Size) -> Self {
         ElemRepr::MinSize {
@@ -265,10 +282,27 @@ impl Elem {
         })
     }
 
-    pub fn image(img: image::RgbaImage, sizing: ImageSizeMode) -> Self {
+    pub fn rgba_image(image: RgbaImage) -> Self {
+        let RgbaImage {
+            buf,
+            layout,
+            width,
+            height,
+            opts,
+        } = image;
+
+        let ImageOpts {
+            #[expect(deprecated)]
+                __non_exhaustive_struct_update: (),
+        } = opts;
+
         ElemRepr::Image(ImageRepr {
-            img: RgbaImageWrap(img),
-            sizing,
+            buf,
+            layout,
+            dimensions: Vec2 {
+                x: width,
+                y: height,
+            },
         })
         .into()
     }

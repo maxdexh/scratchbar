@@ -63,3 +63,13 @@ impl StackBuilder {
         self.items.pop();
     }
 }
+
+pub fn rgba_image(img: image::RgbaImage, layout: tui::ImageLayoutMode) -> tui::Elem {
+    tui::Elem::rgba_image(tui::RgbaImage {
+        width: img.width(),
+        height: img.height(),
+        buf: img.into_raw(),
+        layout,
+        opts: Default::default(),
+    })
+}

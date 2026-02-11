@@ -128,7 +128,7 @@ pub async fn tray_module(
                 pixels,
             } in item.icon_pixmap.as_deref().unwrap_or(&[])
             {
-                let mut img = match ctrl::image::RgbaImage::from_vec(
+                let mut img = match image::RgbaImage::from_vec(
                     width.cast_unsigned(),
                     height.cast_unsigned(),
                     pixels.clone(),
@@ -141,14 +141,14 @@ pub async fn tray_module(
                 };
 
                 // https://users.rust-lang.org/t/argb32-color-model/92061/4
-                for ctrl::image::Rgba(pixel) in img.pixels_mut() {
+                for image::Rgba(pixel) in img.pixels_mut() {
                     *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
                 }
 
                 tui_stack.push(
-                    tui::Elem::image(
+                    xtui::rgba_image(
                         img, //
-                        tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                        tui::ImageLayoutMode::FillAxis(tui::Axis::Y, 1),
                     )
                     .interactive(tag.clone()),
                 );
@@ -198,16 +198,14 @@ pub async fn tray_module(
                 let mut stack = xtui::StackBuilder::new(tui::Axis::X);
                 stack.spacing(depth + 1);
                 if let Some(icon) = icon_data
-                    && let Some(img) = ctrl::image::load_from_memory_with_format(
-                        icon,
-                        ctrl::image::ImageFormat::Png,
-                    )
-                    .context("Systray icon has invalid png data")
-                    .ok_or_log()
+                    && let Some(img) =
+                        image::load_from_memory_with_format(icon, image::ImageFormat::Png)
+                            .context("Systray icon has invalid png data")
+                            .ok_or_log()
                 {
-                    stack.push(tui::Elem::image(
+                    stack.push(xtui::rgba_image(
                         img.into_rgba8(),
-                        tui::ImageSizeMode::FillAxis(tui::Axis::Y, 1),
+                        tui::ImageLayoutMode::FillAxis(tui::Axis::Y, 1),
                     ));
                     stack.spacing(1);
                 }
