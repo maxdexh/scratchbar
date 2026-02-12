@@ -474,7 +474,11 @@ async fn run_monitor_main(
 
                         if let Some(tag) = tag {
                             env.event_tx
-                                .send(host::HostEvent::Interact(host::InteractEvent { kind, tag }))
+                                .send(host::HostEvent::Interact(host::InteractEvent {
+                                    kind,
+                                    tag,
+                                    monitor: monitor.name.clone(),
+                                }))
                                 .ok_or_debug();
                         }
                     }

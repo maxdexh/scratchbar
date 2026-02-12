@@ -95,6 +95,7 @@ pub enum HostEvent {
 pub struct InteractEvent {
     pub kind: tui::InteractKind,
     pub tag: tui::InteractTag,
+    pub monitor: Arc<str>,
 }
 
 pub async fn run_host_connection(
