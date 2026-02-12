@@ -216,7 +216,7 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         std::io::stdout(),
         crossterm::terminal::EnterAlternateScreen,
         crossterm::cursor::Hide,
-        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableMousePixelCapture,
     )?;
     crossterm::terminal::enable_raw_mode()?;
 

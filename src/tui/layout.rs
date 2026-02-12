@@ -88,7 +88,10 @@ impl RenderedLayout {
             modifiers: _,
         } = event;
 
-        let pos = Vec2 { x: column, y: row };
+        let pos = Vec2 {
+            x: column / font_size.x,
+            y: row / font_size.y,
+        };
 
         self.last_mouse_pos = Some(pos);
 
@@ -106,6 +109,7 @@ impl RenderedLayout {
             MK::ScrollLeft => IK::Scroll(DR::Left),
             MK::ScrollRight => IK::Scroll(DR::Right),
             MK::Moved | MK::Up(_) | MK::Drag(_) => IK::Hover,
+            MK::KittyLeaveWindow => unimplemented!(),
         };
 
         let font_w = u32::from(font_size.x);

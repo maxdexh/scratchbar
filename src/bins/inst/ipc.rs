@@ -20,7 +20,10 @@ pub(crate) enum TermUpdate {
 pub(crate) enum TermEvent {
     Crossterm(crossterm::event::Event),
     Sizes(crate::tui::Sizes),
-    FocusChange { is_focused: bool },
+    #[deprecated]
+    FocusChange {
+        is_focused: bool,
+    },
 }
 
 pub(crate) async fn read_cobs_sock<T: serde::de::DeserializeOwned>(

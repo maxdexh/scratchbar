@@ -11,7 +11,7 @@ members = ["scratchbar-bin", "example-controller"]
 log = "0.4.29"
 
 # Lib/Bin internal dependencies
-crossterm = { version = "0.29.0", default-features = false }
+crossterm = { git = "https://github.com/maxdexh/crossterm-scratchbar", default-features = false }
 anyhow = "1.0.100"
 flexi_logger = "0.31.7"
 serde = { version = "1.0.228", features = ["rc"] }

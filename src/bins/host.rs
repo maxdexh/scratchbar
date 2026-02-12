@@ -400,6 +400,22 @@ async fn run_monitor_main(
         match upd {
             Upd::Noop => {}
             Upd::Term(term_kind, TermEvent::Crossterm(ev)) => match ev {
+                crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::KittyLeaveWindow,
+                    ..
+                }) => match term_kind {
+                    TermKind::Menu => {
+                        show_menu = None;
+                        rerender_menu = true;
+                    }
+                    TermKind::Bar => {
+                        if let Some(layout) = &mut env.bar.layout
+                            && layout.ext_focus_loss()
+                        {
+                            bar_tui_changed = true;
+                        }
+                    }
+                },
                 crossterm::event::Event::Mouse(ev) => {
                     let Some(layout) = (match term_kind {
                         TermKind::Menu => env.menu.layout.as_mut(),
@@ -444,27 +460,13 @@ async fn run_monitor_main(
                                 rerender_menu = true;
                             }
 
-                            let mut menu = tag.as_ref().and_then(|tag| {
+                            let menu = tag.as_ref().and_then(|tag| {
                                 bar_menus_rx
                                     .borrow()
                                     .get(tag)
                                     .and_then(|tag_menus| tag_menus.get(&kind))
                                     .cloned()
                             });
-                            // If the element has a hovered version, then it needs to have a menu,
-                            // since we have no way to tell when the bar loses focus.
-                            // TODO: This is not necessary if the bar has focus-policy=on-demand,
-                            // but that is currently not supported.
-                            if has_hover && menu.is_none() {
-                                menu = Some(watch::Sender::new(BarMenu {
-                                    kind: host::MenuKind::Tooltip,
-                                    tui: tui::Elem::empty().with_min_size(tui::Size {
-                                        width: 1,
-                                        height: 1,
-                                    }),
-                                }));
-                            }
-
                             if let Some(menu) = menu {
                                 show_menu =
                                     Some(ShowMenu::mk_recv(menu.subscribe(), pix_location, &env));
@@ -497,18 +499,7 @@ async fn run_monitor_main(
                 env.bar.sizes = sizes;
                 bar_tui_changed = true;
             }
-            Upd::Term(term_kind, TermEvent::FocusChange { is_focused }) => {
-                // FIXME: This only works because the menu doesnt lose focus while we are
-                // on the bar, which forbids focus.
-                if !is_focused && term_kind == TermKind::Menu {
-                    show_menu = None;
-                    if let Some(layout) = &mut env.bar.layout
-                        && layout.ext_focus_loss()
-                    {
-                        bar_tui_changed = true;
-                    }
-                }
-            }
+            Upd::Term(term_kind, TermEvent::FocusChange { is_focused }) => {}
         }
 
         if rerender_menu {
@@ -790,14 +781,6 @@ async fn try_init_monitor(
                 "--exclusive-zone=0".into(),
                 "--override-exclusive-zone".into(),
                 "--layer=overlay".into(),
-                // Focus behavior of the panel. Since we cannot tell from
-                // mouse events alone when the cursor leaves the panel
-                // (since terminal mouse capture only gives us mouse
-                // events inside the panel), we need external support for
-                // hiding it automatically. We use a watcher to be able
-                // to reset the menu state when this happens.
-                "--focus-policy=on-demand".into(),
-                "--hide-on-focus-loss".into(),
                 // Since we control resizes from the program and not from
                 // a somewhat continuous drag-resize, debouncing between
                 // resize and reloads is completely inappropriate and
@@ -805,6 +788,7 @@ async fn try_init_monitor(
                 // the old menu content being replaced with the new one.
                 "-o=resize_debounce_time=0 0".into(),
                 // TODO: Mess with repaint_delay, input_delay
+                "--debug-input".into(),
             ],
             [("BAR_MENU_WATCHER_SOCK".into(), watcher_sock_path.into())],
             cancel,
