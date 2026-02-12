@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use crate::{
     clients,
-    driver::{BarTuiElem, InteractArgs, InteractTagRegistry, ModuleArgs, mk_fresh_interact_tag},
+    control::{BarTuiElem, InteractArgs, InteractTagRegistry, ModuleArgs, mk_fresh_interact_tag},
     utils::ResultExt as _,
     xtui,
 };
 use anyhow::Context as _;
-use ctrl::{api, tui};
+use scratchbar::{host, tui};
 
 pub async fn tray_module(
     ModuleArgs {
@@ -57,10 +57,10 @@ pub async fn tray_module(
                     menu_tui_stack.push(tui::Elem::text(description, tui::TextOpts::default()));
                     menu_tui_stack.build()
                 };
-                ctrl_tx.set_menu(api::RegisterMenu {
+                ctrl_tx.set_menu(host::RegisterMenu {
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Hover,
-                    menu_kind: api::MenuKind::Tooltip,
+                    menu_kind: host::MenuKind::Tooltip,
                     tui: menu_tui,
                     options: Default::default(),
                 });
@@ -102,10 +102,10 @@ pub async fn tray_module(
                     tag
                 });
 
-                ctrl_tx.set_menu(api::RegisterMenu {
+                ctrl_tx.set_menu(host::RegisterMenu {
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
-                    menu_kind: api::MenuKind::Context,
+                    menu_kind: host::MenuKind::Context,
                     tui: tui::Elem::block(tui::BlockOpts {
                         border_style: Some(tui::TextStyle {
                             fg: Some(tui::TermColor::DarkGrey),

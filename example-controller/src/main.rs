@@ -1,8 +1,6 @@
-extern crate bar_panel_controller as ctrl;
-
 mod clients;
+mod control;
 mod desktop;
-mod driver;
 mod utils;
 mod xtui;
 
@@ -13,7 +11,7 @@ fn main_inner() -> Option<std::process::ExitCode> {
     use crate::utils::ResultExt as _;
     use anyhow::Context as _;
 
-    ctrl::api::init_driver_logger();
+    scratchbar::host::init_controller_logger();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -27,9 +25,9 @@ fn main_inner() -> Option<std::process::ExitCode> {
 
     let mut required_tasks = tokio::task::JoinSet::new();
 
-    required_tasks.spawn(async move { Some(driver::driver_main(ctrl_upd_tx, ctrl_ev_rx).await) });
+    required_tasks.spawn(async move { Some(control::control_main(ctrl_upd_tx, ctrl_ev_rx).await) });
     required_tasks.spawn(async move {
-        ctrl::api::run_driver_connection(
+        scratchbar::host::run_host_connection(
             move |ev| ctrl_ev_tx.send(ev).ok(),
             async move || ctrl_upd_rx.recv().await,
         )

@@ -1,4 +1,4 @@
-use ctrl::tui;
+use scratchbar::tui;
 
 pub fn tui_center_symbol(sym: impl std::fmt::Display, width: u16) -> tui::Elem {
     tui::Elem::raw_print(

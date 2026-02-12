@@ -1,0 +1,10 @@
+[package]
+name = "scratchbar-bin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scratchbar = { path = "..", features = ["__bin"] }
+
+[[bin]]
+name = "scratchbar"

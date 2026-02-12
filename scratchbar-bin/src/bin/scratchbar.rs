@@ -1,3 +1,3 @@
 fn main() -> std::process::ExitCode {
-    bar_panel_controller::__main()
+    scratchbar::__scratchbar_bin_main()
 }

@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use crate::{
     clients,
-    driver::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
+    control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
     utils::ResultExt as _,
     xtui,
 };
-use ctrl::{api, tui};
+use scratchbar::{host, tui};
 
 pub async fn ppd_module(
     ModuleArgs {
@@ -34,14 +34,14 @@ pub async fn ppd_module(
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
         let profile = profile_rx.borrow_and_update().clone();
-        ctrl_tx.set_menu(api::RegisterMenu {
+        ctrl_tx.set_menu(host::RegisterMenu {
             on_tag: interact_tag.clone(),
             on_kind: tui::InteractKind::Hover,
             tui: tui::Elem::text(
                 profile.as_deref().unwrap_or("No profile"),
                 tui::TextOpts::default(),
             ),
-            menu_kind: api::MenuKind::Tooltip,
+            menu_kind: host::MenuKind::Tooltip,
             options: Default::default(),
         });
 
@@ -125,11 +125,11 @@ pub async fn energy_module(
                 }
             };
             if text != last_tooltip {
-                ctrl_tx.set_menu(api::RegisterMenu {
+                ctrl_tx.set_menu(host::RegisterMenu {
                     on_tag: interact_tag.clone(),
                     on_kind: tui::InteractKind::Hover,
                     tui: tui::Elem::text(text.as_str(), tui::TextOpts::default()),
-                    menu_kind: api::MenuKind::Tooltip,
+                    menu_kind: host::MenuKind::Tooltip,
                     options: Default::default(),
                 });
                 last_tooltip = text;

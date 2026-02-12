@@ -10,8 +10,11 @@ use crate::{
     utils::{ReloadRx, ReloadTx, ResultExt as _},
     xtui,
 };
-use ctrl::{api, tui};
-use tokio::{sync::watch, task::JoinSet};
+use scratchbar::{host, tui};
+use tokio::{
+    sync::{mpsc::UnboundedSender, watch},
+    task::JoinSet,
+};
 
 use crate::clients;
 
@@ -76,13 +79,13 @@ fn interact_callback_with<C: Send + Sync + 'static>(
 type RegTagCallback = (tui::InteractTag, Option<InteractCallback>);
 
 #[derive(Debug, Clone)]
-struct ModuleControllerTx {
-    tx: tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
+struct ModuleControlTx {
+    tx: UnboundedSender<host::HostUpdate>,
 }
-impl ModuleControllerTx {
-    fn set_menu(&self, menu: api::RegisterMenu) {
+impl ModuleControlTx {
+    fn set_menu(&self, menu: host::RegisterMenu) {
         self.tx
-            .send(api::ControllerUpdate::RegisterMenu(menu))
+            .send(host::HostUpdate::RegisterMenu(menu))
             .ok_or_debug();
     }
 }
@@ -90,15 +93,15 @@ impl ModuleControllerTx {
 struct ModuleArgs {
     tui_tx: watch::Sender<BarTuiElem>,
     reload_rx: ReloadRx,
-    ctrl_tx: ModuleControllerTx,
-    tag_callback_tx: tokio::sync::mpsc::UnboundedSender<RegTagCallback>,
+    ctrl_tx: ModuleControlTx,
+    tag_callback_tx: UnboundedSender<RegTagCallback>,
     _unused: (),
 }
 
 struct BarModuleFactory {
     reload_tx: ReloadTx,
-    ctrl_tx: ModuleControllerTx,
-    tag_callback_tx: tokio::sync::mpsc::UnboundedSender<RegTagCallback>,
+    ctrl_tx: ModuleControlTx,
+    tag_callback_tx: UnboundedSender<RegTagCallback>,
     tasks: JoinSet<()>,
 }
 impl BarModuleFactory {
@@ -129,10 +132,7 @@ impl BarModuleFactory {
     }
 }
 
-fn send_bar_tui(
-    bar_tui: &[BarTuiElem],
-    ctrl_tx: &tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
-) {
+fn send_bar_tui(bar_tui: &[BarTuiElem], ctrl_tx: &UnboundedSender<host::HostUpdate>) {
     let mut by_monitor = HashMap::new();
     let mut fallback = xtui::StackBuilder::new(tui::Axis::X);
     for elem in bar_tui {
@@ -165,7 +165,7 @@ fn send_bar_tui(
     }
 
     ctrl_tx
-        .send(api::ControllerUpdate::SetDefaultTui(api::SetBarTui {
+        .send(host::HostUpdate::SetDefaultTui(host::SetBarTui {
             tui: fallback.build(),
             options: Default::default(),
         }))
@@ -173,11 +173,11 @@ fn send_bar_tui(
 
     for (monitor, tui) in by_monitor {
         ctrl_tx
-            .send(api::ControllerUpdate::UpdateBars(
-                api::BarSelection::OnMonitor {
+            .send(host::HostUpdate::UpdateBars(
+                host::BarSelect::OnMonitor {
                     monitor_name: monitor,
                 },
-                api::SetBarTui {
+                host::SetBarTui {
                     tui: tui.build(),
                     options: Default::default(),
                 }
@@ -187,9 +187,9 @@ fn send_bar_tui(
     }
 }
 
-pub async fn driver_main(
-    ctrl_upd_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerUpdate>,
-    mut ctrl_ev_rx: tokio::sync::mpsc::UnboundedReceiver<api::ControllerEvent>,
+pub async fn control_main(
+    ctrl_upd_tx: UnboundedSender<host::HostUpdate>,
+    mut ctrl_ev_rx: tokio::sync::mpsc::UnboundedReceiver<host::HostEvent>,
 ) -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
     let mut reload_tx = ReloadTx::new();
@@ -197,7 +197,7 @@ pub async fn driver_main(
     let (tag_callback_tx, mut tag_callback_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut fac = BarModuleFactory {
         reload_tx: reload_tx.clone(),
-        ctrl_tx: ModuleControllerTx {
+        ctrl_tx: ModuleControlTx {
             tx: ctrl_upd_tx.clone(),
         },
         tag_callback_tx,
@@ -224,7 +224,7 @@ pub async fn driver_main(
         tokio::spawn(async move {
             while let Some(ev) = ctrl_ev_rx.recv().await {
                 match ev {
-                    api::ControllerEvent::Interact(api::InteractEvent { kind, tag, .. }) => {
+                    host::HostEvent::Interact(host::InteractEvent { kind, tag, .. }) => {
                         let callback: Option<InteractCallback> =
                             callbacks.lock().await.get(&tag).cloned();
                         callback.inspect(|cb| cb(InteractArgs { kind }));

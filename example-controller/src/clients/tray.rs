@@ -5,6 +5,7 @@ use anyhow::Context;
 use system_tray::data::BaseMap;
 use system_tray::item::StatusNotifierItem;
 use system_tray::menu::TrayMenu;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
@@ -34,7 +35,7 @@ type ClientCallback = Box<dyn FnOnce(Arc<system_tray::client::Client>) + Send + 
 #[derive(Debug)]
 pub struct TrayClient {
     pub state_rx: watch::Receiver<TrayState>,
-    client_sched_tx: tokio::sync::mpsc::UnboundedSender<ClientCallback>,
+    client_sched_tx: UnboundedSender<ClientCallback>,
     _background: AbortOnDropHandle<()>,
 }
 impl TrayClient {

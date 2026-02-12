@@ -5,14 +5,27 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::{
-    WrappedError, tui,
+    tui,
     utils::{ResultExt as _, with_mutex_lock},
 };
 
+pub struct HostError(anyhow::Error);
+impl std::fmt::Debug for HostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+impl std::fmt::Display for HostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+impl std::error::Error for HostError {}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum ControllerUpdate {
-    UpdateBars(BarSelection, BarUpdate),
+pub enum HostUpdate {
+    UpdateBars(BarSelect, BarUpdate),
     SetDefaultTui(SetBarTui),
     RegisterMenu(RegisterMenu),
 }
@@ -42,7 +55,7 @@ pub struct SetBarTuiOpts {
 }
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
-pub enum BarSelection {
+pub enum BarSelect {
     All,
     OnMonitor { monitor_name: Arc<str> },
 }
@@ -63,25 +76,16 @@ pub struct RegisterMenuOpts {
     #[deprecated = warn_non_exhaustive!()]
     pub __non_exhaustive_struct_update: (),
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MenuKind {
     Tooltip,
     Context,
 }
-#[cfg(feature = "__bin")]
-impl MenuKind {
-    pub(crate) fn internal_clone(&self) -> Self {
-        match self {
-            Self::Tooltip => Self::Tooltip,
-            Self::Context => Self::Context,
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum ControllerEvent {
+pub enum HostEvent {
     Interact(InteractEvent),
     // TODO: Add monitor change event
     // TODO: Menu closed
@@ -93,20 +97,18 @@ pub struct InteractEvent {
     pub tag: tui::InteractTag,
 }
 
-pub async fn run_driver_connection(
-    tx: impl Fn(ControllerEvent) -> Option<()> + 'static + Send,
-    rx: impl AsyncFnMut() -> Option<ControllerUpdate> + 'static + Send,
-) -> Result<(), WrappedError> {
-    let sock_path = std::env::var_os(crate::driver_ipc::CONTROLLER_SOCK_PATH_VAR)
+pub async fn run_host_connection(
+    tx: impl Fn(HostEvent) -> Option<()> + 'static + Send,
+    rx: impl AsyncFnMut() -> Option<HostUpdate> + 'static + Send,
+) -> Result<(), HostError> {
+    let sock_path = std::env::var_os(crate::host_ctrl_ipc::HOST_SOCK_PATH_VAR)
         .context("Missing socket path env var")
-        .map_err(WrappedError)?;
+        .map_err(HostError)?;
     let socket = std::os::unix::net::UnixStream::connect(sock_path)
         .context("Failed to connect to controller socket")
-        .map_err(WrappedError)?;
+        .map_err(HostError)?;
 
-    run_ipc_connection(socket, tx, rx)
-        .await
-        .map_err(WrappedError)
+    run_ipc_connection(socket, tx, rx).await.map_err(HostError)
 }
 
 pub(crate) async fn run_ipc_connection<
@@ -233,6 +235,6 @@ fn run_ipc_writer<T: serde::Serialize>(
     Ok(())
 }
 
-pub fn init_driver_logger() {
-    crate::logging::init_logger("DRIVER".into());
+pub fn init_controller_logger() {
+    crate::logging::init_logger("CONTROLLER".into());
 }

@@ -209,25 +209,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "bar-panel-controller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "crossterm",
- "flexi_logger",
- "futures",
- "log",
- "postcard",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "unicode-width",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -486,17 +467,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-bar"
+name = "example-controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bar-panel-controller",
  "chrono",
  "futures",
  "hyprland",
  "image",
  "libpulse-binding",
  "log",
+ "scratchbar",
  "serde",
  "system-tray",
  "tokio",
@@ -1125,6 +1106,32 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "scratchbar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossterm",
+ "flexi_logger",
+ "futures",
+ "log",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "unicode-width",
+]
+
+[[package]]
+name = "scratchbar-bin"
+version = "0.1.0"
+dependencies = [
+ "scratchbar",
+]
 
 [[package]]
 name = "semver"

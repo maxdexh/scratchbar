@@ -8,16 +8,15 @@ use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
-    api,
-    inst::{TermEvent, TermUpdate},
-    monitors::MonitorInfo,
-    tui,
+    bins::inst::{TermEvent, TermUpdate},
+    bins::monitors::MonitorInfo,
+    host, tui,
     utils::{ResultExt, with_mutex_lock},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BarMenu {
-    kind: api::MenuKind,
+    kind: host::MenuKind,
     tui: tui::Elem,
 }
 type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, watch::Sender<BarMenu>>>;
@@ -45,9 +44,9 @@ impl BarTuiStates {
     }
 }
 
-async fn run_controller(
-    update_rx: impl Stream<Item = api::ControllerUpdate> + Send + 'static,
-    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
+async fn run_host(
+    update_rx: impl Stream<Item = host::HostUpdate> + Send + 'static,
+    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
 ) {
     let mut required_tasks = tokio::task::JoinSet::new();
 
@@ -59,7 +58,7 @@ async fn run_controller(
         },
     }));
     let bar_menus_tx = watch::Sender::new(BarMenus::default());
-    required_tasks.spawn(run_controller_inner(
+    required_tasks.spawn(run_host_inner(
         bar_tui_states.clone(),
         bar_menus_tx.subscribe(),
         event_tx.clone(),
@@ -69,13 +68,13 @@ async fn run_controller(
         tokio::pin!(update_rx);
         while let Some(update) = update_rx.next().await {
             match update {
-                api::ControllerUpdate::RegisterMenu(api::RegisterMenu {
+                host::HostUpdate::RegisterMenu(host::RegisterMenu {
                     on_tag,
                     on_kind,
                     tui,
                     menu_kind,
                     options:
-                        api::RegisterMenuOpts {
+                        host::RegisterMenuOpts {
                             #[expect(deprecated)]
                                 __non_exhaustive_struct_update: (),
                         },
@@ -106,7 +105,7 @@ async fn run_controller(
                         }
                     });
                 }
-                api::ControllerUpdate::UpdateBars(api::BarSelection::All, update) => {
+                host::HostUpdate::UpdateBars(host::BarSelect::All, update) => {
                     fn doit<T>(
                         bar_tui_states: &mut BarTuiStates,
                         val: T,
@@ -121,28 +120,28 @@ async fn run_controller(
                     with_mutex_lock(&bar_tui_states, |bar_tui_states| {
                         // TODO: Keep unknown monitors around only for a few minutes
                         match update {
-                            api::BarUpdate::SetTui(api::SetBarTui {
+                            host::BarUpdate::SetTui(host::SetBarTui {
                                 tui,
                                 options:
-                                    api::SetBarTuiOpts {
+                                    host::SetBarTuiOpts {
                                         #[expect(deprecated)]
                                             __non_exhaustive_struct_update: (),
                                     },
                             }) => {
                                 doit(bar_tui_states, tui, |state| &mut state.tui);
                             }
-                            api::BarUpdate::Hide | api::BarUpdate::Show => {
+                            host::BarUpdate::Hide | host::BarUpdate::Show => {
                                 doit(
                                     bar_tui_states,
-                                    matches!(update, api::BarUpdate::Hide),
+                                    matches!(update, host::BarUpdate::Hide),
                                     |state| &mut state.hidden,
                                 );
                             }
                         }
                     });
                 }
-                api::ControllerUpdate::UpdateBars(
-                    api::BarSelection::OnMonitor { monitor_name },
+                host::HostUpdate::UpdateBars(
+                    host::BarSelect::OnMonitor { monitor_name },
                     update,
                 ) => {
                     fn doit<T>(
@@ -168,31 +167,31 @@ async fn run_controller(
                     with_mutex_lock(&bar_tui_states, |bar_tui_states| {
                         // TODO: Keep unknown monitors around only for a few minutes
                         match update {
-                            api::BarUpdate::SetTui(api::SetBarTui {
+                            host::BarUpdate::SetTui(host::SetBarTui {
                                 tui,
                                 options:
-                                    api::SetBarTuiOpts {
+                                    host::SetBarTuiOpts {
                                         #[expect(deprecated)]
                                             __non_exhaustive_struct_update: (),
                                     },
                             }) => {
                                 doit(bar_tui_states, monitor_name, tui, |state| &mut state.tui);
                             }
-                            api::BarUpdate::Hide | api::BarUpdate::Show => {
+                            host::BarUpdate::Hide | host::BarUpdate::Show => {
                                 doit(
                                     bar_tui_states,
                                     monitor_name,
-                                    matches!(update, api::BarUpdate::Hide),
+                                    matches!(update, host::BarUpdate::Hide),
                                     |state| &mut state.hidden,
                                 );
                             }
                         }
                     });
                 }
-                api::ControllerUpdate::SetDefaultTui(api::SetBarTui {
+                host::HostUpdate::SetDefaultTui(host::SetBarTui {
                     tui,
                     options:
-                        api::SetBarTuiOpts {
+                        host::SetBarTuiOpts {
                             #[expect(deprecated)]
                                 __non_exhaustive_struct_update: (),
                         },
@@ -208,15 +207,15 @@ async fn run_controller(
     }
 }
 
-async fn run_controller_inner(
+async fn run_host_inner(
     bar_tui_states: Arc<std::sync::Mutex<BarTuiStates>>,
     bar_menus_rx: watch::Receiver<BarMenus>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
 ) {
     // TODO: Consider moving this to BarTuiStates to ensure consistent data
     let mut monitors_auto_cancel = HashMap::<Arc<str>, tokio_util::sync::DropGuard>::new();
 
-    let mut monitor_rx = crate::monitors::connect();
+    let mut monitor_rx = crate::bins::monitors::connect();
 
     while let Some(ev) = monitor_rx.next().await {
         with_mutex_lock(&bar_tui_states, |bar_tui_states| {
@@ -247,7 +246,7 @@ struct RunMonitorArgs {
     cancel_monitor: CancellationToken,
     bar_state_tx: watch::Sender<BarTuiStateTx>,
     bar_menus_rx: watch::Receiver<BarMenus>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
 }
 async fn run_monitor(mut args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
@@ -289,7 +288,7 @@ struct StartedMonitorEnv {
     intern_upd_rx: tokio::sync::mpsc::UnboundedReceiver<Upd>,
     bar_tui_rx: watch::Receiver<tui::Elem>,
     bar_hide_rx: watch::Receiver<bool>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<api::ControllerEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
 }
 
 async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
@@ -334,7 +333,7 @@ const HORIZONTAL_PADDING: u16 = 4;
 
 #[derive(Debug)]
 struct ShowMenu {
-    kind: api::MenuKind,
+    kind: host::MenuKind,
     pix_location: tui::Vec2<u32>,
     cached_size: tui::Vec2<u16>,
     sizing: tui::SizingArgs,
@@ -350,10 +349,7 @@ impl ShowMenu {
         let sizing = tui::SizingArgs {
             font_size: env.menu.sizes.font_size(),
         };
-        let (tui, kind) = {
-            let BarMenu { tui, kind } = &*receiver.borrow_and_update();
-            (tui.clone(), kind.internal_clone())
-        };
+        let BarMenu { tui, kind } = receiver.borrow_and_update().clone();
         Self {
             cached_size: tui::calc_min_size(&tui, &sizing),
             sizing,
@@ -425,7 +421,7 @@ async fn run_monitor_main(
 
                     if term_kind == TermKind::Menu
                         && let Some(menu) = &show_menu
-                        && matches!(&menu.kind, api::MenuKind::Tooltip)
+                        && matches!(&menu.kind, host::MenuKind::Tooltip)
                     {
                         show_menu = None;
                         rerender_menu = true;
@@ -442,7 +438,7 @@ async fn run_monitor_main(
                         if term_kind == TermKind::Bar {
                             if empty
                                 && let Some(menu) = &show_menu
-                                && (!is_hover || matches!(&menu.kind, api::MenuKind::Tooltip))
+                                && (!is_hover || matches!(&menu.kind, host::MenuKind::Tooltip))
                             {
                                 show_menu = None;
                                 rerender_menu = true;
@@ -461,7 +457,7 @@ async fn run_monitor_main(
                             // but that is currently not supported.
                             if has_hover && menu.is_none() {
                                 menu = Some(watch::Sender::new(BarMenu {
-                                    kind: api::MenuKind::Tooltip,
+                                    kind: host::MenuKind::Tooltip,
                                     tui: tui::Elem::empty().with_min_size(tui::Size {
                                         width: 1,
                                         height: 1,
@@ -478,10 +474,7 @@ async fn run_monitor_main(
 
                         if let Some(tag) = tag {
                             env.event_tx
-                                .send(api::ControllerEvent::Interact(api::InteractEvent {
-                                    kind,
-                                    tag,
-                                }))
+                                .send(host::HostEvent::Interact(host::InteractEvent { kind, tag }))
                                 .ok_or_debug();
                         }
                     }
@@ -682,7 +675,7 @@ async fn init_term(
         (tx, rx)
     };
 
-    crate::inst::start_generic_panel(
+    crate::bins::inst::start_generic_panel(
         &sock_path,
         &log_name,
         futures::stream::poll_fn(move |cx| term_upd_rx.poll_recv(cx)),
@@ -918,12 +911,12 @@ async fn try_init_monitor(
     })
 }
 
-pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
+pub(crate) fn host_main() -> Option<std::process::ExitCode> {
     use std::process::ExitCode;
 
     use anyhow::Context as _;
 
-    crate::logging::init_logger("CONTROLLER".into());
+    crate::logging::init_logger("HOST".into());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -934,17 +927,17 @@ pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
     let _guard = runtime.enter();
 
     // FIXME: Proper arg parsing
-    let driver = std::env::args_os().nth(1)?;
+    let ctrl_cmd = std::env::args_os().nth(1)?;
 
-    let (mut driver_child, driver_socket) = {
+    let (mut ctrl_child, ctrl_socket) = {
         let socket_dir = tempfile::TempDir::new().ok_or_log()?;
-        let sock_path = socket_dir.path().join("driver.sock");
+        let sock_path = socket_dir.path().join("host.sock");
         let socket = std::os::unix::net::UnixListener::bind(&sock_path).ok_or_log()?;
 
-        let child = tokio::process::Command::new(driver)
+        let child = tokio::process::Command::new(ctrl_cmd)
             .kill_on_drop(true)
             .args(std::env::args_os().skip(2))
-            .env(crate::driver_ipc::CONTROLLER_SOCK_PATH_VAR, sock_path)
+            .env(crate::host_ctrl_ipc::HOST_SOCK_PATH_VAR, sock_path)
             .spawn()
             .ok_or_log()?;
 
@@ -1008,14 +1001,14 @@ pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (tx, rx)
     };
-    runtime.spawn(crate::api::run_ipc_connection(
-        driver_socket,
+    runtime.spawn(crate::host::run_ipc_connection(
+        ctrl_socket,
         move |upd| update_tx.send(upd).ok(),
         async move || event_rx.recv().await,
     ));
 
     let main_task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
-        run_controller(
+        run_host(
             futures::stream::poll_fn(move |cx| update_rx.poll_recv(cx)),
             event_tx,
         )
@@ -1026,7 +1019,7 @@ pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
 
     let exit_task = runtime.spawn(async move {
         let wait_res = tokio::select! {
-            it = driver_child.wait() => Ok(it),
+            it = ctrl_child.wait() => Ok(it),
             join = main_task => {
                 let code = join
                     .context("Main task failed")
@@ -1039,11 +1032,11 @@ pub(crate) fn ctrl_main() -> Option<std::process::ExitCode> {
         let (wait_res, code) = match wait_res {
             Ok(res) => (Some(res), std::process::ExitCode::SUCCESS),
             Err(code) => (
-                driver_child
+                ctrl_child
                     .wait()
                     .timeout(std::time::Duration::from_secs(5))
                     .await
-                    .context("Driver process failed to exit on its own")
+                    .context("Controller process failed to exit on its own")
                     .ok_or_log(),
                 code,
             ),

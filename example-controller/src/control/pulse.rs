@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use crate::{
     clients,
-    driver::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
+    control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
     utils::ResultExt as _,
     xtui,
 };
-use ctrl::tui;
+use scratchbar::tui;
 
 pub struct PulseModuleArgs {
     pub pulse: Arc<clients::pulse::PulseClient>,

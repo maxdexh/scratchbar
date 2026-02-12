@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd -- "$(dirname "$0")/.."
+
+host_bin="$(cargo build --message-format=json -p scratchbar-bin "$@" | jq -rc 'select(.target.name == "scratchbar" and .executable != null) | .executable')"
+example_bin="$(cargo build --message-format=json -p example-controller "$@" | jq -rc 'select(.target.name == "example-controller" and .executable != null) | .executable')"
+exec "${host_bin:?}" "${example_bin:?}"

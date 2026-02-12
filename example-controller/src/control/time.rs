@@ -1,11 +1,11 @@
 use crate::{
-    driver::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
+    control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
     utils::ResultExt as _,
     xtui,
 };
 use anyhow::Context as _;
 use chrono::{Datelike as _, Timelike as _};
-use ctrl::{api, tui};
+use scratchbar::{host, tui};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
@@ -91,11 +91,11 @@ pub async fn time_module(
                 let now = chrono::Local::now().date_naive();
                 let month = *ctx_menu_month_rx.borrow_and_update();
                 if let Some(tui) = mk_calendar(month, now, Some(&ctx_menu_ctrls)) {
-                    ctrl_tx.set_menu(api::RegisterMenu {
+                    ctrl_tx.set_menu(host::RegisterMenu {
                         on_tag: bar_tag.clone(),
                         on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
                         tui,
-                        menu_kind: api::MenuKind::Context,
+                        menu_kind: host::MenuKind::Context,
                         options: Default::default(),
                     });
                 }
@@ -108,11 +108,11 @@ pub async fn time_module(
         let now = chrono::Local::now();
         if prev.day() != now.day() {
             if let Some(tui) = mk_calendar(now.date_naive(), now.date_naive(), None) {
-                ctrl_tx.set_menu(api::RegisterMenu {
+                ctrl_tx.set_menu(host::RegisterMenu {
                     on_tag: bar_tag.clone(),
                     on_kind: tui::InteractKind::Hover,
                     tui,
-                    menu_kind: api::MenuKind::Tooltip,
+                    menu_kind: host::MenuKind::Tooltip,
                     options: Default::default(),
                 });
             }

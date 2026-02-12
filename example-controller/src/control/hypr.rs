@@ -2,11 +2,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     clients,
-    driver::{BarTuiElem, InteractTagRegistry, ModuleArgs, interact_callback_with},
+    control::{BarTuiElem, InteractTagRegistry, ModuleArgs, interact_callback_with},
     utils::ResultExt as _,
     xtui,
 };
-use ctrl::tui;
+use scratchbar::tui;
 
 pub async fn hypr_module(
     ModuleArgs {

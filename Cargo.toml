@@ -1,10 +1,10 @@
 [package]
-name = "bar-panel-controller"
+name = "scratchbar"
 version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["example-bar"]
+members = ["scratchbar-bin", "example-controller"]
 
 [dependencies]
 # Public dependencies
@@ -38,9 +38,6 @@ serde_json = { version = "1.0.149", features = ["raw_value"], optional = true }
 base64 = { version = "0.22.1", optional = true }
 
 [features]
-# It would be really nice if we could enable this automatically when building the binary of this package,
-# but there does not seem to be a way to do this. `required-feature` just gives an error when trying to
-# build without it, but also causes `cargo check` to silently skip the binary.
 __bin = [
   "dep:tokio",
   "dep:tokio-util",
