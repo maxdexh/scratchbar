@@ -36,7 +36,7 @@ impl<T> Vec2<T> {
 
 #[derive(Debug, Clone)]
 pub(super) struct StoredInteractive {
-    tag: InteractTag,
+    tag: CustomId,
     has_hover: bool,
 }
 impl StoredInteractive {
@@ -47,21 +47,22 @@ impl StoredInteractive {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct RenderedLayout {
     pub(super) widgets: Vec<(Area, StoredInteractive)>,
     pub(super) last_mouse_pos: Option<Vec2<u16>>,
     pub(super) last_hover_elem: Option<StoredInteractive>,
 }
 
-pub(crate) struct MouseEventResult {
+pub(crate) struct MouseInteractRes {
     pub kind: InteractKind,
-    pub tag: Option<InteractTag>,
-    pub empty: bool,
+    pub tag: Option<CustomId>,
     pub changed: bool,
     pub rerender: bool,
-    pub has_hover: bool,
-    pub pix_location: Vec2<u32>,
+}
+pub(crate) enum MouseEventRes {
+    Interact(MouseInteractRes),
+    MouseLeave,
 }
 
 impl RenderedLayout {
@@ -76,11 +77,28 @@ impl RenderedLayout {
         changed
     }
 
+    pub(crate) fn get_pix_location(
+        &self,
+        font_size: Vec2<u16>,
+        id: &CustomId,
+    ) -> Option<Vec2<u32>> {
+        let font_w = u32::from(font_size.x);
+        let font_h = u32::from(font_size.y);
+
+        self.widgets
+            .iter()
+            .find(|(_, it)| it.tag == *id)
+            .map(|(area, _)| Vec2 {
+                x: u32::from(area.pos.x) * font_w + u32::from(area.size.x) * font_w / 2,
+                y: u32::from(area.pos.y) * font_h + u32::from(area.size.y) * font_h / 2,
+            })
+    }
+
     pub(crate) fn interpret_mouse_event(
         &mut self,
         event: crossterm::event::MouseEvent,
         font_size: Vec2<u16>,
-    ) -> MouseEventResult {
+    ) -> MouseEventRes {
         let crossterm::event::MouseEvent {
             kind,
             column,
@@ -109,33 +127,19 @@ impl RenderedLayout {
             MK::ScrollLeft => IK::Scroll(DR::Left),
             MK::ScrollRight => IK::Scroll(DR::Right),
             MK::Moved | MK::Up(_) | MK::Drag(_) => IK::Hover,
-            MK::KittyLeaveWindow => unimplemented!(),
+            MK::KittyLeaveWindow => {
+                return MouseEventRes::MouseLeave;
+            }
         };
 
-        let font_w = u32::from(font_size.x);
-        let font_h = u32::from(font_size.y);
-
-        let Some((area, elem)) = self.widgets.iter().find(|(r, _)| r.contains(pos)) else {
+        let Some((_, elem)) = self.widgets.iter().find(|(r, _)| r.contains(pos)) else {
             let cur = self.last_hover_elem.take();
-            return MouseEventResult {
+            return MouseEventRes::Interact(MouseInteractRes {
                 kind,
-                empty: true,
                 tag: None,
-                has_hover: false,
-                pix_location: Vec2 {
-                    x: u32::from(pos.x) * font_w,
-                    y: u32::from(pos.y) * font_h,
-                },
                 changed: cur.is_some(),
                 rerender: cur.is_some_and(|it| it.has_hover),
-            };
-        };
-
-        let pix_location = {
-            Vec2 {
-                x: u32::from(area.pos.x) * font_w + u32::from(area.size.x) * font_w / 2,
-                y: u32::from(area.pos.y) * font_h + u32::from(area.size.y) * font_h / 2,
-            }
+            });
         };
 
         let prev = self.last_hover_elem.replace(elem.clone());
@@ -144,15 +148,12 @@ impl RenderedLayout {
 
         let rerender = changed && (prev.as_ref().is_some_and(|it| it.has_hover) || elem.has_hover);
 
-        MouseEventResult {
+        MouseEventRes::Interact(MouseInteractRes {
             kind,
             tag: Some(elem.tag.clone()),
-            empty: false,
             changed,
             rerender,
-            has_hover: elem.has_hover,
-            pix_location,
-        }
+        })
     }
 }
 

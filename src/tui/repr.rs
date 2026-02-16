@@ -47,7 +47,7 @@ pub(crate) struct StackItemRepr {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct InteractRepr {
-    pub tag: InteractTag,
+    pub tag: CustomId,
     pub normal: Elem,
     pub hovered: Option<Elem>,
 }

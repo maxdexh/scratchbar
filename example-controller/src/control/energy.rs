@@ -2,18 +2,21 @@ use std::sync::Arc;
 
 use crate::{
     clients,
-    control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
+    control::{
+        BarTuiElem, MenuKind, ModuleArgs, RegisterMenu, interact_callback_with,
+        mk_fresh_interact_tag,
+    },
     utils::ResultExt as _,
     xtui,
 };
-use scratchbar::{host, tui};
+use scratchbar::tui;
+use tokio::sync::watch;
 
 pub async fn ppd_module(
     ModuleArgs {
         tui_tx,
         reload_rx,
         ctrl_tx,
-        tag_callback_tx,
         ..
     }: ModuleArgs,
 ) {
@@ -27,22 +30,21 @@ pub async fn ppd_module(
         }
         ppd.cycle_profile();
     });
-    tag_callback_tx
-        .send((interact_tag.clone(), Some(on_interact)))
-        .ok_or_log();
+    ctrl_tx.register_callback(interact_tag.clone(), Some(on_interact));
 
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
         let profile = profile_rx.borrow_and_update().clone();
-        ctrl_tx.set_menu(host::RegisterMenu {
+        let tui = tui::Elem::text(
+            profile.as_deref().unwrap_or("No profile"),
+            tui::TextOpts::default(),
+        );
+        ctrl_tx.set_menu(RegisterMenu {
             on_tag: interact_tag.clone(),
             on_kind: tui::InteractKind::Hover,
-            tui: tui::Elem::text(
-                profile.as_deref().unwrap_or("No profile"),
-                tui::TextOpts::default(),
-            ),
-            menu_kind: host::MenuKind::Tooltip,
-            options: Default::default(),
+            tui_rx: watch::channel(tui).1,
+            menu_kind: MenuKind::Tooltip,
+            opts: Default::default(),
         });
 
         let icon: tui::Elem = match profile.as_deref() {
@@ -125,12 +127,13 @@ pub async fn energy_module(
                 }
             };
             if text != last_tooltip {
-                ctrl_tx.set_menu(host::RegisterMenu {
+                let tui = tui::Elem::text(text.as_str(), tui::TextOpts::default());
+                ctrl_tx.set_menu(RegisterMenu {
                     on_tag: interact_tag.clone(),
                     on_kind: tui::InteractKind::Hover,
-                    tui: tui::Elem::text(text.as_str(), tui::TextOpts::default()),
-                    menu_kind: host::MenuKind::Tooltip,
-                    options: Default::default(),
+                    tui_rx: watch::channel(tui).1,
+                    menu_kind: MenuKind::Tooltip,
+                    opts: Default::default(),
                 });
                 last_tooltip = text;
             }

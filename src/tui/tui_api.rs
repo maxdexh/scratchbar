@@ -2,10 +2,21 @@ use crate::tui::*;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct InteractTag(Arc<[u8]>);
+/// Custom ID specified by the user. Holds custom bytes.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CustomId(Arc<[u8]>);
 
-impl InteractTag {
+impl fmt::Debug for CustomId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x")?;
+        for byte in self.0.iter() {
+            write!(f, "{byte:x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl CustomId {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self(bytes.into())
     }
@@ -36,6 +47,7 @@ pub enum MouseButton {
     Middle,
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum InteractKind {
     Click(MouseButton),
     Scroll(Direction),
@@ -307,7 +319,7 @@ impl Elem {
         .into()
     }
 
-    pub fn interactive(self, tag: InteractTag) -> Self {
+    pub fn interactive(self, tag: CustomId) -> Self {
         ElemRepr::Interact(InteractRepr {
             tag,
             normal: self,
@@ -316,7 +328,7 @@ impl Elem {
         .into()
     }
 
-    pub fn interactive_hover(self, tag: InteractTag, hovered: Elem) -> Self {
+    pub fn interactive_hover(self, tag: CustomId, hovered: Elem) -> Self {
         ElemRepr::Interact(InteractRepr {
             tag,
             normal: self,

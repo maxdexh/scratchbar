@@ -19,23 +19,23 @@ pub(crate) struct SizingArgs {
 }
 pub(crate) fn calc_min_size(elem: &Elem, args: &SizingArgs) -> Vec2<u16> {
     elem.calc_min_size(args)
+        .combine(Vec2 { x: 1, y: 1 }, std::cmp::max)
 }
 pub(crate) fn render(
     elem: &Elem,
     area: Area,
     writer: &mut impl Write,
     sizing: &SizingArgs,
-    old_layout: Option<&RenderedLayout>,
+    old_layout: &RenderedLayout,
 ) -> std::io::Result<RenderedLayout> {
     crossterm::queue!(
         writer,
         crossterm::terminal::BeginSynchronizedUpdate,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
     )?;
-    let last_mouse_pos = old_layout.as_ref().and_then(|it| it.last_mouse_pos);
     let mut layout = RenderedLayout {
         widgets: Default::default(),
-        last_mouse_pos,
+        last_mouse_pos: old_layout.last_mouse_pos,
         last_hover_elem: None,
     };
     elem.render(

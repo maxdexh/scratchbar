@@ -12,7 +12,7 @@ pub async fn hypr_module(
     ModuleArgs {
         tui_tx,
         reload_rx,
-        tag_callback_tx,
+        ctrl_tx,
         ..
     }: ModuleArgs,
 ) {
@@ -51,9 +51,8 @@ pub async fn hypr_module(
                         hypr.switch_workspace(ws_id.clone());
                     },
                 );
-                tag_callback_tx
-                    .send((tag.clone(), Some(on_interact)))
-                    .ok_or_debug();
+
+                ctrl_tx.register_callback(tag.clone(), Some(on_interact));
 
                 (mk(None), mk(Some(tui::TermColor::Green)))
             });

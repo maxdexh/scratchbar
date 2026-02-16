@@ -2,19 +2,22 @@ use std::sync::Arc;
 
 use crate::{
     clients,
-    control::{BarTuiElem, InteractArgs, InteractTagRegistry, ModuleArgs, mk_fresh_interact_tag},
+    control::{
+        BarTuiElem, InteractArgs, InteractTagRegistry, MenuKind, ModuleArgs, RegisterMenu,
+        mk_fresh_interact_tag,
+    },
     utils::ResultExt as _,
     xtui,
 };
 use anyhow::Context as _;
-use scratchbar::{host, tui};
+use scratchbar::tui;
+use tokio::sync::watch;
 
 pub async fn tray_module(
     ModuleArgs {
         tui_tx,
         reload_rx,
         ctrl_tx,
-        tag_callback_tx,
         ..
     }: ModuleArgs,
 ) {
@@ -57,12 +60,12 @@ pub async fn tray_module(
                     menu_tui_stack.push(tui::Elem::text(description, tui::TextOpts::default()));
                     menu_tui_stack.build()
                 };
-                ctrl_tx.set_menu(host::RegisterMenu {
+                ctrl_tx.set_menu(RegisterMenu {
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Hover,
-                    menu_kind: host::MenuKind::Tooltip,
-                    tui: menu_tui,
-                    options: Default::default(),
+                    menu_kind: MenuKind::Tooltip,
+                    tui_rx: watch::channel(menu_tui).1,
+                    opts: Default::default(),
                 });
             }
 
@@ -98,25 +101,26 @@ pub async fn tray_module(
                                 .ok_or_log();
                         });
                     });
-                    tag_callback_tx.send((tag.clone(), Some(icb))).ok_or_debug();
+                    ctrl_tx.register_callback(tag.clone(), Some(icb));
                     tag
                 });
 
-                ctrl_tx.set_menu(host::RegisterMenu {
-                    on_tag: tag.clone(),
-                    on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
-                    menu_kind: host::MenuKind::Context,
-                    tui: tui::Elem::block(tui::BlockOpts {
-                        border_style: Some(tui::TextStyle {
-                            fg: Some(tui::TermColor::DarkGrey),
-                            ..Default::default()
-                        }),
-                        borders: tui::BlockBorders::all(),
-                        lines: tui::BlockLineSet::thick(),
-                        inner: Some(menu_tui),
+                let tui = tui::Elem::block(tui::BlockOpts {
+                    border_style: Some(tui::TextStyle {
+                        fg: Some(tui::TermColor::DarkGrey),
                         ..Default::default()
                     }),
-                    options: Default::default(),
+                    borders: tui::BlockBorders::all(),
+                    lines: tui::BlockLineSet::thick(),
+                    inner: Some(menu_tui),
+                    ..Default::default()
+                });
+                ctrl_tx.set_menu(RegisterMenu {
+                    on_tag: tag.clone(),
+                    on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
+                    menu_kind: MenuKind::Context,
+                    tui_rx: watch::channel(tui).1,
+                    opts: Default::default(),
                 });
             }
 
@@ -160,7 +164,7 @@ pub async fn tray_module(
     fn tray_menu_item_to_tui(
         depth: u16,
         item: &system_tray::menu::MenuItem,
-        mk_interact: &impl Fn(i32) -> tui::InteractTag,
+        mk_interact: &impl Fn(i32) -> tui::CustomId,
     ) -> Option<tui::Elem> {
         use system_tray::menu::*;
         let main_elem = match item {
@@ -233,7 +237,7 @@ pub async fn tray_module(
     fn tray_menu_to_tui(
         depth: u16,
         items: &[system_tray::menu::MenuItem],
-        mk_interact: &impl Fn(i32) -> tui::InteractTag,
+        mk_interact: &impl Fn(i32) -> tui::CustomId,
     ) -> tui::Elem {
         let mut stack = xtui::StackBuilder::new(tui::Axis::Y);
         for item in items {

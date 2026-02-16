@@ -9,7 +9,7 @@ pub fn tui_center_symbol(sym: impl std::fmt::Display, width: u16) -> tui::Elem {
 pub fn underline_hovered(
     text: impl std::fmt::Display,
     base: impl Into<tui::TextOpts>,
-    tag: tui::InteractTag,
+    tag: tui::CustomId,
 ) -> tui::Elem {
     let opts = base.into();
 

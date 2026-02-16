@@ -27,7 +27,30 @@ impl std::error::Error for HostError {}
 pub enum HostUpdate {
     UpdateBars(BarSelect, BarUpdate),
     SetDefaultTui(SetBarTui),
-    RegisterMenu(RegisterMenu),
+    OpenMenu(OpenMenu),
+    CloseMenu,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenMenu {
+    pub tui: tui::Elem,
+    pub monitor: Arc<str>,
+    pub bar_anchor: tui::CustomId,
+    pub opts: OpenMenuOpts,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenMenuOpts {
+    // TODO: Option to keep location, layout
+    #[doc(hidden)]
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CloseMenuOpts {
+    #[doc(hidden)]
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
 }
 
 #[non_exhaustive]
@@ -53,6 +76,7 @@ pub struct SetBarTuiOpts {
     #[deprecated = warn_non_exhaustive!()]
     pub __non_exhaustive_struct_update: (),
 }
+// FIXME: Use a struct similar to TermInfo instead
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BarSelect {
@@ -60,12 +84,12 @@ pub enum BarSelect {
     OnMonitor { monitor_name: Arc<str> },
 }
 
+#[deprecated]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterMenu {
-    pub on_tag: tui::InteractTag,
+    pub on_tag: tui::CustomId,
     pub on_kind: tui::InteractKind,
     pub tui: tui::Elem,
-    pub menu_kind: MenuKind,
     pub options: RegisterMenuOpts,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -76,26 +100,47 @@ pub struct RegisterMenuOpts {
     #[deprecated = warn_non_exhaustive!()]
     pub __non_exhaustive_struct_update: (),
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum MenuKind {
-    Tooltip,
-    Context,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum HostEvent {
-    Interact(InteractEvent),
+    Term(TermInfo, TermEvent),
     // TODO: Add monitor change event
     // TODO: Menu closed
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
+pub enum TermEvent {
+    Interact(InteractEvent),
+    MouseLeave,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InteractEvent {
     pub kind: tui::InteractKind,
-    pub tag: tui::InteractTag,
+    pub tag: Option<tui::CustomId>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FocusEvent {
+    pub term: TermInfo,
+    pub is_focused: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TermInfo {
     pub monitor: Arc<str>,
+    pub kind: TermKind,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum TermKind {
+    Menu,
+    Bar,
 }
 
 pub async fn run_host_connection(

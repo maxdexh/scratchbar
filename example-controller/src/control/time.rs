@@ -1,11 +1,14 @@
 use crate::{
-    control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
+    control::{
+        BarTuiElem, MenuKind, ModuleArgs, RegisterMenu, interact_callback_with,
+        mk_fresh_interact_tag,
+    },
     utils::ResultExt as _,
     xtui,
 };
 use anyhow::Context as _;
 use chrono::{Datelike as _, Timelike as _};
-use scratchbar::{host, tui};
+use scratchbar::tui;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
@@ -15,134 +18,132 @@ pub async fn time_module(
         tui_tx,
         mut reload_rx,
         ctrl_tx,
-        tag_callback_tx,
         ..
     }: ModuleArgs,
 ) {
     let bar_tag = mk_fresh_interact_tag();
-    let ctx_menu_ctrls = CalendarControls {
-        reset_now: mk_fresh_interact_tag(),
-        next_month: mk_fresh_interact_tag(),
-        prev_month: mk_fresh_interact_tag(),
-    };
-    let (ctx_menu_month_tx, mut ctx_menu_month_rx) =
-        watch::channel(chrono::Local::now().date_naive().with_day(1).unwrap());
+    let (cal_today_tx, mut cal_today_rx) = watch::channel(chrono::Local::now().date_naive());
 
-    let callbacks: [(_, fn(chrono::NaiveDate) -> _); _] = [
-        (ctx_menu_ctrls.prev_month.clone(), |month| {
-            month
-                .checked_sub_months(chrono::Months::new(1))
-                .context("Failed to decrement month")
-        }),
-        (ctx_menu_ctrls.next_month.clone(), |month| {
-            month
-                .checked_add_months(chrono::Months::new(1))
-                .context("Failed to increment month")
-        }),
-        (ctx_menu_ctrls.reset_now.clone(), |_| {
+    let _cal_task = {
+        let cal_menu_ctrls = CalendarControls {
+            reset_now: mk_fresh_interact_tag(),
+            next_month: mk_fresh_interact_tag(),
+            prev_month: mk_fresh_interact_tag(),
+        };
+        let (cal_menu_month_tx, mut cal_menu_month_rx) = watch::channel(
             chrono::Local::now()
+                .date_naive()
                 .with_day(1)
-                .map(|it| it.date_naive())
-                .context("Failed to increment month")
-        }),
-    ];
-    for (tag, cb) in callbacks {
-        let cb = interact_callback_with(ctx_menu_month_tx.clone(), move |month_tx, interact| {
-            if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
-                return;
-            }
-            month_tx.send_modify(|month| {
-                if let Some(new) = cb(*month).ok_or_log() {
-                    *month = new
-                }
-            });
-        });
-        tag_callback_tx.send((tag, Some(cb))).ok_or_log();
-    }
-
-    tag_callback_tx
-        .send((
-            ctx_menu_ctrls.prev_month.clone(),
-            Some(interact_callback_with(
-                ctx_menu_month_tx.clone(),
-                |month_tx, interact| {
+                .expect("Should always be able to set day to 1"),
+        );
+        let cal_callbacks: [(_, fn(chrono::NaiveDate) -> _); _] = [
+            (cal_menu_ctrls.prev_month.clone(), |month| {
+                month
+                    .checked_sub_months(chrono::Months::new(1))
+                    .context("Failed to decrement month")
+            }),
+            (cal_menu_ctrls.next_month.clone(), |month| {
+                month
+                    .checked_add_months(chrono::Months::new(1))
+                    .context("Failed to increment month")
+            }),
+            (cal_menu_ctrls.reset_now.clone(), |_| {
+                chrono::Local::now()
+                    .with_day(1)
+                    .map(|it| it.date_naive())
+                    .context("Failed to increment month")
+            }),
+        ];
+        for (tag, new_date) in cal_callbacks {
+            let cb =
+                interact_callback_with(cal_menu_month_tx.clone(), move |month_tx, interact| {
                     if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
                         return;
                     }
                     month_tx.send_modify(|month| {
-                        if let Some(new) = month
-                            .checked_sub_months(chrono::Months::new(1))
-                            .context("Failed to decrement month")
-                            .ok_or_log()
-                        {
+                        if let Some(new) = new_date(*month).ok_or_log() {
                             *month = new
                         }
                     });
-                },
-            )),
-        ))
-        .ok_or_log();
+                });
+            ctrl_tx.register_callback(tag, Some(cb));
+        }
 
-    let _ctx_menu_task = {
-        let ctrl_tx = ctrl_tx.clone();
-        let bar_tag = bar_tag.clone();
+        let cal_menu_tx = watch::Sender::new(tui::Elem::empty());
+        let cal_tooltip_tx = watch::Sender::new(tui::Elem::empty());
+        ctrl_tx.set_menu(RegisterMenu {
+            on_tag: bar_tag.clone(),
+            on_kind: tui::InteractKind::Hover,
+            tui_rx: cal_tooltip_tx.subscribe(),
+            menu_kind: MenuKind::Tooltip,
+            opts: Default::default(),
+        });
+        ctrl_tx.set_menu(RegisterMenu {
+            on_tag: bar_tag.clone(),
+            on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
+            tui_rx: cal_menu_tx.subscribe(),
+            menu_kind: MenuKind::Context,
+            opts: Default::default(),
+        });
+
         AbortOnDropHandle::new(tokio::spawn(async move {
-            while let Ok(()) = ctx_menu_month_rx.changed().await {
-                let now = chrono::Local::now().date_naive();
-                let month = *ctx_menu_month_rx.borrow_and_update();
-                if let Some(tui) = mk_calendar(month, now, Some(&ctx_menu_ctrls)) {
-                    ctrl_tx.set_menu(host::RegisterMenu {
-                        on_tag: bar_tag.clone(),
-                        on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
-                        tui,
-                        menu_kind: host::MenuKind::Context,
-                        options: Default::default(),
-                    });
+            cal_today_rx.mark_changed();
+            cal_menu_month_rx.mark_changed();
+            loop {
+                tokio::select! {
+                    Ok(()) = cal_menu_month_rx.changed() => {}
+                    Ok(()) = cal_today_rx.changed() => {}
+                    else => break,
+                }
+                let (today, today_has_changed) = {
+                    let it = cal_today_rx.borrow_and_update();
+                    (*it, it.has_changed())
+                };
+                let menu_month = *cal_menu_month_rx.borrow_and_update();
+
+                if today_has_changed && let Some(tui) = mk_calendar(today, today, None) {
+                    cal_tooltip_tx.send_replace(tui);
+                }
+                if let Some(tui) = mk_calendar(menu_month, today, Some(&cal_menu_ctrls)) {
+                    cal_menu_tx.send_replace(tui);
                 }
             }
         }))
     };
 
-    let mut prev = chrono::DateTime::<chrono::Local>::default();
-    loop {
-        let now = chrono::Local::now();
-        if prev.day() != now.day() {
-            if let Some(tui) = mk_calendar(now.date_naive(), now.date_naive(), None) {
-                ctrl_tx.set_menu(host::RegisterMenu {
-                    on_tag: bar_tag.clone(),
-                    on_kind: tui::InteractKind::Hover,
-                    tui,
-                    menu_kind: host::MenuKind::Tooltip,
-                    options: Default::default(),
-                });
-            }
-            ctx_menu_month_tx.send_modify(|_| {});
-        }
-
-        if prev.minute() != now.minute() {
+    let (clock_time_tx, mut clock_time_rx) = watch::channel(chrono::Local::now());
+    let _bar_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        clock_time_rx.mark_changed();
+        while let Ok(()) = clock_time_rx.changed().await {
+            let now = *clock_time_rx.borrow_and_update();
             let tui = tui::Elem::text(now.format("%H:%M %d/%m"), tui::TextOpts::default())
                 .interactive(bar_tag.clone());
 
             tui_tx.send_replace(BarTuiElem::Shared(tui));
+        }
+    }));
 
-            prev = now;
-        } else {
-            let seconds_until_minute = 60 - u64::from(now.second());
-            let timeout_ms = std::cmp::max(750 * seconds_until_minute, 100);
+    loop {
+        let now = chrono::Local::now();
+        clock_time_tx.send_if_modified(|old| std::mem::replace(old, now).minute() != now.minute());
 
-            tokio::select! {
-                Some(()) = reload_rx.wait() => {}
-                () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {}
-            }
+        let today = now.date_naive();
+        cal_today_tx.send_if_modified(|old| std::mem::replace(old, today) != today);
+
+        let seconds_until_minute = 60 - u64::from(now.second());
+        let timeout_ms = std::cmp::max(750 * seconds_until_minute, 100);
+
+        tokio::select! {
+            Some(()) = reload_rx.wait() => {}
+            () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {}
         }
     }
 }
 
 struct CalendarControls {
-    // TODO: Reset on menu close
-    reset_now: tui::InteractTag,
-    next_month: tui::InteractTag,
-    prev_month: tui::InteractTag,
+    reset_now: tui::CustomId,
+    next_month: tui::CustomId,
+    prev_month: tui::CustomId,
 }
 
 // TODO: Context menu

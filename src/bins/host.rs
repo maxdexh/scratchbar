@@ -4,7 +4,10 @@ use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use futures::{Stream, StreamExt};
-use tokio::{sync::watch, task::JoinSet};
+use tokio::{
+    sync::{mpsc::UnboundedSender, watch},
+    task::JoinSet,
+};
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
@@ -13,13 +16,6 @@ use crate::{
     host, tui,
     utils::{ResultExt, with_mutex_lock},
 };
-
-#[derive(Debug, Clone)]
-struct BarMenu {
-    kind: host::MenuKind,
-    tui: tui::Elem,
-}
-type BarMenus = HashMap<tui::InteractTag, HashMap<tui::InteractKind, watch::Sender<BarMenu>>>;
 
 #[derive(Debug, Clone)]
 struct BarTuiState {
@@ -46,7 +42,7 @@ impl BarTuiStates {
 
 async fn run_host(
     update_rx: impl Stream<Item = host::HostUpdate> + Send + 'static,
-    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
+    event_tx: UnboundedSender<host::HostEvent>,
 ) {
     let mut required_tasks = tokio::task::JoinSet::new();
 
@@ -57,10 +53,11 @@ async fn run_host(
             hidden: watch::Sender::new(false),
         },
     }));
-    let bar_menus_tx = watch::Sender::new(BarMenus::default());
+
+    let open_menu_tx = watch::Sender::new(None);
     required_tasks.spawn(run_host_inner(
         bar_tui_states.clone(),
-        bar_menus_tx.subscribe(),
+        open_menu_tx.subscribe(),
         event_tx.clone(),
     ));
 
@@ -68,43 +65,6 @@ async fn run_host(
         tokio::pin!(update_rx);
         while let Some(update) = update_rx.next().await {
             match update {
-                host::HostUpdate::RegisterMenu(host::RegisterMenu {
-                    on_tag,
-                    on_kind,
-                    tui,
-                    menu_kind,
-                    options:
-                        host::RegisterMenuOpts {
-                            #[expect(deprecated)]
-                                __non_exhaustive_struct_update: (),
-                        },
-                }) => {
-                    use std::collections::hash_map::Entry;
-                    let menu = BarMenu {
-                        kind: menu_kind,
-                        tui,
-                    };
-
-                    bar_menus_tx.send_if_modified(|menus| match menus.entry(on_tag) {
-                        Entry::Occupied(mut entry) => match entry.get_mut().entry(on_kind) {
-                            Entry::Occupied(cur) => {
-                                cur.get().send_replace(menu);
-                                false
-                            }
-                            cur => {
-                                cur.insert_entry(watch::Sender::new(menu));
-                                true
-                            }
-                        },
-                        Entry::Vacant(entry) => {
-                            entry.insert_entry(HashMap::from_iter([(
-                                on_kind,
-                                watch::Sender::new(menu),
-                            )]));
-                            true
-                        }
-                    });
-                }
                 host::HostUpdate::UpdateBars(host::BarSelect::All, update) => {
                     fn doit<T>(
                         bar_tui_states: &mut BarTuiStates,
@@ -198,6 +158,12 @@ async fn run_host(
                 }) => with_mutex_lock(&bar_tui_states, |bar_tui_states| {
                     bar_tui_states.defaults.tui.send_replace(tui);
                 }),
+                host::HostUpdate::OpenMenu(open) => {
+                    open_menu_tx.send_replace(Some(open));
+                }
+                host::HostUpdate::CloseMenu => {
+                    open_menu_tx.send_replace(None);
+                }
             }
         }
     });
@@ -209,8 +175,8 @@ async fn run_host(
 
 async fn run_host_inner(
     bar_tui_states: Arc<std::sync::Mutex<BarTuiStates>>,
-    bar_menus_rx: watch::Receiver<BarMenus>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
+    open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
+    event_tx: UnboundedSender<host::HostEvent>,
 ) {
     // TODO: Consider moving this to BarTuiStates to ensure consistent data
     let mut monitors_auto_cancel = HashMap::<Arc<str>, tokio_util::sync::DropGuard>::new();
@@ -231,7 +197,7 @@ async fn run_host_inner(
                     monitor: monitor.clone(),
                     cancel_monitor: cancel.clone(),
                     bar_state_tx: bar_state_tx.clone(),
-                    bar_menus_rx: bar_menus_rx.clone(),
+                    open_menu_rx: open_menu_rx.clone(),
                     event_tx: event_tx.clone(),
                 }));
                 monitors_auto_cancel.insert(monitor.name.clone(), cancel.drop_guard());
@@ -245,8 +211,8 @@ struct RunMonitorArgs {
     monitor: MonitorInfo,
     cancel_monitor: CancellationToken,
     bar_state_tx: watch::Sender<BarTuiStateTx>,
-    bar_menus_rx: watch::Receiver<BarMenus>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
+    open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
+    event_tx: UnboundedSender<host::HostEvent>,
 }
 async fn run_monitor(mut args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
@@ -268,14 +234,22 @@ async fn run_monitor(mut args: RunMonitorArgs) {
 
 struct Term {
     term_ev_rx: tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
-    term_upd_tx: tokio::sync::mpsc::UnboundedSender<TermUpdate>,
+    term_upd_tx: UnboundedSender<TermUpdate>,
     sizes: tui::Sizes,
-    layout: Option<tui::RenderedLayout>,
+    layout: tui::RenderedLayout,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TermKind {
     Menu,
     Bar,
+}
+impl From<TermKind> for host::TermKind {
+    fn from(value: TermKind) -> Self {
+        match value {
+            TermKind::Menu => Self::Menu,
+            TermKind::Bar => Self::Bar,
+        }
+    }
 }
 enum Upd {
     Noop,
@@ -285,10 +259,10 @@ enum Upd {
 struct StartedMonitorEnv {
     bar: Term,
     menu: Term,
-    intern_upd_rx: tokio::sync::mpsc::UnboundedReceiver<Upd>,
     bar_tui_rx: watch::Receiver<tui::Elem>,
     bar_hide_rx: watch::Receiver<bool>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
+    event_tx: UnboundedSender<host::HostEvent>,
+    open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
 }
 
 async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
@@ -298,11 +272,7 @@ async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
     let cancel = args.cancel_monitor.child_token();
     let _auto_cancel = cancel.clone().drop_guard();
     let env = try_init_monitor(args, &mut required_tasks, &cancel).await?;
-    required_tasks.spawn(run_monitor_main(
-        args.monitor.clone(),
-        env,
-        args.bar_menus_rx.clone(),
-    ));
+    required_tasks.spawn(run_monitor_main(args.monitor.clone(), env));
 
     if let Some(Some(res)) = required_tasks
         .join_next()
@@ -328,43 +298,57 @@ async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
 const EDGE: &str = "top";
 
 /// Adds an extra line and centers the content of the menu with padding of half a cell.
-const VERTICAL_PADDING: bool = true;
+const VERTICAL_PADDING: bool = false;
 const HORIZONTAL_PADDING: u16 = 4;
 
 #[derive(Debug)]
 struct ShowMenu {
-    kind: host::MenuKind,
     pix_location: tui::Vec2<u32>,
     cached_size: tui::Vec2<u16>,
     sizing: tui::SizingArgs,
     tui: tui::Elem,
-    receiver: watch::Receiver<BarMenu>,
+    bar_anchor: tui::CustomId,
 }
 impl ShowMenu {
-    fn mk_recv(
-        mut receiver: watch::Receiver<BarMenu>,
-        pix_location: tui::Vec2<u32>,
-        env: &StartedMonitorEnv,
-    ) -> Self {
+    fn update(this: &mut Option<Self>, open: host::OpenMenu, env: &StartedMonitorEnv) {
+        let host::OpenMenu {
+            tui,
+            monitor: _,
+            bar_anchor,
+            opts:
+                host::OpenMenuOpts {
+                    #[expect(deprecated)]
+                        __non_exhaustive_struct_update: (),
+                },
+        } = open;
+
+        let pix_location = if let Some(this) = this
+            && this.bar_anchor == bar_anchor
+        {
+            this.pix_location
+        } else {
+            env.bar
+                .layout
+                .get_pix_location(env.bar.sizes.font_size(), &bar_anchor)
+                .unwrap_or_default()
+        };
+
         let sizing = tui::SizingArgs {
             font_size: env.menu.sizes.font_size(),
         };
-        let BarMenu { tui, kind } = receiver.borrow_and_update().clone();
-        Self {
+        this.replace(ShowMenu {
+            pix_location,
             cached_size: tui::calc_min_size(&tui, &sizing),
             sizing,
             tui,
-            kind,
-            pix_location,
-            receiver,
-        }
+            bar_anchor,
+        });
     }
 }
 // FIXME: This function is way too large
 async fn run_monitor_main(
     monitor: MonitorInfo,
     mut env: StartedMonitorEnv,
-    bar_menus_rx: watch::Receiver<BarMenus>,
 ) -> anyhow::Result<std::convert::Infallible> {
     let mut show_menu = None::<ShowMenu>;
     let mut bar_tui_state = BarTuiState {
@@ -379,13 +363,6 @@ async fn run_monitor_main(
         let upd = tokio::select! {
             Some(ev) = env.bar.term_ev_rx.recv() => Upd::Term(TermKind::Bar, ev),
             Some(ev) = env.menu.term_ev_rx.recv() => Upd::Term(TermKind::Menu, ev),
-            Some(upd) = env.intern_upd_rx.recv() => upd,
-            Some(Ok(())) = async { Some(show_menu.as_mut()?.receiver.changed().await) } => {
-                let ShowMenu { pix_location, receiver, .. } = show_menu.unwrap();
-                show_menu = Some(ShowMenu::mk_recv(receiver, pix_location, &env));
-                rerender_menu = true;
-                Upd::Noop
-            },
             Ok(()) = env.bar_hide_rx.changed() => {
                 let hidden = *env.bar_hide_rx.borrow_and_update();
                 bar_vis_changed = hidden != std::mem::replace(&mut bar_tui_state.hidden, hidden);
@@ -396,91 +373,80 @@ async fn run_monitor_main(
                 bar_tui_changed = true;
                 Upd::Noop
             },
+            Ok(()) = env.open_menu_rx.changed() => {
+                let open = env.open_menu_rx.borrow_and_update().clone();
+                if let Some(open) = open && open.monitor == monitor.name {
+                    ShowMenu::update(&mut show_menu, open, &env);
+                } else {
+                    if show_menu.is_none() {
+                        continue;
+                    }
+                    show_menu = None;
+                }
+                env.menu.layout = Default::default(); // TODO: optionally keep layout
+                rerender_menu = true;
+                Upd::Noop
+            },
         };
         match upd {
             Upd::Noop => {}
             Upd::Term(term_kind, TermEvent::Crossterm(ev)) => match ev {
-                crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::KittyLeaveWindow,
-                    ..
-                }) => match term_kind {
-                    TermKind::Menu => {
-                        show_menu = None;
-                        rerender_menu = true;
-                    }
-                    TermKind::Bar => {
-                        if let Some(layout) = &mut env.bar.layout
-                            && layout.ext_focus_loss()
-                        {
-                            bar_tui_changed = true;
-                        }
-                    }
-                },
                 crossterm::event::Event::Mouse(ev) => {
-                    let Some(layout) = (match term_kind {
-                        TermKind::Menu => env.menu.layout.as_mut(),
-                        TermKind::Bar => env.bar.layout.as_mut(),
-                    }) else {
-                        continue;
+                    if ev.kind == crossterm::event::MouseEventKind::KittyLeaveWindow
+                        && term_kind == TermKind::Bar
+                        && env.bar.layout.ext_focus_loss()
+                    {
+                        bar_tui_changed = true;
+                    }
+
+                    let term = match term_kind {
+                        TermKind::Menu => &mut env.menu,
+                        TermKind::Bar => &mut env.bar,
                     };
 
-                    let tui::MouseEventResult {
-                        kind,
-                        tag,
-                        empty,
-                        changed,
-                        rerender,
-                        has_hover,
-                        pix_location,
-                    } = layout.interpret_mouse_event(ev, env.bar.sizes.font_size());
-                    let is_hover = kind == tui::InteractKind::Hover;
-
-                    if term_kind == TermKind::Menu
-                        && let Some(menu) = &show_menu
-                        && matches!(&menu.kind, host::MenuKind::Tooltip)
+                    match term
+                        .layout
+                        .interpret_mouse_event(ev, term.sizes.font_size())
                     {
-                        show_menu = None;
-                        rerender_menu = true;
-                    }
+                        tui::MouseEventRes::Interact(tui::MouseInteractRes {
+                            kind,
+                            tag,
+                            changed,
+                            rerender,
+                        }) => {
+                            let is_hover = kind == tui::InteractKind::Hover;
 
-                    if rerender {
-                        match term_kind {
-                            TermKind::Menu => rerender_menu = true,
-                            TermKind::Bar => bar_tui_changed = true,
-                        }
-                    }
-
-                    if changed || !is_hover {
-                        if term_kind == TermKind::Bar {
-                            if empty
-                                && let Some(menu) = &show_menu
-                                && (!is_hover || matches!(&menu.kind, host::MenuKind::Tooltip))
-                            {
-                                show_menu = None;
-                                rerender_menu = true;
+                            if rerender {
+                                match term_kind {
+                                    TermKind::Menu => rerender_menu = true,
+                                    TermKind::Bar => bar_tui_changed = true,
+                                }
                             }
 
-                            let menu = tag.as_ref().and_then(|tag| {
-                                bar_menus_rx
-                                    .borrow()
-                                    .get(tag)
-                                    .and_then(|tag_menus| tag_menus.get(&kind))
-                                    .cloned()
-                            });
-                            if let Some(menu) = menu {
-                                show_menu =
-                                    Some(ShowMenu::mk_recv(menu.subscribe(), pix_location, &env));
-                                rerender_menu = true;
+                            if changed || !is_hover {
+                                env.event_tx
+                                    .send(host::HostEvent::Term(
+                                        host::TermInfo {
+                                            monitor: monitor.name.clone(),
+                                            kind: term_kind.into(),
+                                        },
+                                        host::TermEvent::Interact(host::InteractEvent {
+                                            kind,
+                                            tag,
+                                        }),
+                                    ))
+                                    .ok_or_debug();
                             }
                         }
-
-                        if let Some(tag) = tag {
+                        tui::MouseEventRes::MouseLeave => {
                             env.event_tx
-                                .send(host::HostEvent::Interact(host::InteractEvent {
-                                    kind,
-                                    tag,
-                                    monitor: monitor.name.clone(),
-                                }))
+                                .send(host::HostEvent::Term(
+                                    host::TermInfo {
+                                        monitor: monitor.name.clone(),
+                                        kind: term_kind.into(),
+                                    },
+                                    host::TermEvent::MouseLeave,
+                                ))
                                 .ok_or_debug();
                         }
                     }
@@ -499,24 +465,15 @@ async fn run_monitor_main(
                 env.bar.sizes = sizes;
                 bar_tui_changed = true;
             }
-            Upd::Term(term_kind, TermEvent::FocusChange { is_focused }) => {}
         }
 
         if rerender_menu {
-            if show_menu.is_none()
-                && let Some(layout) = &mut env.bar.layout
-                && layout.ext_focus_loss()
-            {
-                bar_tui_changed = true;
-            }
-
             if let Some(&ShowMenu {
                 pix_location: location,
                 cached_size: cached_tui_size,
                 ref tui,
                 ref sizing,
-                kind: _,
-                receiver: _,
+                bar_anchor: _,
             }) = show_menu.as_ref()
             {
                 // HACK: This minimizes the rounding error for some reason (as far as I can tell).
@@ -589,12 +546,12 @@ async fn run_monitor_main(
                     },
                     &mut buf,
                     sizing,
-                    env.menu.layout.as_ref(),
+                    &env.menu.layout,
                 )
                 .context("Failed to draw menu")
                 .ok_or_log()
                 {
-                    env.menu.layout = Some(layout);
+                    env.menu.layout = layout;
                     env.menu
                         .term_upd_tx
                         .send(TermUpdate::Print(buf))
@@ -623,13 +580,13 @@ async fn run_monitor_main(
                 &tui::SizingArgs {
                     font_size: env.bar.sizes.font_size(),
                 },
-                env.bar.layout.as_ref(),
+                &env.bar.layout,
             )
             .context("Failed to render bar")
             .ok_or_log() else {
                 continue;
             };
-            env.bar.layout = Some(layout);
+            env.bar.layout = layout;
 
             env.bar
                 .term_upd_tx
@@ -708,11 +665,6 @@ async fn try_init_monitor(
 ) -> anyhow::Result<StartedMonitorEnv> {
     let monitor = args.monitor.clone();
 
-    let (intern_upd_tx, intern_upd_rx) = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (tx, rx)
-    };
-
     let tmpdir = tokio::task::spawn_blocking(TempDir::new).await??;
 
     let bar_fut = init_term(
@@ -740,22 +692,10 @@ async fn try_init_monitor(
     );
 
     let menu_fut = async {
-        let watcher_py = tmpdir.path().join("menu_watcher.py");
-
-        tokio::fs::write(&watcher_py, include_bytes!("menu_watcher.py")).await?;
-
-        let watcher_sock_path = tmpdir.path().join("menu_watcher.sock");
-        let watcher_sock = tokio::net::UnixListener::bind(&watcher_sock_path)?;
-
         let menu = init_term(
             tmpdir.path().join("menu-term-socket.sock"),
             format!("MENU@{}", monitor.name),
             [
-                {
-                    let mut arg = OsString::from("-o=watcher=");
-                    arg.push(watcher_py);
-                    arg
-                },
                 format!("--output-name={}", monitor.name).into(),
                 // Configure remote control via socket
                 "-o=allow_remote_control=socket-only".into(),
@@ -788,12 +728,12 @@ async fn try_init_monitor(
                 // the old menu content being replaced with the new one.
                 "-o=resize_debounce_time=0 0".into(),
                 // TODO: Mess with repaint_delay, input_delay
-                "--debug-input".into(),
             ],
-            [("BAR_MENU_WATCHER_SOCK".into(), watcher_sock_path.into())],
+            [],
             cancel,
         )
         .await?;
+
         // NOTE: Never pass start-as-hidden!
         menu.term_upd_tx
             .send(TermUpdate::RemoteControl(vec![
@@ -801,6 +741,7 @@ async fn try_init_monitor(
                 "--action=hide".into(),
             ]))
             .ok_or_log();
+
         if VERTICAL_PADDING {
             // HACK: For some reason, using half font height padding at top and bottom
             // shrinks the height by 2 cells. This way of doing it only works assuming
@@ -815,8 +756,7 @@ async fn try_init_monitor(
                 .ok_or_log();
         }
 
-        let (s, _) = watcher_sock.accept().await?;
-        anyhow::Ok((menu, s))
+        anyhow::Ok(menu)
     };
 
     let res = async { tokio::try_join!(bar_fut, menu_fut) }
@@ -826,31 +766,7 @@ async fn try_init_monitor(
     // We have connected to the sockets, there is no need to keep the files around.
     tokio::task::spawn_blocking(move || drop(tmpdir));
 
-    let (bar, (menu, mut watcher_stream)) = res??;
-
-    required_tasks.spawn({
-        let upd_tx = intern_upd_tx.clone();
-        async move {
-            use tokio::io::AsyncReadExt as _;
-            loop {
-                let byte = watcher_stream
-                    .read_u8()
-                    .await
-                    .context("Failed to read from watcher stream")?;
-
-                let parsed = match byte {
-                    0 => Upd::Term(TermKind::Menu, TermEvent::FocusChange { is_focused: false }),
-                    1 => Upd::Term(TermKind::Menu, TermEvent::FocusChange { is_focused: true }),
-                    _ => {
-                        log::error!("Unknown watcher event {byte}");
-                        continue;
-                    }
-                };
-
-                upd_tx.send(parsed).ok_or_log();
-            }
-        }
-    });
+    let (bar, menu) = res??;
 
     let (bar_tui_tx, bar_tui_rx) = watch::channel(tui::Elem::empty());
     let (bar_hide_tx, bar_hide_rx) = watch::channel(false);
@@ -892,10 +808,10 @@ async fn try_init_monitor(
     Ok(StartedMonitorEnv {
         bar,
         menu,
-        intern_upd_rx,
         bar_tui_rx,
         bar_hide_rx,
         event_tx: args.event_tx.clone(),
+        open_menu_rx: args.open_menu_rx.clone(),
     })
 }
 
