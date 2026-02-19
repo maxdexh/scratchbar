@@ -60,7 +60,7 @@ pub async fn tray_module(
                     menu_tui_stack.push(tui::Elem::text(description, tui::TextOpts::default()));
                     menu_tui_stack.build()
                 };
-                ctrl_tx.set_menu(RegisterMenu {
+                ctrl_tx.register_menu(RegisterMenu {
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Hover,
                     menu_kind: MenuKind::Tooltip,
@@ -101,7 +101,7 @@ pub async fn tray_module(
                                 .ok_or_log();
                         });
                     });
-                    ctrl_tx.register_callback(tag.clone(), Some(icb));
+                    ctrl_tx.register_callback(tag.clone(), icb);
                     tag
                 });
 
@@ -115,7 +115,7 @@ pub async fn tray_module(
                     inner: Some(menu_tui),
                     ..Default::default()
                 });
-                ctrl_tx.set_menu(RegisterMenu {
+                ctrl_tx.register_menu(RegisterMenu {
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
                     menu_kind: MenuKind::Context,

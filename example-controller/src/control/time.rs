@@ -66,19 +66,19 @@ pub async fn time_module(
                         }
                     });
                 });
-            ctrl_tx.register_callback(tag, Some(cb));
+            ctrl_tx.register_callback(tag, cb);
         }
 
         let cal_menu_tx = watch::Sender::new(tui::Elem::empty());
         let cal_tooltip_tx = watch::Sender::new(tui::Elem::empty());
-        ctrl_tx.set_menu(RegisterMenu {
+        ctrl_tx.register_menu(RegisterMenu {
             on_tag: bar_tag.clone(),
             on_kind: tui::InteractKind::Hover,
             tui_rx: cal_tooltip_tx.subscribe(),
             menu_kind: MenuKind::Tooltip,
             opts: Default::default(),
         });
-        ctrl_tx.set_menu(RegisterMenu {
+        ctrl_tx.register_menu(RegisterMenu {
             on_tag: bar_tag.clone(),
             on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
             tui_rx: cal_menu_tx.subscribe(),

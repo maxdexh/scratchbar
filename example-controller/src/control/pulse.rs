@@ -54,7 +54,7 @@ pub async fn pulse_module(
     });
 
     let interact_tag = mk_fresh_interact_tag();
-    ctrl_tx.register_callback(interact_tag.clone(), Some(on_interact));
+    ctrl_tx.register_callback(interact_tag.clone(), on_interact);
 
     while let Some(()) = state_rx.changed().await.ok_or_debug() {
         let state = state_rx.borrow_and_update();

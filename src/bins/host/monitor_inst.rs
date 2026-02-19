@@ -1,9 +1,8 @@
 use tempfile::TempDir;
 
-use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
+use std::{ffi::OsString, time::Duration};
 
 use anyhow::Context;
-use futures::{Stream, StreamExt};
 use tokio::{
     sync::{mpsc::UnboundedSender, watch},
     task::JoinSet,
@@ -11,210 +10,23 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 use crate::{
-    bins::inst::{TermEvent, TermUpdate},
-    bins::monitors::MonitorInfo,
+    bins::{
+        host::MonitorInfo,
+        inst::{TermEvent, TermUpdate},
+    },
     host, tui,
-    utils::{ResultExt, with_mutex_lock},
+    utils::ResultExt,
 };
 
-#[derive(Debug, Clone)]
-struct BarTuiState {
-    tui: tui::Elem,
-    hidden: bool,
-}
-#[derive(Debug, Clone)]
-struct BarTuiStateTx {
-    tui: watch::Sender<tui::Elem>,
-    hidden: watch::Sender<bool>,
-}
-#[derive(Debug)]
-struct BarTuiStates {
-    by_monitor: HashMap<Arc<str>, watch::Sender<BarTuiStateTx>>,
-    defaults: BarTuiStateTx,
-}
-impl BarTuiStates {
-    fn get_or_mk_monitor(&mut self, name: Arc<str>) -> &mut watch::Sender<BarTuiStateTx> {
-        self.by_monitor
-            .entry(name)
-            .or_insert_with(|| watch::Sender::new(self.defaults.clone()))
-    }
-}
-
-async fn run_host(
-    update_rx: impl Stream<Item = host::HostUpdate> + Send + 'static,
-    event_tx: UnboundedSender<host::HostEvent>,
-) {
-    let mut required_tasks = tokio::task::JoinSet::new();
-
-    let bar_tui_states = Arc::new(std::sync::Mutex::new(BarTuiStates {
-        by_monitor: Default::default(),
-        defaults: BarTuiStateTx {
-            tui: watch::Sender::new(tui::Elem::empty()),
-            hidden: watch::Sender::new(false),
-        },
-    }));
-
-    let open_menu_tx = watch::Sender::new(None);
-    required_tasks.spawn(run_host_inner(
-        bar_tui_states.clone(),
-        open_menu_tx.subscribe(),
-        event_tx.clone(),
-    ));
-
-    required_tasks.spawn(async move {
-        tokio::pin!(update_rx);
-        while let Some(update) = update_rx.next().await {
-            match update {
-                host::HostUpdate::UpdateBars(host::BarSelect::All, update) => {
-                    fn doit<T>(
-                        bar_tui_states: &mut BarTuiStates,
-                        val: T,
-                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut watch::Sender<T>,
-                    ) {
-                        let default_tx = get_tx(&mut bar_tui_states.defaults);
-                        default_tx.send_replace(val);
-                        for state in bar_tui_states.by_monitor.values_mut() {
-                            state.send_modify(|it| *get_tx(it) = default_tx.clone());
-                        }
-                    }
-                    with_mutex_lock(&bar_tui_states, |bar_tui_states| {
-                        // TODO: Keep unknown monitors around only for a few minutes
-                        match update {
-                            host::BarUpdate::SetTui(host::SetBarTui {
-                                tui,
-                                options:
-                                    host::SetBarTuiOpts {
-                                        #[expect(deprecated)]
-                                            __non_exhaustive_struct_update: (),
-                                    },
-                            }) => {
-                                doit(bar_tui_states, tui, |state| &mut state.tui);
-                            }
-                            host::BarUpdate::Hide | host::BarUpdate::Show => {
-                                doit(
-                                    bar_tui_states,
-                                    matches!(update, host::BarUpdate::Hide),
-                                    |state| &mut state.hidden,
-                                );
-                            }
-                        }
-                    });
-                }
-                host::HostUpdate::UpdateBars(
-                    host::BarSelect::OnMonitor { monitor_name },
-                    update,
-                ) => {
-                    fn doit<T>(
-                        bar_tui_states: &mut BarTuiStates,
-                        monitor: Arc<str>,
-                        val: T,
-                        get_tx: impl Fn(&mut BarTuiStateTx) -> &mut watch::Sender<T>,
-                    ) {
-                        let default_tx = get_tx(&mut bar_tui_states.defaults).clone();
-                        bar_tui_states
-                            .get_or_mk_monitor(monitor.clone())
-                            .send_if_modified(|state| {
-                                let tx = get_tx(state);
-                                if tx.same_channel(&default_tx) {
-                                    *tx = watch::Sender::new(val);
-                                    true
-                                } else {
-                                    tx.send_replace(val);
-                                    false
-                                }
-                            });
-                    }
-                    with_mutex_lock(&bar_tui_states, |bar_tui_states| {
-                        // TODO: Keep unknown monitors around only for a few minutes
-                        match update {
-                            host::BarUpdate::SetTui(host::SetBarTui {
-                                tui,
-                                options:
-                                    host::SetBarTuiOpts {
-                                        #[expect(deprecated)]
-                                            __non_exhaustive_struct_update: (),
-                                    },
-                            }) => {
-                                doit(bar_tui_states, monitor_name, tui, |state| &mut state.tui);
-                            }
-                            host::BarUpdate::Hide | host::BarUpdate::Show => {
-                                doit(
-                                    bar_tui_states,
-                                    monitor_name,
-                                    matches!(update, host::BarUpdate::Hide),
-                                    |state| &mut state.hidden,
-                                );
-                            }
-                        }
-                    });
-                }
-                host::HostUpdate::SetDefaultTui(host::SetBarTui {
-                    tui,
-                    options:
-                        host::SetBarTuiOpts {
-                            #[expect(deprecated)]
-                                __non_exhaustive_struct_update: (),
-                        },
-                }) => with_mutex_lock(&bar_tui_states, |bar_tui_states| {
-                    bar_tui_states.defaults.tui.send_replace(tui);
-                }),
-                host::HostUpdate::OpenMenu(open) => {
-                    open_menu_tx.send_replace(Some(open));
-                }
-                host::HostUpdate::CloseMenu => {
-                    open_menu_tx.send_replace(None);
-                }
-            }
-        }
-    });
-
-    if let Some(res) = required_tasks.join_next().await {
-        res.ok_or_log();
-    }
-}
-
-async fn run_host_inner(
-    bar_tui_states: Arc<std::sync::Mutex<BarTuiStates>>,
-    open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
-    event_tx: UnboundedSender<host::HostEvent>,
-) {
-    // TODO: Consider moving this to BarTuiStates to ensure consistent data
-    let mut monitors_auto_cancel = HashMap::<Arc<str>, tokio_util::sync::DropGuard>::new();
-
-    let mut monitor_rx = crate::bins::monitors::connect();
-
-    while let Some(ev) = monitor_rx.next().await {
-        with_mutex_lock(&bar_tui_states, |bar_tui_states| {
-            for monitor in ev.removed() {
-                drop(monitors_auto_cancel.remove(monitor));
-                bar_tui_states.by_monitor.remove(monitor);
-            }
-            for monitor in ev.added_or_changed() {
-                let bar_state_tx = bar_tui_states.get_or_mk_monitor(monitor.name.clone());
-
-                let cancel = CancellationToken::new();
-                tokio::spawn(run_monitor(RunMonitorArgs {
-                    monitor: monitor.clone(),
-                    cancel_monitor: cancel.clone(),
-                    bar_state_tx: bar_state_tx.clone(),
-                    open_menu_rx: open_menu_rx.clone(),
-                    event_tx: event_tx.clone(),
-                }));
-                monitors_auto_cancel.insert(monitor.name.clone(), cancel.drop_guard());
-            }
-        });
-    }
-}
-
 #[derive(Clone)]
-struct RunMonitorArgs {
-    monitor: MonitorInfo,
-    cancel_monitor: CancellationToken,
-    bar_state_tx: watch::Sender<BarTuiStateTx>,
-    open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
-    event_tx: UnboundedSender<host::HostEvent>,
+pub(super) struct RunMonitorArgs {
+    pub monitor: MonitorInfo,
+    pub cancel_monitor: CancellationToken,
+    pub bar_state_tx: watch::Sender<super::BarTuiStateSender>,
+    pub open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
+    pub event_tx: UnboundedSender<host::HostEvent>,
 }
-async fn run_monitor(mut args: RunMonitorArgs) {
+pub(super) async fn run_monitor(mut args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
     let _auto_cancel = args.cancel_monitor.clone().drop_guard();
 
@@ -351,7 +163,7 @@ async fn run_monitor_main(
     mut env: StartedMonitorEnv,
 ) -> anyhow::Result<std::convert::Infallible> {
     let mut show_menu = None::<ShowMenu>;
-    let mut bar_tui_state = BarTuiState {
+    let mut bar_tui_state = super::BarTuiState {
         tui: tui::Elem::empty(),
         hidden: false,
     };
@@ -777,7 +589,8 @@ async fn try_init_monitor(
                 let mut tui_rx;
                 let mut hide_rx;
                 {
-                    let BarTuiStateTx { tui, hidden } = &*bar_state_tx_rx.borrow_and_update();
+                    let super::BarTuiStateSender { tui, hidden } =
+                        &*bar_state_tx_rx.borrow_and_update();
 
                     tui_rx = tui.subscribe();
                     tui_rx.mark_changed();
@@ -813,159 +626,4 @@ async fn try_init_monitor(
         event_tx: args.event_tx.clone(),
         open_menu_rx: args.open_menu_rx.clone(),
     })
-}
-
-pub(crate) fn host_main() -> std::process::ExitCode {
-    host_main_inner().unwrap_or(std::process::ExitCode::FAILURE)
-}
-
-fn host_main_inner() -> Option<std::process::ExitCode> {
-    use std::process::ExitCode;
-
-    use anyhow::Context as _;
-
-    crate::logging::init_logger("HOST".into());
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("Failed to start the tokio runtime")
-        .ok_or_log()?;
-
-    let _guard = runtime.enter();
-
-    // FIXME: Proper arg parsing
-    let ctrl_cmd = std::env::args_os()
-        .nth(1)
-        .context("Missing controller command")
-        .ok_or_log()?;
-
-    let (mut ctrl_child, ctrl_socket) = {
-        let socket_dir = tempfile::TempDir::new().ok_or_log()?;
-        let sock_path = socket_dir.path().join("host.sock");
-        let socket = std::os::unix::net::UnixListener::bind(&sock_path).ok_or_log()?;
-
-        let child = tokio::process::Command::new(ctrl_cmd)
-            .kill_on_drop(true)
-            .args(std::env::args_os().skip(2))
-            .env(crate::host_ctrl_ipc::HOST_SOCK_PATH_VAR, sock_path)
-            .spawn()
-            .ok_or_log()?;
-
-        let (conn, _) = socket.accept().ok_or_log()?;
-
-        (child, conn)
-    };
-
-    let signals_task = runtime.spawn(async move {
-        type SK = tokio::signal::unix::SignalKind;
-
-        let mut tasks = tokio::task::JoinSet::new();
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-
-        for kind in [
-            SK::interrupt(),
-            SK::quit(),
-            SK::alarm(),
-            SK::hangup(),
-            SK::pipe(),
-            SK::terminate(),
-            SK::user_defined1(),
-            SK::user_defined2(),
-        ] {
-            let Some(mut signal) = tokio::signal::unix::signal(kind).ok_or_log() else {
-                continue;
-            };
-            let tx = tx.clone();
-            tasks.spawn(async move {
-                while let Some(()) = signal.recv().await
-                    && tx.send(kind).await.is_ok()
-                {}
-            });
-        }
-        drop(tx);
-
-        rx.recv()
-            .await
-            .context("Failed to receive any signals")
-            .map(|kind| {
-                log::debug!("Received exit signal {kind:?}");
-                let code = 128 + kind.as_raw_value();
-                ExitCode::from(code as u8)
-            })
-            .ok_or_log()
-    });
-    let signals_task = async move {
-        signals_task
-            .await
-            .context("Signal handler failed")
-            .ok_or_log()
-            .flatten()
-    };
-
-    let (update_tx, mut update_rx) = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (tx, rx)
-    };
-    let (event_tx, mut event_rx) = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (tx, rx)
-    };
-    runtime.spawn(crate::host::run_ipc_connection(
-        ctrl_socket,
-        move |upd| update_tx.send(upd).ok(),
-        async move || event_rx.recv().await,
-    ));
-
-    let main_task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
-        run_host(
-            futures::stream::poll_fn(move |cx| update_rx.poll_recv(cx)),
-            event_tx,
-        )
-        .await;
-        // FIXME: Return exit code
-        ExitCode::SUCCESS
-    }));
-
-    let exit_task = runtime.spawn(async move {
-        let wait_res = tokio::select! {
-            it = ctrl_child.wait() => Ok(it),
-            join = main_task => {
-                let code = join
-                    .context("Main task failed")
-                    .ok_or_log()
-                    .unwrap_or(std::process::ExitCode::FAILURE);
-                Err(code)
-            },
-            Some(code) = signals_task => Err(code),
-        };
-        let (wait_res, code) = match wait_res {
-            Ok(res) => (Some(res), std::process::ExitCode::SUCCESS),
-            Err(code) => (
-                ctrl_child
-                    .wait()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .await
-                    .context("Controller process failed to exit on its own")
-                    .ok_or_log(),
-                code,
-            ),
-        };
-        let child_code = match wait_res {
-            Some(res) => res
-                .ok_or_log()
-                .map_or(std::process::ExitCode::FAILURE, |exit| {
-                    std::process::ExitCode::from(exit.code().unwrap_or(0) as u8)
-                }),
-            None => std::process::ExitCode::FAILURE,
-        };
-        if code == std::process::ExitCode::SUCCESS {
-            child_code
-        } else {
-            code
-        }
-    });
-
-    runtime.block_on(async move { exit_task.await.ok_or_log() })
 }

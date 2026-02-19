@@ -1,6 +1,5 @@
 pub(crate) mod host;
 pub(crate) mod inst;
-pub(crate) mod monitors;
 
 #[doc(hidden)]
 #[cfg(feature = "__bin")]

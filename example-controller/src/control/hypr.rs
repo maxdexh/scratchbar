@@ -52,7 +52,7 @@ pub async fn hypr_module(
                     },
                 );
 
-                ctrl_tx.register_callback(tag.clone(), Some(on_interact));
+                ctrl_tx.register_callback(tag.clone(), on_interact);
 
                 (mk(None), mk(Some(tui::TermColor::Green)))
             });

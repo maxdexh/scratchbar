@@ -107,17 +107,14 @@ struct RegisterMenu {
     pub opts: RegisterMenuOpts,
 }
 #[derive(Default)]
-struct RegisterMenuOpts {
-    // TODO: Option on whether to apply update to already open tui
-    // TODO: Option to set font size of menu / other options temporarily / run commands when menu is shown / hidden?
-}
+struct RegisterMenuOpts {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MenuKind {
     Tooltip,
     Context,
 }
 impl ModuleControlTx {
-    fn set_menu(&self, menu: RegisterMenu) {
+    fn register_menu(&self, menu: RegisterMenu) {
         let RegisterMenu {
             on_tag,
             on_kind,
@@ -134,13 +131,9 @@ impl ModuleControlTx {
             menus.entry(on_tag).or_default().insert(on_kind, menu);
         });
     }
-    fn register_callback(&self, tag: tui::CustomId, cb: Option<InteractCallback>) {
+    fn register_callback(&self, tag: tui::CustomId, cb: InteractCallback) {
         self.tag_cb_tx.send_modify(|cbs| {
-            if let Some(cb) = cb {
-                cbs.cbs.insert(tag, cb);
-            } else {
-                cbs.cbs.remove(&tag);
-            }
+            cbs.cbs.insert(tag, cb);
         })
     }
 }

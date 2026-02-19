@@ -30,7 +30,7 @@ pub async fn ppd_module(
         }
         ppd.cycle_profile();
     });
-    ctrl_tx.register_callback(interact_tag.clone(), Some(on_interact));
+    ctrl_tx.register_callback(interact_tag.clone(), on_interact);
 
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
@@ -39,7 +39,7 @@ pub async fn ppd_module(
             profile.as_deref().unwrap_or("No profile"),
             tui::TextOpts::default(),
         );
-        ctrl_tx.set_menu(RegisterMenu {
+        ctrl_tx.register_menu(RegisterMenu {
             on_tag: interact_tag.clone(),
             on_kind: tui::InteractKind::Hover,
             tui_rx: watch::channel(tui).1,
@@ -128,7 +128,7 @@ pub async fn energy_module(
             };
             if text != last_tooltip {
                 let tui = tui::Elem::text(text.as_str(), tui::TextOpts::default());
-                ctrl_tx.set_menu(RegisterMenu {
+                ctrl_tx.register_menu(RegisterMenu {
                     on_tag: interact_tag.clone(),
                     on_kind: tui::InteractKind::Hover,
                     tui_rx: watch::channel(tui).1,

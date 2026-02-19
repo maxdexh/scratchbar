@@ -195,10 +195,7 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
         let (read, write) = socket.into_split();
 
         let (upd_tx, mut ev_rx);
-        (ev_tx, ev_rx) = {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            (tx, rx)
-        };
+        (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
         (upd_tx, upd_rx) = std::sync::mpsc::channel::<TermUpdate>();
 
         tasks.spawn(ipc::read_cobs_sock(
