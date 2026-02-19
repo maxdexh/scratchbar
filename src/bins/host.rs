@@ -392,13 +392,6 @@ async fn run_monitor_main(
             Upd::Noop => {}
             Upd::Term(term_kind, TermEvent::Crossterm(ev)) => match ev {
                 crossterm::event::Event::Mouse(ev) => {
-                    if ev.kind == crossterm::event::MouseEventKind::KittyLeaveWindow
-                        && term_kind == TermKind::Bar
-                        && env.bar.layout.ext_focus_loss()
-                    {
-                        bar_tui_changed = true;
-                    }
-
                     let term = match term_kind {
                         TermKind::Menu => &mut env.menu,
                         TermKind::Bar => &mut env.bar,
@@ -439,6 +432,13 @@ async fn run_monitor_main(
                             }
                         }
                         tui::MouseEventRes::MouseLeave => {
+                            if term.layout.ext_focus_loss() {
+                                match term_kind {
+                                    TermKind::Menu => rerender_menu = true,
+                                    TermKind::Bar => bar_tui_changed = true,
+                                }
+                            }
+
                             env.event_tx
                                 .send(host::HostEvent::Term(
                                     host::TermInfo {
@@ -815,7 +815,11 @@ async fn try_init_monitor(
     })
 }
 
-pub(crate) fn host_main() -> Option<std::process::ExitCode> {
+pub(crate) fn host_main() -> std::process::ExitCode {
+    host_main_inner().unwrap_or(std::process::ExitCode::FAILURE)
+}
+
+fn host_main_inner() -> Option<std::process::ExitCode> {
     use std::process::ExitCode;
 
     use anyhow::Context as _;
@@ -831,7 +835,10 @@ pub(crate) fn host_main() -> Option<std::process::ExitCode> {
     let _guard = runtime.enter();
 
     // FIXME: Proper arg parsing
-    let ctrl_cmd = std::env::args_os().nth(1)?;
+    let ctrl_cmd = std::env::args_os()
+        .nth(1)
+        .context("Missing controller command")
+        .ok_or_log()?;
 
     let (mut ctrl_child, ctrl_socket) = {
         let socket_dir = tempfile::TempDir::new().ok_or_log()?;

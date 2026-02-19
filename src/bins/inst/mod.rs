@@ -145,7 +145,7 @@ fn fwd_log_self_exe() -> Option<std::process::Command> {
 }
 
 pub(crate) const INTERNAL_INST_ARG: &str = "--internal-inst";
-pub(crate) fn inst_main() -> Option<ExitCode> {
+pub(crate) fn inst_main() -> ExitCode {
     let (log_name, res) =
         match std::env::var(ipc::PROC_LOG_NAME_VAR).context("Bad log name env var") {
             Ok(name) => (name, Ok(())),
@@ -162,11 +162,14 @@ pub(crate) fn inst_main() -> Option<ExitCode> {
 
     res.ok_or_log();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let Some(runtime) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("Failed to start the tokio runtime")
-        .ok_or_log()?;
+        .ok_or_log()
+    else {
+        return ExitCode::FAILURE;
+    };
 
     let main_handle = runtime.spawn(term_proc_main_inner());
     let main_res = runtime
@@ -174,10 +177,10 @@ pub(crate) fn inst_main() -> Option<ExitCode> {
         .context("Failed to join main")
         .flatten();
 
-    Some(match main_res.ok_or_log() {
+    match main_res.ok_or_log() {
         Some(()) => ExitCode::SUCCESS,
         None => ExitCode::FAILURE,
-    })
+    }
 }
 
 async fn term_proc_main_inner() -> anyhow::Result<()> {

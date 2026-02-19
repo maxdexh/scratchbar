@@ -12,5 +12,4 @@ pub fn __scratchbar_bin_main() -> std::process::ExitCode {
     } else {
         host::host_main()
     }
-    .unwrap_or(std::process::ExitCode::FAILURE)
 }
