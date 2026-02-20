@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::{
-    tui,
-    utils::{ResultExt as _, with_mutex_lock},
-};
+use crate::{tui, utils::ResultExt as _};
 
 pub struct HostError(anyhow::Error);
 impl std::fmt::Debug for HostError {
@@ -173,11 +170,14 @@ pub(crate) async fn run_ipc_connection<
     }
     impl Shared {
         fn set_err(&self, err: anyhow::Error) {
-            with_mutex_lock(&self.err_slot, |slot| {
-                if slot.is_none() {
-                    *slot = Some(err)
-                }
-            });
+            let mut slot = self
+                .err_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            if slot.is_none() {
+                *slot = Some(err)
+            }
         }
     }
     impl Drop for Shared {
@@ -227,10 +227,15 @@ pub(crate) async fn run_ipc_connection<
         .map_err(|_| anyhow::anyhow!("controller connection aborted"))
         .ok_or_debug();
 
-    with_mutex_lock(&shared.err_slot, |slot| match slot.take() {
+    match shared
+        .err_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
         Some(err) => Err(err),
         None => Ok(()),
-    })
+    }
 }
 fn run_ipc_reader<R: serde::de::DeserializeOwned>(
     read: impl std::io::Read,

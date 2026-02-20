@@ -30,7 +30,3 @@ impl<T, E: Into<anyhow::Error>> ResultExt for Result<T, E> {
         }
     }
 }
-
-pub(crate) fn with_mutex_lock<T, U>(mutex: &std::sync::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
-    f(&mut mutex.lock().unwrap_or_else(|poison| poison.into_inner()))
-}

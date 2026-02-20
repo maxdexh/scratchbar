@@ -130,7 +130,9 @@ async fn run_state_fetcher(
     mut reload_rx: ReloadRx,
 ) {
     let fetch_blocking = move || {
-        let lock = state_mutex.lock().unwrap_or_else(|it| it.into_inner());
+        let lock = state_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         lock.iter()
             .map(|(addr, (item, menu))| {
