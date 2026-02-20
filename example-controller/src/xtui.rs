@@ -1,9 +1,15 @@
 use scratchbar::tui;
 
 pub fn tui_center_symbol(sym: impl std::fmt::Display, width: u16) -> tui::Elem {
-    tui::Elem::raw_print(
-        format_args!("\x1b]66;w={width}:h=2:n=1:d=1;{sym}\x07"),
-        tui::Size { width, height: 1 },
+    tui::Elem::text(
+        sym,
+        tui::TextSizing {
+            numerator: Some(1),
+            denominator: Some(1),
+            width: Some(width),
+            horiz_align: Some(tui::TextSizing::ALIGN_CENTER),
+            ..Default::default()
+        },
     )
 }
 pub fn underline_hovered(

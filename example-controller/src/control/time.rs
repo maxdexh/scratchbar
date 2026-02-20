@@ -169,6 +169,7 @@ fn mk_calendar(
             next_month,
             prev_month,
         }) => {
+            // TODO: Large title scale
             let mut title_stack = xtui::StackBuilder::new(tui::Axis::X);
             title_stack.push(xtui::underline_hovered(
                 "<<",

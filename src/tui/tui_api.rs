@@ -405,6 +405,7 @@ impl Elem {
 #[derive(Default, Debug, Clone)]
 pub struct TextOpts {
     pub style: Option<TextStyle>,
+    pub sizing: Option<TextSizing>,
     pub trim_trailing_line: bool,
     // TODO: Sizing support
     #[deprecated = warn_non_exhaustive!()]
@@ -424,8 +425,16 @@ impl From<TextModifiers> for TextOpts {
         TextStyle::from(value).into()
     }
 }
+impl From<TextSizing> for TextOpts {
+    fn from(value: TextSizing) -> Self {
+        Self {
+            sizing: Some(value),
+            ..Default::default()
+        }
+    }
+}
 
-// FIXME: Remove serialize, convert to Print
+// TODO: Convert to Print
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct TextStyle {
     pub fg: Option<TermColor>,
@@ -444,6 +453,91 @@ impl From<TextModifiers> for TextStyle {
             ..Default::default()
         }
     }
+}
+
+/// Represents parameters for Kitty's [text sizing protocol](https://sw.kovidgoyal.net/kitty/text-sizing-protocol/).
+///
+/// The fields of this struct correspond to the different keys for the protocol, where [`None`] denotes a key
+/// that is not sent to the terminal, i.e. one that will use the default value specified by the protocol.
+///
+/// Note the documentation of the individual fields for details about layout calculation behavior.
+/// Also note that all layout calculation behavior is subject to change for the purpose of matching
+/// Kitty's real behavior (which may change as well) more closely.
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct TextSizing {
+    /// The scale of the text.
+    ///
+    /// # Valid Range
+    /// As of writing, the protocol permits values from 1 to 7.
+    ///
+    /// The layout calculation's behavior is unspecified for keys outside of this range.
+    pub scale: Option<u16>,
+    /// The numerator for fractional scaling within the cell.
+    ///
+    /// This currently has no effect on the layout calculation.
+    ///
+    /// # Valid Range
+    /// As of writing, the protocol permits values from 0 to 15, where the default of 0
+    /// specifies no fractional scaling.
+    ///
+    /// The layout calculation's behavior is unspecified for keys outside of this range.
+    pub numerator: Option<u16>,
+    /// The denominator for fractional scaling within the cell.
+    ///
+    /// This currently has no effect on the layout calculation.
+    ///
+    /// # Valid Range
+    /// As of writing, the protocol permits values from 0 to 15, where the default of 0
+    /// specifies no fractional scaling. Also, the protocol requires that this be larger
+    /// than [`Self::numerator`] if nonzero.
+    ///
+    /// The layout calculation's behavior is unspecified for keys outside of this range.
+    pub denominator: Option<u16>,
+    /// The width of the text in cells (each subject to [`Self::scale`]).
+    ///
+    /// If this key is specified (and nonzero), the layout calculation *may* assume that it
+    /// applies to the text, even if Kitty ignores it. As of writing this, this happens when
+    /// specifying this key without one of the scaling keys.
+    ///
+    /// # Valid Range
+    /// As of writing, the protocol permits values from 0 to 7, where the default of 0
+    /// disables the behavior of this key.
+    ///
+    /// The layout calculation's behavior is unspecified for keys outside of this range.
+    pub width: Option<u16>,
+    /// The way that content is aligned vertically within the (scaled) cells.
+    ///
+    /// This key currently has no effect on layout calculation.
+    ///
+    /// # Valid Range
+    /// As of writing, the protocol permits values from 0 to 2.
+    ///
+    /// The layout calculation's behavior is unspecified for keys outside of this range.
+    pub vert_align: Option<u16>,
+    /// The way that content is aligned horizontally within the (scaled) cells.
+    /// This key currently has no effect on layout calculation.
+    ///
+    /// # Valid Range
+    /// As of writing, the protocol permits values from 0 to 2.
+    ///
+    /// The layout calculation's behavior is unspecified for keys outside of this range.
+    pub horiz_align: Option<u16>,
+
+    #[doc(hidden)]
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
+}
+impl TextSizing {
+    /// Top alignment for [`Self::vert_align`].
+    pub const ALIGN_TOP: u16 = 0;
+    /// Bottom alignment for [`Self::horiz_align`].
+    pub const ALIGN_BOTTOM: u16 = 1;
+    /// Left alignment for [`Self::horiz_align`].
+    pub const ALIGN_LEFT: u16 = 0;
+    /// Right alignment for [`Self::horiz_align`].
+    pub const ALIGN_RIGHT: u16 = 1;
+    /// Centered alignment, both for [`Self::vert_align`] and [`Self::horiz_align`].
+    pub const ALIGN_CENTER: u16 = 2;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

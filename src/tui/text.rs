@@ -70,13 +70,62 @@ impl TextStyle {
         crossterm::Command::write_ansi(&crossterm::style::ResetColor, f)
     }
 }
+impl TextSizing {
+    pub(crate) fn begin(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b]66;")?;
+
+        let mut first = true;
+        let Self {
+            scale,
+            numerator,
+            denominator,
+            width,
+            vert_align,
+            horiz_align,
+            #[expect(deprecated)]
+                __non_exhaustive_struct_update: (),
+        } = self;
+        for (k, v) in [
+            ("s", scale),
+            ("n", numerator),
+            ("d", denominator),
+            ("w", width),
+            ("v", vert_align),
+            ("h", horiz_align),
+        ] {
+            let Some(v) = *v else {
+                continue;
+            };
+            match first {
+                true => first = false,
+                false => write!(f, ":")?,
+            }
+            write!(f, "{k}={v}")?;
+        }
+        write!(f, ";")?;
+
+        Ok(())
+    }
+    pub(crate) fn end(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x07")
+    }
+}
 impl PlainTextWriter {
     fn finish_line(&mut self) {
         let (open, content) = self.cur_line.split_at(self.style_content_offset);
 
-        let content_width = unicode_width::UnicodeWidthStr::width(content)
-            .try_into()
-            .unwrap_or(u16::MAX);
+        let num_cells = self
+            .opts
+            .sizing
+            .as_ref()
+            .and_then(|s| s.width)
+            .take_if(|it| *it != 0)
+            .unwrap_or_else(|| {
+                unicode_width::UnicodeWidthStr::width(content)
+                    .try_into()
+                    .unwrap_or(u16::MAX)
+            });
+        let scale = self.opts.sizing.as_ref().and_then(|s| s.scale).unwrap_or(1);
 
         let mut line = {
             let open = open.into();
@@ -86,12 +135,15 @@ impl PlainTextWriter {
         if let Some(style) = &self.opts.style {
             style.end(&mut line).unwrap();
         }
+        if let Some(sizing) = &self.opts.sizing {
+            sizing.end(&mut line).unwrap();
+        }
 
         self.lines.push(StackItemRepr {
             elem: ElemRepr::Print {
                 raw: line,
-                width: content_width,
-                height: 1,
+                width: num_cells.saturating_mul(scale),
+                height: scale,
             }
             .into(),
             fill_weight: 0,
@@ -138,6 +190,9 @@ impl PlainTextWriter {
     }
     pub(crate) fn with_opts(opts: TextOpts) -> Self {
         let mut cur_line = String::new();
+        if let Some(sizing) = &opts.sizing {
+            sizing.begin(&mut cur_line).unwrap();
+        }
         if let Some(style) = &opts.style {
             style.begin(&mut cur_line).unwrap();
         }

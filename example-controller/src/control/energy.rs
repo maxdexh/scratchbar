@@ -49,7 +49,7 @@ pub async fn ppd_module(
 
         let icon: tui::Elem = match profile.as_deref() {
             Some("balanced") => tui::Elem::text(" ", tui::TextOpts::default()),
-            Some("performance") => xtui::tui_center_symbol(" ", 2),
+            Some("performance") => xtui::tui_center_symbol("", 2),
             Some("power-saver") => tui::Elem::text(" ", tui::TextOpts::default()),
             _ => {
                 tui_tx.send_if_modified(|tui| {
