@@ -470,6 +470,8 @@ async fn init_term(
     })
 }
 
+const NERD_FONT_CONFIG_OVERRIDE: &str = "-o=symbol_map U+e000-U+e00a,U+ea60-U+ebeb,U+e0a0-U+e0c8,U+e0ca,U+e0cc-U+e0d7,U+e200-U+e2a9,U+e300-U+e3e3,U+e5fa-U+e6b7,U+e700-U+e8ef,U+ed00-U+efc1,U+f000-U+f2ff,U+f000-U+f2e0,U+f300-U+f381,U+f400-U+f533,U+f0001-U+f1af0 Symbols Nerd Font Mono";
+
 async fn try_init_monitor(
     args: &RunMonitorArgs,
     required_tasks: &mut JoinSet<anyhow::Result<std::convert::Infallible>>,
@@ -483,6 +485,7 @@ async fn try_init_monitor(
         tmpdir.path().join("bar-term-socket.sock"),
         format!("BAR@{}", monitor.name),
         [
+            NERD_FONT_CONFIG_OVERRIDE.into(),
             format!("--output-name={}", monitor.name).into(),
             // Allow remote control
             "-o=allow_remote_control=socket-only".into(),
@@ -508,6 +511,7 @@ async fn try_init_monitor(
             tmpdir.path().join("menu-term-socket.sock"),
             format!("MENU@{}", monitor.name),
             [
+                NERD_FONT_CONFIG_OVERRIDE.into(),
                 format!("--output-name={}", monitor.name).into(),
                 // Configure remote control via socket
                 "-o=allow_remote_control=socket-only".into(),
