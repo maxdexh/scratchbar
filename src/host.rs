@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::Context as _;
 
-use crate::{tui, utils::ResultExt as _};
+use crate::{ctrl_ipc, tui};
 
 pub struct HostError(anyhow::Error);
 impl std::fmt::Debug for HostError {
@@ -18,6 +18,20 @@ impl std::fmt::Display for HostError {
     }
 }
 impl std::error::Error for HostError {}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct HostConnectOpts {
+    #[doc(hidden)]
+    #[deprecated = warn_non_exhaustive!()]
+    pub __non_exhaustive_struct_update: (),
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct HostConnection {
+    pub update_tx: std::sync::mpsc::Sender<HostUpdate>,
+    pub event_rx: std::sync::mpsc::Receiver<HostEvent>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -81,14 +95,6 @@ pub enum BarSelect {
     OnMonitor { monitor_name: Arc<str> },
 }
 
-#[deprecated]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RegisterMenu {
-    pub on_tag: tui::CustomId,
-    pub on_kind: tui::InteractKind,
-    pub tui: tui::Elem,
-    pub options: RegisterMenuOpts,
-}
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegisterMenuOpts {
     // TODO: Option on whether to apply update to already open tui
@@ -140,150 +146,27 @@ pub enum TermKind {
     Bar,
 }
 
-pub async fn run_host_connection(
-    tx: impl Fn(HostEvent) -> Option<()> + 'static + Send,
-    rx: impl AsyncFnMut() -> Option<HostUpdate> + 'static + Send,
-) -> Result<(), HostError> {
-    let sock_path = std::env::var_os(crate::host_ctrl_ipc::HOST_SOCK_PATH_VAR)
+pub fn connect(opts: HostConnectOpts) -> Result<HostConnection, HostError> {
+    let sock_path = std::env::var_os(ctrl_ipc::HOST_SOCK_PATH_VAR)
         .context("Missing socket path env var")
         .map_err(HostError)?;
     let socket = std::os::unix::net::UnixStream::connect(sock_path)
         .context("Failed to connect to controller socket")
         .map_err(HostError)?;
 
-    run_ipc_connection(socket, tx, rx).await.map_err(HostError)
-}
-
-pub(crate) async fn run_ipc_connection<
-    T: Serialize + Send + 'static,
-    R: serde::de::DeserializeOwned + Send + 'static,
->(
-    socket: std::os::unix::net::UnixStream,
-    tx: impl Fn(R) -> Option<()> + 'static + Send,
-    mut rx: impl AsyncFnMut() -> Option<T> + 'static + Send,
-) -> anyhow::Result<()> {
-    #[derive(Clone)]
-    struct Shared {
-        socket: Arc<std::os::unix::net::UnixStream>,
-        err_slot: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
-        abort_fut: futures::future::AbortHandle,
-    }
-    impl Shared {
-        fn set_err(&self, err: anyhow::Error) {
-            let mut slot = self
-                .err_slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-            if slot.is_none() {
-                *slot = Some(err)
-            }
-        }
-    }
-    impl Drop for Shared {
-        fn drop(&mut self) {
-            if let Err(err) = self.socket.shutdown(std::net::Shutdown::Both) {
-                log::error!("{err}");
-            }
-            self.abort_fut.abort();
-        }
-    }
-
-    let (abort_handle, abort_reg) = futures::future::AbortHandle::new_pair();
-    let shared = Shared {
-        socket: Arc::new(socket),
-        err_slot: Default::default(),
-        abort_fut: abort_handle,
-    };
-
-    let (writer_tx, writer_rx) = std::sync::mpsc::channel();
-
-    let fut_shared = shared.clone();
-    let fut = futures::future::Abortable::new(
-        async move {
-            let _guard = fut_shared;
-            while let Some(val) = rx().await
-                && writer_tx.send(val).is_ok()
-            {}
+    match ctrl_ipc::connect_ipc(
+        socket,
+        ctrl_ipc::HostCtrlInit {
+            version: ctrl_ipc::VERSION.into(),
+            opts,
         },
-        abort_reg,
-    );
-
-    let writer_shared = shared.clone();
-    std::thread::spawn(move || {
-        if let Err(err) = run_ipc_writer(&*writer_shared.socket, &writer_rx) {
-            writer_shared.set_err(err);
-        }
-    });
-
-    let reader_shared = shared.clone();
-    std::thread::spawn(move || {
-        if let Err(err) = run_ipc_reader(&*reader_shared.socket, tx) {
-            reader_shared.set_err(err);
-        }
-    });
-
-    fut.await
-        .map_err(|_| anyhow::anyhow!("controller connection aborted"))
-        .ok_or_debug();
-
-    match shared
-        .err_slot
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-    {
-        Some(err) => Err(err),
-        None => Ok(()),
+    ) {
+        Ok((ctrl_ipc::HostInitResponse {}, tx, rx)) => Ok(HostConnection {
+            update_tx: tx,
+            event_rx: rx,
+        }),
+        Err(err) => Err(HostError(err)),
     }
-}
-fn run_ipc_reader<R: serde::de::DeserializeOwned>(
-    read: impl std::io::Read,
-    mut tx: impl FnMut(R) -> Option<()>,
-) -> anyhow::Result<()> {
-    let mut buf = Vec::new();
-    let mut read = std::io::BufReader::new(read);
-
-    loop {
-        if std::io::BufRead::read_until(&mut read, 0, &mut buf)? == 0 {
-            break;
-        }
-
-        let Some(val) = postcard::from_bytes_cobs(&mut buf)
-            .context("Failed to deserialize")
-            .ok_or_log()
-        else {
-            continue;
-        };
-        if tx(val).is_none() {
-            break;
-        }
-        buf.clear();
-    }
-    Ok(())
-}
-
-fn run_ipc_writer<T: serde::Serialize>(
-    write: impl std::io::Write,
-    rx: &std::sync::mpsc::Receiver<T>,
-) -> anyhow::Result<()> {
-    use std::io::Write as _;
-
-    let mut write = std::io::BufWriter::new(write);
-
-    while let Ok(ready) = rx.recv() {
-        let vals = std::iter::chain(
-            std::iter::once(ready),
-            std::iter::from_fn(|| rx.try_recv().ok()),
-        );
-        for val in vals {
-            if let Some(buf) = postcard::to_stdvec_cobs(&val).ok_or_log() {
-                write.write_all(&buf)?;
-            }
-        }
-        write.flush()?;
-    }
-    Ok(())
 }
 
 pub fn init_controller_logger() {

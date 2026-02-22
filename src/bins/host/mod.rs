@@ -5,7 +5,7 @@ mod monitor_listen;
 use std::{collections::HashMap, sync::Arc};
 
 use futures::{Stream, StreamExt};
-use tokio::sync::{mpsc::UnboundedSender, watch};
+use tokio::sync::watch;
 
 use crate::{host, tui, utils::ResultExt};
 
@@ -46,7 +46,7 @@ pub(crate) struct MonitorInfo {
 
 async fn run_host(
     update_rx: impl Stream<Item = host::HostUpdate> + Send + 'static,
-    event_tx: UnboundedSender<host::HostEvent>,
+    event_tx: std::sync::mpsc::Sender<host::HostEvent>,
 ) -> std::process::ExitCode {
     let mut required_tasks = tokio::task::JoinSet::<std::process::ExitCode>::new();
 

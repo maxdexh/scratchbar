@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Context as _;
-use tokio::sync::{mpsc::UnboundedSender, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{bins::host::MonitorInfo, utils::ResultExt as _};
@@ -12,7 +12,7 @@ const CHANGE_SLEEP: Duration = Duration::from_millis(500);
 pub(super) async fn run_monitor_listener(
     bar_tui_states_tx: watch::Sender<super::BarTuiStates>,
     open_menu_rx: watch::Receiver<Option<crate::host::OpenMenu>>,
-    event_tx: UnboundedSender<crate::host::HostEvent>,
+    event_tx: std::sync::mpsc::Sender<crate::host::HostEvent>,
 ) -> std::process::ExitCode {
     // TODO: Consider moving this to BarTuiStates to ensure consistent data
     let mut monitors_auto_cancel = HashMap::<Arc<str>, tokio_util::sync::DropGuard>::new();

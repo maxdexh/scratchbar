@@ -456,25 +456,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-controller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "futures",
- "hyprland",
- "image",
- "libpulse-binding",
- "log",
- "scratchbar",
- "serde",
- "system-tray",
- "tokio",
- "tokio-util",
- "zbus",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1114,6 +1095,25 @@ name = "scratchbar-bin"
 version = "0.1.0"
 dependencies = [
  "scratchbar",
+]
+
+[[package]]
+name = "scratchbar-controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "hyprland",
+ "image",
+ "libpulse-binding",
+ "log",
+ "scratchbar",
+ "serde",
+ "system-tray",
+ "tokio",
+ "tokio-util",
+ "zbus",
 ]
 
 [[package]]

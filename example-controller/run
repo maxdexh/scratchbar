@@ -5,5 +5,5 @@ set -euo pipefail
 cd -- "$(dirname "$0")/.."
 
 host_bin="$(cargo build --message-format=json -p scratchbar-bin "$@" | jq -rc 'select(.target.name == "scratchbar" and .executable != null) | .executable')"
-example_bin="$(cargo build --message-format=json -p example-controller "$@" | jq -rc 'select(.target.name == "example-controller" and .executable != null) | .executable')"
-exec "${host_bin:?}" "${example_bin:?}"
+ctrl_bin="$(cargo build --message-format=json -p scratchbar-controller "$@" | jq -rc 'select(.target.name == "scratchbar-controller" and .executable != null) | .executable')"
+exec "${host_bin:?"Failed to find host binary in json output"}" "${ctrl_bin:?"Failed to find controller binary in json output"}"

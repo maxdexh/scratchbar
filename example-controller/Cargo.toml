@@ -1,10 +1,11 @@
 [package]
-name = "example-controller"
+name = "scratchbar-controller"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scratchbar = { path = ".." }
+scratchbar = { path = ".." } # NOTE: Delete this line and uncomment the next for standalone controller repo
+# scratchbar = { git = "https://github.com/maxdexh/scratchbar" }
 
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 tokio-util = { version = "0.7.18", features = ["rt", "time"] }

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use tokio_util::time::FutureExt as _;
 
-use crate::utils::ResultExt as _;
+use crate::{ctrl_ipc, utils::ResultExt as _};
 
 pub(super) fn host_main_inner() -> Option<ExitCode> {
     crate::logging::init_logger("HOST".into());
@@ -30,7 +30,7 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
         let child = tokio::process::Command::new(ctrl_cmd)
             .kill_on_drop(true)
             .args(std::env::args_os().skip(2))
-            .env(crate::host_ctrl_ipc::HOST_SOCK_PATH_VAR, sock_path)
+            .env(ctrl_ipc::HOST_SOCK_PATH_VAR, sock_path)
             .spawn()
             .ok_or_log()?;
 
@@ -38,6 +38,14 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
 
         (child, conn)
     };
+
+    let (ctrl_ipc::HostCtrlInit { version, opts }, event_tx, update_rx) =
+        ctrl_ipc::connect_ipc(ctrl_socket, ctrl_ipc::HostInitResponse {}).ok_or_log()?;
+    check_version(&version).ok_or_log()?;
+    let crate::host::HostConnectOpts {
+        #[expect(deprecated)]
+            __non_exhaustive_struct_update: (),
+    } = opts;
 
     let signals_task = runtime.spawn(async move {
         type SK = tokio::signal::unix::SignalKind;
@@ -86,19 +94,15 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
             .flatten()
     };
 
-    let (update_tx, mut update_rx) = {
+    let mut update_rx = {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (tx, rx)
+        std::thread::spawn(move || {
+            while let Ok(upd) = update_rx.recv()
+                && tx.send(upd).is_ok()
+            {}
+        });
+        rx
     };
-    let (event_tx, mut event_rx) = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (tx, rx)
-    };
-    runtime.spawn(crate::host::run_ipc_connection(
-        ctrl_socket,
-        move |upd| update_tx.send(upd).ok(),
-        async move || event_rx.recv().await,
-    ));
 
     let main_task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
         super::run_host(
@@ -148,4 +152,15 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
     });
 
     runtime.block_on(async move { exit_task.await.ok_or_log() })
+}
+
+fn check_version(version: &str) -> anyhow::Result<()> {
+    let this_ver = ctrl_ipc::VERSION;
+    if version == this_ver {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Cannot run controller built against version {version:?} under version {this_ver:?}"
+        )
+    }
 }

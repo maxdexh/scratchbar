@@ -24,7 +24,7 @@ pub(super) struct RunMonitorArgs {
     pub cancel_monitor: CancellationToken,
     pub bar_state_tx: watch::Sender<super::BarTuiStateSender>,
     pub open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
-    pub event_tx: UnboundedSender<host::HostEvent>,
+    pub event_tx: std::sync::mpsc::Sender<host::HostEvent>,
 }
 pub(super) async fn run_monitor(mut args: RunMonitorArgs) {
     let monitor = args.monitor.name.clone();
@@ -73,7 +73,7 @@ struct StartedMonitorEnv {
     menu: Term,
     bar_tui_rx: watch::Receiver<tui::Elem>,
     bar_hide_rx: watch::Receiver<bool>,
-    event_tx: UnboundedSender<host::HostEvent>,
+    event_tx: std::sync::mpsc::Sender<host::HostEvent>,
     open_menu_rx: watch::Receiver<Option<host::OpenMenu>>,
 }
 

@@ -8,7 +8,7 @@ macro_rules! warn_non_exhaustive {
 pub mod host;
 pub mod tui;
 
-mod host_ctrl_ipc;
+mod ctrl_ipc;
 mod logging;
 mod utils;
 
