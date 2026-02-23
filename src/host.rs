@@ -2,9 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
-
-use crate::{ctrl_ipc, tui};
+use crate::{ctrl_ipc, tui, utils::ResultExt};
 
 pub struct HostError(anyhow::Error);
 impl std::fmt::Debug for HostError {
@@ -29,8 +27,16 @@ pub struct HostConnectOpts {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct HostConnection {
-    pub update_tx: std::sync::mpsc::Sender<HostUpdate>,
-    pub event_rx: std::sync::mpsc::Receiver<HostEvent>,
+    pub update_tx: HostUpdateSender,
+}
+#[derive(Clone, Debug)]
+pub struct HostUpdateSender {
+    tx: std::sync::mpsc::Sender<HostUpdate>,
+}
+impl HostUpdateSender {
+    pub fn send(&self, update: HostUpdate) -> Result<(), std::sync::mpsc::SendError<HostUpdate>> {
+        self.tx.send(update)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,24 +152,25 @@ pub enum TermKind {
     Bar,
 }
 
-pub fn connect(opts: HostConnectOpts) -> Result<HostConnection, HostError> {
-    let sock_path = std::env::var_os(ctrl_ipc::HOST_SOCK_PATH_VAR)
-        .context("Missing socket path env var")
-        .map_err(HostError)?;
-    let socket = std::os::unix::net::UnixStream::connect(sock_path)
-        .context("Failed to connect to controller socket")
-        .map_err(HostError)?;
-
-    match ctrl_ipc::connect_ipc(
-        socket,
+pub fn connect(
+    opts: HostConnectOpts,
+    mut event_tx: impl FnMut(HostEvent) -> Result<(), HostEvent> + Send + 'static,
+    on_stop: impl FnOnce(Result<(), HostError>) + Send + 'static,
+) -> Result<HostConnection, HostError> {
+    match ctrl_ipc::connect_from_ctrl(
         ctrl_ipc::HostCtrlInit {
             version: ctrl_ipc::VERSION.into(),
             opts,
         },
+        move |ev| {
+            event_tx(ev)
+                .map_err(std::sync::mpsc::SendError)
+                .ok_or_debug()
+        },
+        |res| on_stop(res.map_err(HostError)),
     ) {
-        Ok((ctrl_ipc::HostInitResponse {}, tx, rx)) => Ok(HostConnection {
-            update_tx: tx,
-            event_rx: rx,
+        Ok((ctrl_ipc::HostInitResponse {}, tx)) => Ok(HostConnection {
+            update_tx: HostUpdateSender { tx },
         }),
         Err(err) => Err(HostError(err)),
     }

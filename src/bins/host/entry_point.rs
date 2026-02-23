@@ -8,6 +8,19 @@ use crate::{ctrl_ipc, utils::ResultExt as _};
 pub(super) fn host_main_inner() -> Option<ExitCode> {
     crate::logging::init_logger("HOST".into());
 
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    {
+        let exit_tx_clone = exit_tx.clone();
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            hook(info);
+            log::error!("{info}");
+            exit_tx_clone.send(ExitCode::FAILURE).ok_or_debug();
+        }));
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -39,20 +52,36 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
         (child, conn)
     };
 
-    let (ctrl_ipc::HostCtrlInit { version, opts }, event_tx, update_rx) =
-        ctrl_ipc::connect_ipc(ctrl_socket, ctrl_ipc::HostInitResponse {}).ok_or_log()?;
-    check_version(&version).ok_or_log()?;
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let exit_tx_clone = exit_tx.clone();
+    let (opts, event_tx) = ctrl_ipc::connect_from_host(
+        ctrl_socket,
+        |init| {
+            let ctrl_ipc::HostCtrlInit { version, opts } = init;
+            check_version(&version)?;
+            Ok((ctrl_ipc::HostInitResponse {}, opts))
+        },
+        move |upd| update_tx.send(upd).ok(),
+        move |res| {
+            exit_tx_clone
+                .send(if res.ok_or_log().is_some() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                })
+                .ok_or_debug();
+        },
+    )
+    .ok_or_log()?;
+
     let crate::host::HostConnectOpts {
         #[expect(deprecated)]
             __non_exhaustive_struct_update: (),
     } = opts;
 
-    let signals_task = runtime.spawn(async move {
+    {
         type SK = tokio::signal::unix::SignalKind;
-
-        let mut tasks = tokio::task::JoinSet::new();
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 
         for kind in [
             SK::interrupt(),
@@ -67,87 +96,64 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
             let Some(mut signal) = tokio::signal::unix::signal(kind).ok_or_log() else {
                 continue;
             };
-            let tx = tx.clone();
-            tasks.spawn(async move {
-                while let Some(()) = signal.recv().await
-                    && tx.send(kind).await.is_ok()
-                {}
+            let exit_tx = exit_tx.clone();
+            runtime.spawn(async move {
+                if let Some(()) = signal.recv().await {
+                    let code = kind.as_raw_value().wrapping_add(128);
+                    exit_tx.send(ExitCode::from(code as u8)).ok_or_debug();
+                }
             });
         }
-        drop(tx);
+    }
 
-        rx.recv()
-            .await
-            .context("Failed to receive any signals")
-            .map(|kind| {
-                log::debug!("Received exit signal {kind:?}");
-                let code = 128 + kind.as_raw_value();
-                ExitCode::from(code as u8)
-            })
-            .ok_or_log()
-    });
-    let signals_task = async move {
-        signals_task
-            .await
-            .context("Signal handler failed")
-            .ok_or_log()
-            .flatten()
-    };
-
-    let mut update_rx = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        std::thread::spawn(move || {
-            while let Ok(upd) = update_rx.recv()
-                && tx.send(upd).is_ok()
-            {}
-        });
-        rx
-    };
-
-    let main_task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
-        super::run_host(
+    let exit_tx_clone = exit_tx.clone();
+    runtime.spawn(async move {
+        let code = super::run_host(
             futures::stream::poll_fn(move |cx| update_rx.poll_recv(cx)),
             event_tx,
         )
         .await;
-        // FIXME: Return exit code
-        ExitCode::SUCCESS
-    }));
+
+        exit_tx_clone.send(code).ok_or_debug();
+    });
 
     let exit_task = runtime.spawn(async move {
-        let wait_res = tokio::select! {
-            it = ctrl_child.wait() => Ok(it),
-            join = main_task => {
-                let code = join
-                    .context("Main task failed")
-                    .ok_or_log()
-                    .unwrap_or(std::process::ExitCode::FAILURE);
-                Err(code)
+        let host_code;
+        let ctrl_status;
+        tokio::select! {
+            res = ctrl_child.wait() => {
+                host_code = ExitCode::SUCCESS;
+                ctrl_status = res.ok_or_log();
             },
-            Some(code) = signals_task => Err(code),
-        };
-        let (wait_res, code) = match wait_res {
-            Ok(res) => (Some(res), ExitCode::SUCCESS),
-            Err(code) => (
-                ctrl_child
+            Some(code) = exit_rx.recv() => {
+                host_code = code;
+                let res = ctrl_child
                     .wait()
                     .timeout(std::time::Duration::from_secs(5))
                     .await
-                    .context("Controller process failed to exit on its own")
-                    .ok_or_log(),
-                code,
-            ),
+                    .context("Controller failed to exit on its own")
+                    .ok_or_log();
+
+                if let Some(res) = res {
+                    ctrl_status = res.ok_or_log();
+                } else {
+                    ctrl_status = None;
+
+                    if ctrl_child.start_kill().context("Failed to kill controller").ok_or_log().is_some() {
+                       ctrl_child.wait().await.ok_or_log();
+                    }
+                }
+            },
         };
-        let child_code = match wait_res {
-            Some(res) => res.ok_or_log().map_or(ExitCode::FAILURE, |exit| {
-                ExitCode::from(exit.code().unwrap_or(0) as u8)
-            }),
-            None => ExitCode::FAILURE,
-        };
-        if code == ExitCode::SUCCESS {
-            child_code
+        let ctrl_code = ctrl_status.map_or(ExitCode::FAILURE, |status| {
+            ExitCode::from(status.code().unwrap_or(0) as u8)
+        });
+
+        // Prefer the controller's code if it did not exit correctly
+        if ctrl_code != ExitCode::SUCCESS {
+            ctrl_code
         } else {
-            code
+            host_code
         }
     });
 

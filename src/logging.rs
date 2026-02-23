@@ -93,11 +93,5 @@ fn try_init_logger() -> anyhow::Result<()> {
         .start()?;
     std::mem::forget(logger_handle);
 
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        log::error!("{info}");
-        hook(info);
-    }));
-
     Ok(())
 }

@@ -174,7 +174,7 @@ impl BarModuleFactory {
     }
 }
 
-fn send_bar_tui(bar_tui: &[BarTuiElem], ctrl_tx: &std::sync::mpsc::Sender<host::HostUpdate>) {
+fn send_bar_tui(bar_tui: &[BarTuiElem], ctrl_tx: &host::HostUpdateSender) {
     let mut by_monitor = HashMap::new();
     let mut fallback = xtui::StackBuilder::new(tui::Axis::X);
     for elem in bar_tui {
@@ -238,7 +238,7 @@ struct CurMenu {
 }
 
 async fn run_menu_mgr(
-    ctrl_upd_tx: std::sync::mpsc::Sender<host::HostUpdate>,
+    ctrl_upd_tx: host::HostUpdateSender,
     mut cur_menu_rx: watch::Receiver<Option<CurMenu>>,
 ) {
     cur_menu_rx.mark_changed();
@@ -275,7 +275,7 @@ async fn run_menu_mgr(
 }
 
 async fn run_event_handler(
-    ctrl_upd_tx: std::sync::mpsc::Sender<host::HostUpdate>,
+    ctrl_upd_tx: host::HostUpdateSender,
     mut ctrl_ev_rx: tokio::sync::mpsc::UnboundedReceiver<host::HostEvent>,
     mut bar_menus_rx: watch::Receiver<BarMenus>,
     tag_cb_rx: watch::Receiver<Callbacks>,
@@ -368,18 +368,11 @@ async fn run_event_handler(
     }
 }
 
-pub async fn control_main(connect: host::HostConnection) -> std::process::ExitCode {
+pub async fn control_main(
+    connect: host::HostConnection,
+    ctrl_ev_rx: tokio::sync::mpsc::UnboundedReceiver<host::HostEvent>,
+) -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
-
-    let ctrl_ev_rx = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        required_tasks.spawn_blocking(move || {
-            while let Ok(upd) = connect.event_rx.recv()
-                && tx.send(upd).is_ok()
-            {}
-        });
-        rx
-    };
 
     let mut reload_tx = ReloadTx::new();
 
