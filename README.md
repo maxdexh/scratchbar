@@ -17,11 +17,13 @@ Modern terminal protocols, in particular those [innovated by Kitty](https://sw.k
 
 (TODO: Link to library docs)
 
+Through some rather dodgy usage of the panel margin parameters, Scratchbar is also able to display tooltips and context menus.
+
 To make this as hackable as possible, this project is structured in an unorthodox way, consisting of two components:
 
 1. **The Host:** The main program, which manages Kitty terminal instances, including event piping, monitor detection and the panels' lifecycles.
 2. **The Controller:**
-   A user-defined program that is responsible for *what* the bar displays, including any logic to listen to system events in order to acquire the necessary information.
+   A user-defined program that is responsible for *what* the bar displays, including the logic to acquire that information.
    The Controller runs as a subprocess of the Host and communicates through the `scratchbar` Rust library.
 
 ## Dependencies
@@ -30,7 +32,7 @@ Running the Host program requires:
 - A recent Kitty version. Versions prior to 0.46 result in a degraded experience due to recently fixed bugs.
 - A desktop environment which works with Kitty panels.
   See [the compatibility list](https://sw.kovidgoyal.net/kitty/kittens/panel/#compatibility-with-various-platforms).
-  Note that the panels used by this project are run as dock panels snapped to the screens' sides, so restrictions with desktop and background panels can be ignored.
+  Note that the panels used by this project are run as dock panels snapped to the screens' sides, so restrictions to desktop and background panels can be ignored.
 - Currently, the Host program polls `wlr-randr` to check for monitor changes.
   Therefore, you must have it installed (and available in your $PATH) and be on a desktop environment supported by it.
   This is going to change in the future.
@@ -41,7 +43,7 @@ To see Scratchbar in action, you can run the provided example controller, implem
 
 It displays the following parts of the environment, if available:
 - Hyprland Workspaces (PRs for other desktops welcome)
-- Energy information using the `UPower` dbus interface (only on battery)
+- Energy information using the `UPower` dbus interface (only shown on battery)
 - Power profiles using the `UPower.PowerProfiles` dbus interface
 - System tray icons `StatusNotifierWatcher` dbus interface for the system tray
 - Audio Information using `libpulseaudio`. Changes are applied through the `pactl` command
