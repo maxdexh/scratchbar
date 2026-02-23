@@ -68,4 +68,4 @@ Create a standalone repository based on `example-controller/` as follows:
 - Copy the example controller somewhere else (`cp -r scratchbar/example-controller scratchbar-controller`)
 - Adjust the `scratchbar` dependency in the controller repo (see `example-controller/Cargo.toml`)
 
-TODO: How to run
+You can now run your bar using `scratchbar cargo run` (for development) or `scratchbar scratchbar-controller` (after `cargo install`ing it).
