@@ -17,16 +17,17 @@ fn main_inner() -> Option<std::process::ExitCode> {
 
     let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    {
+    std::panic::set_hook(Box::new({
         let exit_tx_clone = exit_tx.clone();
 
         let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
+
+        move |info| {
             hook(info);
             log::error!("{info}");
             exit_tx_clone.send(ExitCode::FAILURE).ok_or_debug();
-        }));
-    }
+        }
+    }));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -1,4 +1,4 @@
-mod entry_point;
+mod bin_entry_point;
 mod monitor_inst;
 mod monitor_listen;
 
@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use crate::{host, tui, utils::ResultExt};
 
 pub(crate) fn host_main() -> std::process::ExitCode {
-    entry_point::host_main_inner().unwrap_or(std::process::ExitCode::FAILURE)
+    bin_entry_point::host_main_inner().unwrap_or(std::process::ExitCode::FAILURE)
 }
 
 // TODO: Consider stopping/starting the monitor instance instead of having this hide system
