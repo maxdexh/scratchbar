@@ -8,8 +8,8 @@ mod layout;
 #[cfg(feature = "__bin")]
 pub(crate) use layout::*;
 
-mod text;
-use text::*;
+mod text_impl;
+use text_impl::*;
 
 mod tui_api;
 pub use tui_api::*;
