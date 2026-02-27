@@ -4,7 +4,7 @@ use crate::{
     clients,
     control::{BarTuiElem, InteractTagRegistry, ModuleArgs, interact_callback_with},
     utils::ResultExt as _,
-    xtui,
+    xtui::{self, text},
 };
 use scratchbar::tui;
 
@@ -31,15 +31,16 @@ pub async fn hypr_module(
             };
 
             let (_, (tui, tui_active)) = ws_reg.get_or_init(&ws.id, |tag| {
-                let mk = |fg| {
-                    xtui::underline_hovered(
-                        &ws.name,
-                        tui::TextStyle {
-                            fg: Clone::clone(&fg),
-                            ..Default::default()
-                        },
-                        tag.clone(),
-                    )
+                let mk = |active| {
+                    let base = text::TextOpts::default().with(|it| {
+                        if active {
+                            it.fg_color = text::Color::Green
+                        }
+                    });
+                    let hovered = base.clone().with(|it| it.attrs.set_underlined(true));
+                    text::render_with_hover(&base, tag.clone(), &hovered, |it| {
+                        it.render_line(&ws.name)
+                    })
                 };
 
                 let on_interact = interact_callback_with(
@@ -54,7 +55,7 @@ pub async fn hypr_module(
 
                 ctrl_tx.register_callback(tag.clone(), on_interact);
 
-                (mk(None), mk(Some(tui::TermColor::Green)))
+                (mk(false), mk(true))
             });
 
             let wss = by_monitor

@@ -7,7 +7,7 @@ use crate::{
         mk_fresh_interact_tag,
     },
     utils::ResultExt as _,
-    xtui,
+    xtui::{self, text},
 };
 use anyhow::Context as _;
 use scratchbar::tui;
@@ -47,17 +47,19 @@ pub async fn tray_module(
                     menu_tui_stack.push({
                         let mut hstack = xtui::StackBuilder::new(tui::Axis::X);
                         hstack.fill(1, tui::Elem::empty());
-                        hstack.push(tui::Elem::text(
-                            title,
-                            tui::TextModifiers {
-                                bold: true,
-                                ..Default::default()
-                            },
-                        ));
+                        hstack.push(
+                            text::TextOpts::default()
+                                .with(|it| it.attrs.set_bold(true))
+                                .render(title),
+                        );
                         hstack.fill(1, tui::Elem::empty());
                         hstack.build()
                     });
-                    menu_tui_stack.push(tui::Elem::text(description, tui::TextOpts::default()));
+                    menu_tui_stack.push(
+                        text::TextOpts::default()
+                            .with(|it| it.attrs.set_bold(true))
+                            .render(description),
+                    );
                     menu_tui_stack.build()
                 };
                 ctrl_tx.register_menu(RegisterMenu {
@@ -105,16 +107,16 @@ pub async fn tray_module(
                     tag
                 });
 
-                let tui = tui::Elem::block(tui::BlockOpts {
-                    border_style: Some(tui::TextStyle {
-                        fg: Some(tui::TermColor::DarkGrey),
+                let tui = xtui::block(
+                    xtui::BlockLines::thick().apply_crossterm(crossterm::style::ContentStyle {
+                        foreground_color: Some(crossterm::style::Color::DarkGrey),
                         ..Default::default()
                     }),
-                    borders: tui::BlockBorders::all(),
-                    lines: tui::BlockLineSet::thick(),
-                    inner: Some(menu_tui),
-                    ..Default::default()
-                });
+                    xtui::BlockOpts {
+                        borders: xtui::BlockBorders::all(),
+                        inner: Some(menu_tui),
+                    },
+                );
                 ctrl_tx.register_menu(RegisterMenu {
                     on_tag: tag.clone(),
                     on_kind: tui::InteractKind::Click(tui::MouseButton::Right),
@@ -173,17 +175,19 @@ pub async fn tray_module(
                 visible: true,
                 menu_type: MenuType::Separator,
                 ..
-            } => tui::Elem::block(tui::BlockOpts {
-                borders: tui::BlockBorders {
-                    top: true,
-                    ..Default::default()
-                },
-                border_style: Some(tui::TextStyle {
-                    fg: Some(tui::TermColor::DarkGrey),
+            } => xtui::block(
+                xtui::BlockLines::normal().apply_crossterm(crossterm::style::ContentStyle {
+                    foreground_color: Some(crossterm::style::Color::DarkGrey),
                     ..Default::default()
                 }),
-                ..Default::default()
-            }),
+                xtui::BlockOpts {
+                    borders: xtui::BlockBorders {
+                        top: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ),
             MenuItem {
                 id,
                 menu_type: MenuType::Standard,
@@ -213,7 +217,7 @@ pub async fn tray_module(
                     ));
                     stack.spacing(1);
                 }
-                stack.push(tui::Elem::text(label, tui::TextOpts::default()));
+                stack.push(text::TextOpts::default().render_line(label));
                 // FIXME: Add hover
                 stack.build().interactive(mk_interact(*id))
             }

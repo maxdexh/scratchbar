@@ -7,7 +7,7 @@ use crate::{
         mk_fresh_interact_tag,
     },
     utils::ResultExt as _,
-    xtui,
+    xtui::text,
 };
 use scratchbar::tui;
 use tokio::sync::watch;
@@ -35,10 +35,7 @@ pub async fn ppd_module(
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
         let profile = profile_rx.borrow_and_update().clone();
-        let tui = tui::Elem::text(
-            profile.as_deref().unwrap_or("No profile"),
-            tui::TextOpts::default(),
-        );
+        let tui = text::TextOpts::default().render_line("No profile");
         ctrl_tx.register_menu(RegisterMenu {
             on_tag: interact_tag.clone(),
             on_kind: tui::InteractKind::Hover,
@@ -47,18 +44,21 @@ pub async fn ppd_module(
             opts: Default::default(),
         });
 
-        let icon: tui::Elem = match profile.as_deref() {
-            Some("balanced") => tui::Elem::text(" ", tui::TextOpts::default()),
-            Some("performance") => xtui::tui_center_symbol("", 2),
-            Some("power-saver") => tui::Elem::text(" ", tui::TextOpts::default()),
-            _ => {
-                tui_tx.send_if_modified(|tui| {
-                    let old = std::mem::replace(tui, BarTuiElem::Hide);
-                    !matches!(old, BarTuiElem::Hide)
-                });
-                continue;
-            }
-        };
+        let icon = text::TextOpts::from(text::HorizontalAlign::Center).render_cell(
+            match profile.as_deref() {
+                Some("balanced") => "",
+                Some("performance") => "",
+                Some("power-saver") => "",
+                _ => {
+                    tui_tx.send_if_modified(|tui| {
+                        let old = std::mem::replace(tui, BarTuiElem::Hide);
+                        !matches!(old, BarTuiElem::Hide)
+                    });
+                    continue;
+                }
+            },
+            2.try_into().unwrap(),
+        );
 
         tui_tx.send_replace(BarTuiElem::Shared(icon.interactive(interact_tag.clone())));
     }
@@ -100,8 +100,7 @@ pub async fn energy_module(
             let energy = format!("{percentage:>3}% {rate:<6}");
 
             if energy != last_energy_text {
-                let tui = tui::Elem::text(energy.as_str(), tui::TextOpts::default())
-                    .interactive(interact_tag.clone());
+                let tui = text::TextOpts::default().render_line(energy.as_str());
                 tui_tx.send_replace(BarTuiElem::Shared(tui));
                 last_energy_text = energy;
             }
@@ -127,7 +126,7 @@ pub async fn energy_module(
                 }
             };
             if text != last_tooltip {
-                let tui = tui::Elem::text(text.as_str(), tui::TextOpts::default());
+                let tui = text::TextOpts::default().render_line(text.as_str());
                 ctrl_tx.register_menu(RegisterMenu {
                     on_tag: interact_tag.clone(),
                     on_kind: tui::InteractKind::Hover,

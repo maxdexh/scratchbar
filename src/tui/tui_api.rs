@@ -97,55 +97,6 @@ pub enum ImageLayoutMode {
     FillAxis(Axis, u16),
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BlockOpts {
-    pub borders: BlockBorders,
-    pub border_style: Option<TextStyle>,
-    pub lines: BlockLineSet,
-    pub inner: Option<Elem>,
-
-    #[deprecated = warn_non_exhaustive!()]
-    #[doc(hidden)]
-    pub __non_exhaustive_struct_update: (),
-}
-
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct BlockBorders {
-    pub top: bool,
-    pub bottom: bool,
-    pub left: bool,
-    pub right: bool,
-}
-impl BlockBorders {
-    pub fn all() -> Self {
-        Self {
-            top: true,
-            bottom: true,
-            left: true,
-            right: true,
-        }
-    }
-}
-
-// TODO: Decide on the internals of LineSet. Currently only single-width strings work
-// It would be cool if we could make multi-character borders work, e.g. to use
-// alternating +=+=+=+ borders. Ideally, ElemRepr would have a Fill variant that
-// just fills whatever area it is rendered to with some symbols. Then we can represent
-// blocks as stacks and fills.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockLineSet {
-    pub(crate) vertical: Arc<str>,
-    pub(crate) horizontal: Arc<str>,
-    pub(crate) top_right: Arc<str>,
-    pub(crate) top_left: Arc<str>,
-    pub(crate) bottom_right: Arc<str>,
-    pub(crate) bottom_left: Arc<str>,
-}
-impl Default for BlockLineSet {
-    fn default() -> Self {
-        Self::normal()
-    }
-}
 macro_rules! lazy_str {
     ($s:expr) => {{
         static VALUE: std::sync::OnceLock<std::sync::Arc<str>> = std::sync::OnceLock::new();
@@ -337,21 +288,9 @@ impl Elem {
         .into()
     }
 
-    pub fn block(opts: BlockOpts) -> Self {
-        let BlockOpts {
-            borders,
-            border_style,
-            lines: border_set,
-            inner,
-            #[expect(deprecated)]
-                __non_exhaustive_struct_update: (),
-        } = opts;
-
-        ElemRepr::Block(BlockRepr {
-            borders,
-            border_style: border_style.map(Into::into).unwrap_or_default(),
-            border_set,
-            inner,
+    pub fn fill_cells_single(symbol: impl fmt::Display) -> Self {
+        ElemRepr::Fill(FillRepr {
+            symbol: symbol.to_string(),
         })
         .into()
     }
@@ -363,12 +302,6 @@ impl Elem {
             height: size.height,
         }
         .into()
-    }
-
-    pub fn text(plain: impl fmt::Display, opts: impl Into<TextOpts>) -> Self {
-        let mut writer = PlainTextWriter::with_opts(opts.into());
-        fmt::write(&mut writer, format_args!("{plain}")).unwrap();
-        writer.finish()
     }
 
     pub fn stack(
@@ -401,179 +334,40 @@ impl Elem {
         ElemRepr::Stack(StackRepr { axis, items }).into()
     }
 }
-
-#[derive(Default, Debug, Clone)]
-pub struct TextOpts {
-    pub style: Option<TextStyle>,
-    pub sizing: Option<TextSizing>,
-    pub trim_trailing_line: bool,
-    // TODO: Sizing support
-    #[deprecated = warn_non_exhaustive!()]
-    #[doc(hidden)]
-    pub __non_exhaustive_struct_update: (),
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BlockBorders {
+    pub top: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
 }
-impl From<TextStyle> for TextOpts {
-    fn from(value: TextStyle) -> Self {
+impl BlockBorders {
+    pub fn all() -> Self {
         Self {
-            style: Some(value),
-            ..Default::default()
-        }
-    }
-}
-impl From<TextModifiers> for TextOpts {
-    fn from(value: TextModifiers) -> Self {
-        TextStyle::from(value).into()
-    }
-}
-impl From<TextSizing> for TextOpts {
-    fn from(value: TextSizing) -> Self {
-        Self {
-            sizing: Some(value),
-            ..Default::default()
+            top: true,
+            bottom: true,
+            left: true,
+            right: true,
         }
     }
 }
 
-// TODO: Convert to Print
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct TextStyle {
-    pub fg: Option<TermColor>,
-    pub bg: Option<TermColor>,
-    pub modifiers: Option<TextModifiers>,
-    pub underline_color: Option<TermColor>,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
+// TODO: Decide on the internals of LineSet. Currently only single-width strings work
+// It would be cool if we could make multi-character borders work, e.g. to use
+// alternating +=+=+=+ borders. Ideally, ElemRepr would have a Fill variant that
+// just fills whatever area it is rendered to with some symbols. Then we can represent
+// blocks as stacks and fills.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockLineSet {
+    pub(crate) vertical: Arc<str>,
+    pub(crate) horizontal: Arc<str>,
+    pub(crate) top_right: Arc<str>,
+    pub(crate) top_left: Arc<str>,
+    pub(crate) bottom_right: Arc<str>,
+    pub(crate) bottom_left: Arc<str>,
 }
-impl From<TextModifiers> for TextStyle {
-    fn from(modifier: TextModifiers) -> Self {
-        Self {
-            modifiers: Some(modifier),
-            ..Default::default()
-        }
+impl Default for BlockLineSet {
+    fn default() -> Self {
+        Self::normal()
     }
-}
-
-/// Represents parameters for Kitty's [text sizing protocol](https://sw.kovidgoyal.net/kitty/text-sizing-protocol/).
-///
-/// The fields of this struct correspond to the different keys for the protocol, where [`None`] denotes a key
-/// that is not sent to the terminal, i.e. one that will use the default value specified by the protocol.
-///
-/// Note the documentation of the individual fields for details about layout calculation behavior.
-/// Also note that all layout calculation behavior is subject to change for the purpose of matching
-/// Kitty's real behavior (which may change as well) more closely.
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct TextSizing {
-    /// The scale of the text.
-    ///
-    /// # Valid Range
-    /// As of writing, the protocol permits values from 1 to 7.
-    ///
-    /// The layout calculation's behavior is unspecified for keys outside of this range.
-    pub scale: Option<u16>,
-    /// The numerator for fractional scaling within the cell.
-    ///
-    /// This currently has no effect on the layout calculation.
-    ///
-    /// # Valid Range
-    /// As of writing, the protocol permits values from 0 to 15, where the default of 0
-    /// specifies no fractional scaling.
-    ///
-    /// The layout calculation's behavior is unspecified for keys outside of this range.
-    pub numerator: Option<u16>,
-    /// The denominator for fractional scaling within the cell.
-    ///
-    /// This currently has no effect on the layout calculation.
-    ///
-    /// # Valid Range
-    /// As of writing, the protocol permits values from 0 to 15, where the default of 0
-    /// specifies no fractional scaling. Also, the protocol requires that this be larger
-    /// than [`Self::numerator`] if nonzero.
-    ///
-    /// The layout calculation's behavior is unspecified for keys outside of this range.
-    pub denominator: Option<u16>,
-    /// The width of the text in cells (each subject to [`Self::scale`]).
-    ///
-    /// If this key is specified (and nonzero), the layout calculation *may* assume that it
-    /// applies to the text, even if Kitty ignores it. As of writing this, this happens when
-    /// specifying this key without one of the scaling keys.
-    ///
-    /// # Valid Range
-    /// As of writing, the protocol permits values from 0 to 7, where the default of 0
-    /// disables the behavior of this key.
-    ///
-    /// The layout calculation's behavior is unspecified for keys outside of this range.
-    pub width: Option<u16>,
-    /// The way that content is aligned vertically within the (scaled) cells.
-    ///
-    /// This key currently has no effect on layout calculation.
-    ///
-    /// # Valid Range
-    /// As of writing, the protocol permits values from 0 to 2.
-    ///
-    /// The layout calculation's behavior is unspecified for keys outside of this range.
-    pub vert_align: Option<u16>,
-    /// The way that content is aligned horizontally within the (scaled) cells.
-    /// This key currently has no effect on layout calculation.
-    ///
-    /// # Valid Range
-    /// As of writing, the protocol permits values from 0 to 2.
-    ///
-    /// The layout calculation's behavior is unspecified for keys outside of this range.
-    pub horiz_align: Option<u16>,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
-}
-impl TextSizing {
-    /// Top alignment for [`Self::vert_align`].
-    pub const ALIGN_TOP: u16 = 0;
-    /// Bottom alignment for [`Self::horiz_align`].
-    pub const ALIGN_BOTTOM: u16 = 1;
-    /// Left alignment for [`Self::horiz_align`].
-    pub const ALIGN_LEFT: u16 = 0;
-    /// Right alignment for [`Self::horiz_align`].
-    pub const ALIGN_RIGHT: u16 = 1;
-    /// Centered alignment, both for [`Self::vert_align`] and [`Self::horiz_align`].
-    pub const ALIGN_CENTER: u16 = 2;
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum TermColor {
-    Reset,
-    Black,
-    DarkGrey,
-    Red,
-    DarkRed,
-    Green,
-    DarkGreen,
-    Yellow,
-    DarkYellow,
-    Blue,
-    DarkBlue,
-    Magenta,
-    DarkMagenta,
-    Cyan,
-    DarkCyan,
-    White,
-    Grey,
-    Rgb { r: u8, g: u8, b: u8 },
-    AnsiValue(u8),
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct TextModifiers {
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub hidden: bool,
-    pub strike: bool,
-
-    #[doc(hidden)]
-    #[deprecated = warn_non_exhaustive!()]
-    pub __non_exhaustive_struct_update: (),
 }

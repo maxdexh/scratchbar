@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     utils::{ReloadRx, ReloadTx, ResultExt as _},
-    xtui,
+    xtui::{self, text},
 };
 use scratchbar::{host, tui};
 use tokio::{sync::watch, task::JoinSet};
@@ -395,6 +395,9 @@ pub async fn control_main(
     };
 
     let pulse = Arc::new(clients::pulse::PulseClient::connect(reload_tx.subscribe()));
+    let pulse_symbol_opts = text::TextOpts::from(text::HorizontalAlign::Center);
+    let pulse_symbol_width = 2.try_into().unwrap();
+
     let mut modules = [
         fac.fixed(BarTuiElem::Spacing(1)),
         fac.spawn(hypr::hypr_module),
@@ -405,8 +408,12 @@ pub async fn control_main(
             pulse::PulseModuleArgs {
                 pulse: pulse.clone(),
                 device_kind: clients::pulse::PulseDeviceKind::Source,
-                muted_sym: tui::Elem::text(" ", tui::TextOpts::default()),
-                unmuted_sym: xtui::tui_center_symbol("", 2),
+                muted_sym: {
+                    let it = pulse_symbol_opts.render_cell("", pulse_symbol_width);
+                    log::debug!("{it:?}");
+                    it
+                },
+                unmuted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
             },
             pulse::pulse_module,
         ),
@@ -415,8 +422,8 @@ pub async fn control_main(
             pulse::PulseModuleArgs {
                 pulse,
                 device_kind: clients::pulse::PulseDeviceKind::Sink,
-                muted_sym: tui::Elem::text(" ", tui::TextOpts::default()),
-                unmuted_sym: tui::Elem::text(" ", tui::TextOpts::default()),
+                muted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
+                unmuted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
             },
             pulse::pulse_module,
         ),

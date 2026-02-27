@@ -4,7 +4,7 @@ use crate::{
         mk_fresh_interact_tag,
     },
     utils::ResultExt as _,
-    xtui,
+    xtui::{self, text},
 };
 use anyhow::Context as _;
 use chrono::{Datelike as _, Timelike as _};
@@ -116,7 +116,8 @@ pub async fn time_module(
         clock_time_rx.mark_changed();
         while let Ok(()) = clock_time_rx.changed().await {
             let now = *clock_time_rx.borrow_and_update();
-            let tui = tui::Elem::text(now.format("%H:%M %d/%m"), tui::TextOpts::default())
+            let tui = text::TextOpts::default()
+                .render_line(&now.format("%H:%M %d/%m").to_string())
                 .interactive(bar_tag.clone());
 
             tui_tx.send_replace(BarTuiElem::Shared(tui));
@@ -169,43 +170,42 @@ fn mk_calendar(
             next_month,
             prev_month,
         }) => {
+            let normal = text::TextOpts::default();
+            let hovered = normal.clone().with(|it| it.attrs.set_underlined(true));
+
             // TODO: Large title scale
             let mut title_stack = xtui::StackBuilder::new(tui::Axis::X);
-            title_stack.push(xtui::underline_hovered(
-                "<<",
-                tui::TextOpts::default(),
+            title_stack.push(text::render_with_hover(
+                &normal,
                 prev_month.clone(),
+                &hovered,
+                |it| it.render_line("<<"),
             ));
             title_stack.spacing(1);
-            title_stack.push(xtui::underline_hovered(
-                month.format("%B %Y"),
-                tui::TextModifiers {
-                    bold: true,
-                    ..Default::default()
-                },
+            title_stack.push(text::render_with_hover(
+                &normal,
                 reset_now.clone(),
+                &hovered,
+                |it| it.render_line(&month.format("%B %Y").to_string()),
             ));
             title_stack.fill(1, tui::Elem::empty());
             title_stack.spacing(1);
-            title_stack.push(xtui::underline_hovered(
-                ">>",
-                tui::TextOpts::default(),
+            title_stack.push(text::render_with_hover(
+                &normal,
                 next_month.clone(),
+                &hovered,
+                |it| it.render_line(">>"),
             ));
             title_stack.build()
         }
-        None => tui::Elem::text(
-            month.format("%B %Y"),
-            tui::TextModifiers {
-                bold: true,
-                ..Default::default()
-            },
-        ),
+        None => text::TextOpts::default()
+            .with(|it| it.attrs.set_bold(true))
+            .render_line(&month.format("%B %Y").to_string()),
     });
     tui_ystack.push({
         let mut xstack = xtui::StackBuilder::new(tui::Axis::X);
         for day in WEEK_DAYS {
-            xstack.push(tui::Elem::text(day, tui::TextOpts::default()));
+            xstack.push(text::TextOpts::default().render_line(day));
             xstack.spacing(1);
         }
         xstack.delete_last();
@@ -222,13 +222,16 @@ fn mk_calendar(
             .ok_or_log()?;
 
         let text = format!("{d1:>2}");
-        week_xstack.push(tui::Elem::text(
-            text,
-            tui::TextStyle {
-                fg: (day == today).then_some(tui::TermColor::Green),
-                ..Default::default()
-            },
-        ));
+
+        week_xstack.push(
+            text::TextOpts::default()
+                .with(|it| {
+                    if day == today {
+                        it.fg_color = text::Color::Green
+                    }
+                })
+                .render_line(&text),
+        );
 
         if day.weekday() == chrono::Weekday::Sun {
             tui_ystack.push(week_xstack.build());

@@ -18,21 +18,13 @@ pub(crate) enum ElemRepr {
     },
     Image(ImageRepr),
     Stack(StackRepr),
-    Block(BlockRepr),
     Interact(InteractRepr),
+    Fill(FillRepr),
 }
 impl From<ElemRepr> for Elem {
     fn from(value: ElemRepr) -> Self {
         Self(Arc::new(value))
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct BlockRepr {
-    pub borders: BlockBorders,
-    pub border_style: StyleRepr,
-    pub border_set: BlockLineSet,
-    pub inner: Option<Elem>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -51,31 +43,14 @@ pub(crate) struct InteractRepr {
     pub normal: Elem,
     pub hovered: Option<Elem>,
 }
-#[derive(Default, Debug, Serialize, Deserialize)]
-pub(crate) struct StyleRepr {
-    pub begin: String,
-    pub end: String,
-}
-impl From<TextStyle> for StyleRepr {
-    fn from(value: TextStyle) -> Self {
-        Self {
-            begin: {
-                let mut begin = String::new();
-                value.begin(&mut begin).unwrap();
-                begin
-            },
-            end: {
-                let mut end = String::new();
-                value.end(&mut end).unwrap();
-                end
-            },
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ImageRepr {
     pub buf: Vec<u8>,
     pub dimensions: Vec2<u32>,
     pub layout: ImageLayoutMode,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct FillRepr {
+    pub symbol: String,
 }

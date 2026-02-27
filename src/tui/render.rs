@@ -1,4 +1,4 @@
-use std::{fmt, io::Write};
+use std::io::Write;
 
 use crate::tui::*;
 
@@ -67,7 +67,6 @@ impl Render for ElemRepr {
         match self {
             Self::Stack(subdiv) => subdiv.render(ctx, area),
             Self::Image(image) => image.render(ctx, area),
-            Self::Block(block) => block.render(ctx, area),
             Self::Print { raw, .. } => {
                 crossterm::queue!(ctx.writer, crossterm::style::Print(raw as &str))
             }
@@ -93,13 +92,25 @@ impl Render for ElemRepr {
 
                 hovered.unwrap_or(&elem.normal).render(ctx, area)
             }
+            Self::Fill(FillRepr { symbol }) => {
+                log::debug!("{symbol:?}, {area:?}");
+                for y_off in 0..area.size.y {
+                    crossterm::queue!(
+                        ctx.writer,
+                        crossterm::cursor::MoveTo(area.pos.x, area.pos.y.saturating_add(y_off))
+                    )?;
+                    for _ in 0..area.size.x {
+                        ctx.writer.write_all(symbol.as_bytes())?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         match self {
             Self::Stack(subdiv) => subdiv.calc_min_size(args),
             Self::Image(image) => image.calc_min_size(args),
-            Self::Block(block) => block.calc_min_size(args),
             &Self::Print { width, height, .. } => Vec2 {
                 x: width,
                 y: height,
@@ -116,6 +127,7 @@ impl Render for ElemRepr {
                 std::cmp::max,
             ),
             Self::Interact(elem) => elem.normal.calc_min_size(args),
+            Self::Fill(_) => Vec2::default(),
         }
     }
 }
@@ -292,134 +304,5 @@ impl Render for StackRepr {
             tot[self.axis.other()] = size[self.axis.other()].max(tot[self.axis.other()]);
         }
         tot
-    }
-}
-impl Render for BlockRepr {
-    fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
-        let Self {
-            borders,
-            border_style,
-            border_set:
-                BlockLineSet {
-                    vertical,
-                    horizontal,
-                    top_right,
-                    top_left,
-                    bottom_right,
-                    bottom_left,
-                },
-            inner,
-        } = self;
-
-        let BlockBorders {
-            top,
-            bottom,
-            left,
-            right,
-        } = *borders;
-
-        if let Some(inner) = inner {
-            inner.render(
-                ctx,
-                Area {
-                    pos: Vec2 {
-                        x: area.pos.x.saturating_add(left.into()),
-                        y: area.pos.y.saturating_add(top.into()),
-                    },
-                    size: Vec2 {
-                        x: area.size.x.saturating_sub(right.into()),
-                        y: area.size.y.saturating_sub(bottom.into()),
-                    },
-                },
-            )?;
-        }
-
-        let mut horiz_border = |l: &str, r: &str, y: u16| {
-            let m = border_style.apply(fmt::from_fn(|f| {
-                for _ in 0..area
-                    .size
-                    .x
-                    .saturating_sub(left.into())
-                    .saturating_sub(right.into())
-                {
-                    write!(f, "{horizontal}")?;
-                }
-                Ok(())
-            }));
-
-            let l = border_style.apply(if left { l } else { "" });
-            let r = border_style.apply(if right { r } else { "" });
-
-            crossterm::queue!(
-                ctx.writer,
-                crossterm::cursor::MoveTo(area.pos.x, y),
-                crossterm::style::Print(format_args!("{l}{m}{r}")),
-            )
-        };
-        if top {
-            horiz_border(top_left, top_right, area.pos.y)?;
-        }
-        if bottom {
-            horiz_border(bottom_left, bottom_right, area.y_bottom())?;
-        }
-        let mut vert_border = |x: u16| -> std::io::Result<()> {
-            let lo = area.pos.y.saturating_add(top.into());
-            let hi = area
-                .pos
-                .y
-                .saturating_add(area.size.y)
-                .saturating_sub(bottom.into());
-            for y in lo..hi {
-                crossterm::queue!(
-                    ctx.writer,
-                    crossterm::cursor::MoveTo(x, y),
-                    crossterm::style::Print(border_style.apply(vertical as &str)),
-                )?;
-            }
-            Ok(())
-        };
-        if left {
-            vert_border(area.pos.x)?;
-        }
-        if right {
-            vert_border(area.x_right())?;
-        }
-
-        Ok(())
-    }
-
-    fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
-        let mut size = self
-            .inner
-            .as_ref()
-            .map(|it| it.calc_min_size(args))
-            .unwrap_or_default();
-        let Vec2 { x: w, y: h } = self.extra_dim();
-        size.x = size.x.saturating_add(w);
-        size.y = size.y.saturating_add(h);
-        size
-    }
-}
-impl BlockRepr {
-    fn extra_dim(&self) -> Vec2<u16> {
-        let BlockBorders {
-            top,
-            bottom,
-            left,
-            right,
-        } = self.borders;
-        Vec2 {
-            x: u16::from(left) + u16::from(right),
-            y: u16::from(top) + u16::from(bottom),
-        }
-    }
-}
-impl StyleRepr {
-    fn apply(&self, d: impl fmt::Display) -> impl fmt::Display {
-        let Self {
-            begin: open,
-            end: close,
-        } = self;
-        fmt::from_fn(move |f| write!(f, "{open}{d}{close}"))
     }
 }

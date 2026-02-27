@@ -10,12 +10,16 @@ scratchbar = { path = ".." } # NOTE: Delete this line and uncomment the next for
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 tokio-util = { version = "0.7.18", features = ["rt", "time"] }
 
+crossterm = { version = "0.29.0", default-features = false }
+unicode-segmentation = { version = "1.12.0", default-features = false }
+unicode-width = { version = "0.2.2", default-features = false }
+
 anyhow = "1.0.100"
 chrono = { version = "0.4.43", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 hyprland = { version = "0.4.0-beta.3", features = [
-  "async-lite",
-  "listener",
+    "async-lite",
+    "listener",
 ], default-features = false }
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["rc"] }

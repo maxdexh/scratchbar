@@ -4,7 +4,7 @@ use crate::{
     clients,
     control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
     utils::ResultExt as _,
-    xtui,
+    xtui::{self, text},
 };
 use scratchbar::tui;
 
@@ -71,10 +71,10 @@ pub async fn pulse_module(
             } else {
                 unmuted_sym.clone()
             });
-            stack.push(tui::Elem::text(
-                format!("{:>3}%", (volume * 100.0).round() as u32),
-                tui::TextOpts::default(),
-            ));
+            stack.push(
+                text::TextOpts::default()
+                    .render_line(&format!("{:>3}%", (volume * 100.0).round() as u32)),
+            );
             stack.build().interactive(interact_tag.clone())
         }));
     }
