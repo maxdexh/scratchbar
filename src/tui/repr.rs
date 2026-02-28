@@ -6,27 +6,29 @@ use crate::tui::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum ElemRepr {
-    Print {
-        raw: String,
-        width: u16,
-        height: u16,
-    },
-    MinSize {
-        elem: Elem,
-        width: u16,
-        height: u16,
-    },
+    Print(PrintRepr),
+    MinSize(MinSizeRepr),
     Image(ImageRepr),
     Stack(StackRepr),
     Interact(InteractRepr),
     Fill(FillRepr),
 }
+
 impl From<ElemRepr> for Elem {
     fn from(value: ElemRepr) -> Self {
         Self(Arc::new(value))
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PrintRepr {
+    pub raw: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct MinSizeRepr {
+    pub elem: Elem,
+    pub size: Vec2<u16>,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct StackRepr {
     pub axis: Axis,

@@ -13,6 +13,7 @@ pub(super) struct RenderCtx<'a, W> {
     writer: W,
     layout: &'a mut RenderedLayout,
 }
+
 #[derive(Debug, Clone)]
 pub(crate) struct SizingArgs {
     pub font_size: Vec2<u16>,
@@ -67,10 +68,8 @@ impl Render for ElemRepr {
         match self {
             Self::Stack(subdiv) => subdiv.render(ctx, area),
             Self::Image(image) => image.render(ctx, area),
-            Self::Print { raw, .. } => {
-                crossterm::queue!(ctx.writer, crossterm::style::Print(raw as &str))
-            }
-            Self::MinSize { elem, .. } => elem.render(ctx, area),
+            Self::Print(PrintRepr { raw }) => ctx.writer.write_all(raw.as_bytes()),
+            Self::MinSize(MinSizeRepr { elem, .. }) => elem.render(ctx, area),
             Self::Interact(elem) => {
                 ctx.layout.insert(area, elem);
 
@@ -111,21 +110,10 @@ impl Render for ElemRepr {
         match self {
             Self::Stack(subdiv) => subdiv.calc_min_size(args),
             Self::Image(image) => image.calc_min_size(args),
-            &Self::Print { width, height, .. } => Vec2 {
-                x: width,
-                y: height,
-            },
-            &Self::MinSize {
-                width,
-                height,
-                ref elem,
-            } => elem.calc_min_size(args).combine(
-                Vec2 {
-                    x: width,
-                    y: height,
-                },
-                std::cmp::max,
-            ),
+            Self::Print(..) => Vec2::default(),
+            Self::MinSize(MinSizeRepr { elem, size }) => {
+                elem.calc_min_size(args).combine(*size, std::cmp::max)
+            }
             Self::Interact(elem) => elem.normal.calc_min_size(args),
             Self::Fill(_) => Vec2::default(),
         }
@@ -301,7 +289,7 @@ impl Render for StackRepr {
 
             tot[self.axis] = size[self.axis].saturating_add(tot[self.axis]);
 
-            tot[self.axis.other()] = size[self.axis.other()].max(tot[self.axis.other()]);
+            tot[self.axis.flip()] = size[self.axis.flip()].max(tot[self.axis.flip()]);
         }
         tot
     }

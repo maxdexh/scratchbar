@@ -8,12 +8,6 @@ pub(crate) struct Area {
     pub size: Vec2<u16>,
 }
 impl Area {
-    pub(crate) fn y_bottom(&self) -> u16 {
-        self.pos.y.saturating_add(self.size.y).saturating_sub(1)
-    }
-    pub(crate) fn x_right(&self) -> u16 {
-        self.pos.x.saturating_add(self.size.x).saturating_sub(1)
-    }
     pub(crate) fn contains(self, pos: Vec2<u16>) -> bool {
         pos.x
             .checked_sub(self.pos.x)
@@ -22,15 +16,6 @@ impl Area {
                 .y
                 .checked_sub(self.pos.y)
                 .is_some_and(|it| it < self.size.y)
-    }
-}
-
-impl<T> Vec2<T> {
-    pub(crate) fn combine<U, R>(self, other: Vec2<U>, mut f: impl FnMut(T, U) -> R) -> Vec2<R> {
-        Vec2 {
-            x: f(self.x, other.x),
-            y: f(self.y, other.y),
-        }
     }
 }
 

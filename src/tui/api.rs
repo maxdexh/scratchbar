@@ -33,7 +33,7 @@ pub enum Axis {
     Y,
 }
 impl Axis {
-    pub fn other(self) -> Self {
+    pub fn flip(self) -> Self {
         match self {
             Self::X => Self::Y,
             Self::Y => Self::X,
@@ -91,116 +91,6 @@ pub struct StackOpts {
     pub __non_exhaustive_struct_update: (),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum ImageLayoutMode {
-    FillAxis(Axis, u16),
-}
-
-macro_rules! lazy_str {
-    ($s:expr) => {{
-        static VALUE: std::sync::OnceLock<std::sync::Arc<str>> = std::sync::OnceLock::new();
-        VALUE
-            .get_or_init(|| std::sync::Arc::<str>::from($s))
-            .clone()
-    }};
-}
-impl BlockLineSet {
-    pub fn normal() -> Self {
-        Self {
-            vertical: lazy_str!("│"),
-            horizontal: lazy_str!("─"),
-            top_right: lazy_str!("┐"),
-            top_left: lazy_str!("┌"),
-            bottom_right: lazy_str!("┘"),
-            bottom_left: lazy_str!("└"),
-        }
-    }
-
-    pub fn rounded() -> Self {
-        Self {
-            top_right: lazy_str!("╮"),
-            top_left: lazy_str!("╭"),
-            bottom_right: lazy_str!("╯"),
-            bottom_left: lazy_str!("╰"),
-            ..Self::normal()
-        }
-    }
-
-    pub fn double() -> Self {
-        Self {
-            vertical: lazy_str!("║"),
-            horizontal: lazy_str!("═"),
-            top_right: lazy_str!("╗"),
-            top_left: lazy_str!("╔"),
-            bottom_right: lazy_str!("╝"),
-            bottom_left: lazy_str!("╚"),
-        }
-    }
-
-    pub fn thick() -> Self {
-        Self {
-            vertical: lazy_str!("┃"),
-            horizontal: lazy_str!("━"),
-            top_right: lazy_str!("┓"),
-            top_left: lazy_str!("┏"),
-            bottom_right: lazy_str!("┛"),
-            bottom_left: lazy_str!("┗"),
-        }
-    }
-
-    pub fn light_double_dashed() -> Self {
-        Self {
-            vertical: lazy_str!("╎"),
-            horizontal: lazy_str!("╌"),
-            ..Self::normal()
-        }
-    }
-
-    pub fn heavy_double_dashed() -> Self {
-        Self {
-            vertical: lazy_str!("╏"),
-            horizontal: lazy_str!("╍"),
-            ..Self::thick()
-        }
-    }
-
-    pub fn light_triple_dashed() -> Self {
-        Self {
-            vertical: lazy_str!("┆"),
-            horizontal: lazy_str!("┄"),
-            ..Self::normal()
-        }
-    }
-
-    pub fn heavy_triple_dashed() -> Self {
-        Self {
-            vertical: lazy_str!("┇"),
-            horizontal: lazy_str!("┅"),
-            ..Self::thick()
-        }
-    }
-
-    pub fn light_quadruple_dashed() -> Self {
-        Self {
-            vertical: lazy_str!("┊"),
-            horizontal: lazy_str!("┈"),
-            ..Self::normal()
-        }
-    }
-
-    pub fn heavy_quadruple_dashed() -> Self {
-        Self {
-            vertical: lazy_str!("┋"),
-            horizontal: lazy_str!("┉"),
-            ..Self::thick()
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Elem(pub(crate) Arc<ElemRepr>);
-
 #[derive(Debug)]
 pub struct RgbaImage {
     pub buf: Vec<u8>,
@@ -208,6 +98,12 @@ pub struct RgbaImage {
     pub height: u32,
     pub layout: ImageLayoutMode,
     pub opts: ImageOpts,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ImageLayoutMode {
+    FillAxis(Axis, u16),
 }
 
 #[derive(Debug, Default)]
@@ -218,22 +114,22 @@ pub struct ImageOpts {
     __non_exhaustive_struct_update: (),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Elem(pub(crate) Arc<ElemRepr>);
+
 impl Elem {
     pub fn with_min_size(self, min_size: Size) -> Self {
-        ElemRepr::MinSize {
-            width: min_size.width,
-            height: min_size.height,
+        ElemRepr::MinSize(MinSizeRepr {
             elem: self,
-        }
+            size: min_size.into(),
+        })
         .into()
     }
 
     pub fn empty() -> Self {
-        ElemRepr::Print {
+        ElemRepr::Print(PrintRepr {
             raw: Default::default(),
-            width: 0,
-            height: 0,
-        }
+        })
         .into()
     }
 
@@ -296,12 +192,10 @@ impl Elem {
     }
 
     pub fn raw_print(raw: impl fmt::Display, size: Size) -> Self {
-        ElemRepr::Print {
+        Elem::from(ElemRepr::Print(PrintRepr {
             raw: raw.to_string(),
-            width: size.width,
-            height: size.height,
-        }
-        .into()
+        }))
+        .with_min_size(size)
     }
 
     pub fn stack(
@@ -332,42 +226,5 @@ impl Elem {
             .collect();
 
         ElemRepr::Stack(StackRepr { axis, items }).into()
-    }
-}
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct BlockBorders {
-    pub top: bool,
-    pub bottom: bool,
-    pub left: bool,
-    pub right: bool,
-}
-impl BlockBorders {
-    pub fn all() -> Self {
-        Self {
-            top: true,
-            bottom: true,
-            left: true,
-            right: true,
-        }
-    }
-}
-
-// TODO: Decide on the internals of LineSet. Currently only single-width strings work
-// It would be cool if we could make multi-character borders work, e.g. to use
-// alternating +=+=+=+ borders. Ideally, ElemRepr would have a Fill variant that
-// just fills whatever area it is rendered to with some symbols. Then we can represent
-// blocks as stacks and fills.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockLineSet {
-    pub(crate) vertical: Arc<str>,
-    pub(crate) horizontal: Arc<str>,
-    pub(crate) top_right: Arc<str>,
-    pub(crate) top_left: Arc<str>,
-    pub(crate) bottom_right: Arc<str>,
-    pub(crate) bottom_left: Arc<str>,
-}
-impl Default for BlockLineSet {
-    fn default() -> Self {
-        Self::normal()
     }
 }
