@@ -91,41 +91,18 @@ pub struct StackOpts {
     pub __non_exhaustive_struct_update: (),
 }
 
-#[derive(Debug)]
-pub struct RgbaImage {
-    pub buf: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub layout: ImageLayoutMode,
-    pub opts: ImageOpts,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum ImageLayoutMode {
-    FillAxis(Axis, u16),
-}
-
-#[derive(Debug, Default)]
-pub struct ImageOpts {
-    // TODO: Alt elem
-    #[deprecated = warn_non_exhaustive!()]
-    #[doc(hidden)]
-    __non_exhaustive_struct_update: (),
+#[derive(Debug, Clone, Copy)]
+pub struct MinAxis {
+    pub axis: Axis,
+    pub len: u16,
+    pub aspect_width: u32,
+    pub aspect_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Elem(pub(crate) Arc<ElemRepr>);
 
 impl Elem {
-    pub fn with_min_size(self, min_size: Size) -> Self {
-        ElemRepr::MinSize(MinSizeRepr {
-            elem: self,
-            size: min_size.into(),
-        })
-        .into()
-    }
-
     pub fn empty() -> Self {
         ElemRepr::Print(PrintRepr {
             raw: Default::default(),
@@ -139,31 +116,6 @@ impl Elem {
             size[axis] = len;
             size.into()
         })
-    }
-
-    pub fn rgba_image(image: RgbaImage) -> Self {
-        let RgbaImage {
-            buf,
-            layout,
-            width,
-            height,
-            opts,
-        } = image;
-
-        let ImageOpts {
-            #[expect(deprecated)]
-                __non_exhaustive_struct_update: (),
-        } = opts;
-
-        ElemRepr::Image(ImageRepr {
-            buf,
-            layout,
-            dimensions: Vec2 {
-                x: width,
-                y: height,
-            },
-        })
-        .into()
     }
 
     pub fn interactive(self, tag: CustomId) -> Self {
@@ -191,11 +143,11 @@ impl Elem {
         .into()
     }
 
-    pub fn raw_print(raw: impl fmt::Display, size: Size) -> Self {
-        Elem::from(ElemRepr::Print(PrintRepr {
-            raw: raw.to_string(),
-        }))
-        .with_min_size(size)
+    pub fn raw_print(raw: impl fmt::Display) -> Self {
+        ElemRepr::Print(PrintRepr {
+            raw: raw.to_string().into(),
+        })
+        .into()
     }
 
     pub fn stack(
@@ -226,5 +178,32 @@ impl Elem {
             .collect();
 
         ElemRepr::Stack(StackRepr { axis, items }).into()
+    }
+
+    pub fn with_min_size(self, min_size: Size) -> Self {
+        ElemRepr::MinSize(MinSizeRepr {
+            elem: self,
+            size: min_size.into(),
+        })
+        .into()
+    }
+    pub fn with_min_axis(self, min_axis: MinAxis) -> Self {
+        let MinAxis {
+            axis,
+            len,
+            aspect_width,
+            aspect_height,
+        } = min_axis;
+
+        ElemRepr::MinAxis(MinAxisRepr {
+            elem: self,
+            axis,
+            len,
+            aspect: Vec2 {
+                x: aspect_width,
+                y: aspect_height,
+            },
+        })
+        .into()
     }
 }

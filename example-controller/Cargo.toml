@@ -11,6 +11,7 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 tokio-util = { version = "0.7.18", features = ["rt", "time"] }
 
 crossterm = { version = "0.29.0", default-features = false }
+base64 = { version = "0.22.1" }
 unicode-segmentation = { version = "1.12.0", default-features = false }
 unicode-width = { version = "0.2.2", default-features = false }
 

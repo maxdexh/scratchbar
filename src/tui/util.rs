@@ -43,11 +43,3 @@ impl<T> std::ops::IndexMut<Axis> for Vec2<T> {
         }
     }
 }
-impl<T> Vec2<T> {
-    pub(crate) fn combine<U, R>(self, other: Vec2<U>, mut f: impl FnMut(T, U) -> R) -> Vec2<R> {
-        Vec2 {
-            x: f(self.x, other.x),
-            y: f(self.y, other.y),
-        }
-    }
-}

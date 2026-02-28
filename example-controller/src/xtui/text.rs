@@ -236,6 +236,8 @@ pub fn width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
 }
 
+// TODO: Consider writing into a fmt::Formatter
+// to get rid of a copy.
 pub struct LineFormatter<W, O> {
     opts: O,
     out: EscapeSafeWriter<W>,
@@ -371,7 +373,7 @@ where
 impl<O: Borrow<TextOpts>, W: fmt::Display + BorrowMut<String>> LineFormatter<W, O> {
     fn render(self) -> tui::Elem {
         let (text, _, size) = self.finish();
-        tui::Elem::raw_print(text, size)
+        tui::Elem::raw_print(text).with_min_size(size)
     }
 }
 

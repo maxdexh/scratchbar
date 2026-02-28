@@ -18,6 +18,14 @@ pub(super) struct RenderCtx<'a, W> {
 pub(crate) struct SizingArgs {
     pub font_size: Vec2<u16>,
 }
+impl<T> Vec2<T> {
+    fn combine<U, R>(self, other: Vec2<U>, mut f: impl FnMut(T, U) -> R) -> Vec2<R> {
+        Vec2 {
+            x: f(self.x, other.x),
+            y: f(self.y, other.y),
+        }
+    }
+}
 pub(crate) fn calc_min_size(elem: &Elem, args: &SizingArgs) -> Vec2<u16> {
     elem.calc_min_size(args)
         .combine(Vec2 { x: 1, y: 1 }, std::cmp::max)
@@ -66,12 +74,16 @@ impl Render for ElemRepr {
             crossterm::cursor::MoveTo(area.pos.x, area.pos.y),
         )?;
         match self {
-            Self::Stack(subdiv) => subdiv.render(ctx, area),
-            Self::Image(image) => image.render(ctx, area),
-            Self::Print(PrintRepr { raw }) => ctx.writer.write_all(raw.as_bytes()),
+            Self::Stack(repr) => repr.render(ctx, area),
+            Self::Print(PrintRepr { raw }) => {
+                if raw.starts_with(b"\x1b_") {
+                    log::debug!("{area:?}");
+                }
+                ctx.writer.write_all(raw)
+            }
             Self::MinSize(MinSizeRepr { elem, .. }) => elem.render(ctx, area),
-            Self::Interact(elem) => {
-                ctx.layout.insert(area, elem);
+            Self::Interact(repr) => {
+                ctx.layout.insert(area, repr);
 
                 let hovered = if ctx
                     .layout
@@ -82,14 +94,14 @@ impl Render for ElemRepr {
                         log::warn!("Nested interactivity is unsupported");
                         None
                     } else {
-                        ctx.layout.last_hover_elem = Some(StoredInteractive::new(elem));
-                        elem.hovered.as_ref()
+                        ctx.layout.last_hover_elem = Some(StoredInteractive::new(repr));
+                        repr.hovered.as_ref()
                     }
                 } else {
                     None
                 };
 
-                hovered.unwrap_or(&elem.normal).render(ctx, area)
+                hovered.unwrap_or(&repr.normal).render(ctx, area)
             }
             Self::Fill(FillRepr { symbol }) => {
                 log::debug!("{symbol:?}, {area:?}");
@@ -104,118 +116,69 @@ impl Render for ElemRepr {
                 }
                 Ok(())
             }
+            Self::MinAxis(repr) => repr.render(ctx, area),
         }
     }
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
         match self {
             Self::Stack(subdiv) => subdiv.calc_min_size(args),
-            Self::Image(image) => image.calc_min_size(args),
             Self::Print(..) => Vec2::default(),
             Self::MinSize(MinSizeRepr { elem, size }) => {
                 elem.calc_min_size(args).combine(*size, std::cmp::max)
             }
-            Self::Interact(elem) => elem.normal.calc_min_size(args),
+            Self::Interact(repr) => repr.normal.calc_min_size(args),
             Self::Fill(_) => Vec2::default(),
+            Self::MinAxis(repr) => repr.calc_min_size(args),
         }
     }
 }
 
-impl ImageRepr {
-    // Aspect ratio of the image in cells
-    fn img_cell_ratio(&self, sizing: &SizingArgs) -> f64 {
-        let Vec2 {
-            x: font_w,
-            y: font_h,
-        } = sizing.font_size;
-
-        // Aspect ratio of the image in cells
-        std::ops::Mul::mul(
-            f64::from(self.dimensions.x) / f64::from(self.dimensions.y),
-            f64::from(font_h) / f64::from(font_w),
-        )
-    }
-    fn max_fit_to_fill_axis(size: Vec2<u16>, img_cell_ratio: f64) -> (Axis, u16) {
-        let w = size.x;
-        let h = size.y;
-
-        // larger aspect ratio means wider.
-        // if the aspect ratio of the bounding box is wider than that of the image,
-        // it is effectively unconstrained along the horizontal axis. That makes
-        // it the flex axis, the other the fill axis.
-        match f64::from(w) / f64::from(h) > img_cell_ratio {
-            true => (Axis::Y, h),
-            false => (Axis::X, w),
-        }
-    }
-    fn fill_axis_to_min_size(
-        fill_axis: Axis,
-        fill_axis_len: u16,
-        img_cell_ratio: f64,
-    ) -> Vec2<u16> {
-        match fill_axis {
-            Axis::Y => Vec2 {
-                y: fill_axis_len,
-                // cell ratio is width over height, so we get the flex dimension by multiplying
-                x: (img_cell_ratio * f64::from(fill_axis_len)).ceil() as _,
-            },
-            Axis::X => Vec2 {
-                x: fill_axis_len,
-                // likewise, but by division
-                y: (img_cell_ratio / f64::from(fill_axis_len)).ceil() as _,
-            },
-        }
-    }
-}
-impl Render for ImageRepr {
+impl Render for MinAxisRepr {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
-        let img_cell_ratio = self.img_cell_ratio(ctx.sizing);
-        let (fill_axis, fill_axis_len) = Self::max_fit_to_fill_axis(area.size, img_cell_ratio);
-
-        crossterm::queue!(
-            ctx.writer,
-            crossterm::cursor::MoveTo(area.pos.x, area.pos.y),
-        )?;
-
-        // https://sw.kovidgoyal.net/kitty/graphics-protocol/#control-data-reference
-        // - \x1b_G...\x1b\\: kitty graphics apc
-        // - a=T: Transfer and display
-        // - f=32: 32-bit RGBA
-        // - C=1: Do not move the cursor behind the image after drawing. If the image is on the
-        //   last line, the first line would move to scrollback (effectively a clear if there is
-        //   only one line, like in the bar).
-        // - s and v specify the image's dimensions
-        write!(
-            ctx.writer,
-            "\x1b_Ga=T,f=32,C=1,s={},v={},{}={};",
-            self.dimensions.x,
-            self.dimensions.y,
-            match fill_axis {
-                Axis::X => "c",
-                Axis::Y => "r",
-            },
-            fill_axis_len,
-        )?;
-        {
-            let mut encoder_writer = base64::write::EncoderWriter::new(
-                &mut ctx.writer,
-                &base64::engine::general_purpose::STANDARD,
-            );
-            encoder_writer.write_all(&self.buf)?;
-        }
-        write!(ctx.writer, "\x1b\\")?;
-
-        Ok(())
+        self.elem.render(ctx, area)
     }
 
     fn calc_min_size(&self, args: &SizingArgs) -> Vec2<u16> {
-        let img_cell_ratio = self.img_cell_ratio(args);
-        match self.layout {
-            ImageLayoutMode::FillAxis(axis, len) => {
-                Self::fill_axis_to_min_size(axis, len, img_cell_ratio)
-            }
+        let &Self {
+            ref elem,
+            axis,
+            len,
+            aspect,
+        } = self;
+
+        fn widen_mul32(a: u32, b: u32) -> u64 {
+            u64::from(a)
+                .checked_mul(u64::from(b))
+                .expect("u32 multiplication cannot overflow a u64")
         }
+
+        let mut size = Vec2::default();
+        size[axis] = len;
+
+        // Find the length of the fill axis in pixels
+        let pixel_axis_len = u32::from(len)
+            .checked_mul(u32::from(args.font_size[axis]))
+            .expect("u16 multiplication cannot overflow a u32");
+
+        // Invert the aspect ratio to find the pixel length of the other axis, then find the cell length.
+        //
+        // We assume that the aspect ratio is exact.
+        // Hence, part of the next cell is used when the remainder is nonzero.
+        // Thus we round up. Doing the divisions in one step avoids inaccuracy.
+        size[axis.flip()] = widen_mul32(pixel_axis_len, aspect[axis.flip()])
+            .div_ceil(widen_mul32(
+                aspect[axis],
+                args.font_size[axis.flip()].into(),
+            ))
+            .try_into()
+            .unwrap_or(u16::MAX);
+
+        log::debug!("{size:?}");
+
+        size.combine(elem.calc_min_size(args), std::cmp::max)
     }
 }
+
 impl Render for StackRepr {
     fn render(&self, ctx: &mut RenderCtx<impl Write>, area: Area) -> std::io::Result<()> {
         let mut lens = Vec::with_capacity(self.items.len());

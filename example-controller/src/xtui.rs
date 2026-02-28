@@ -44,13 +44,33 @@ impl StackBuilder {
     }
 }
 
-pub fn rgba_image(img: image::RgbaImage, layout: tui::ImageLayoutMode) -> tui::Elem {
-    tui::Elem::rgba_image(tui::RgbaImage {
-        width: img.width(),
-        height: img.height(),
-        buf: img.into_raw(),
-        layout,
-        opts: Default::default(),
+pub fn rgba_img_fill_axis(img: image::RgbaImage, fill_axis: tui::Axis, fill_len: u16) -> tui::Elem {
+    // https://sw.kovidgoyal.net/kitty/graphics-protocol/#control-data-reference
+    // - \x1b_G...\x1b\\: kitty graphics apc
+    // - a=T: Transfer and display
+    // - f=32: 32-bit RGBA
+    // - C=1: Do not move the cursor behind the image after drawing. If the image is on the
+    //   last line, the first line would move to scrollback (effectively a clear if there is
+    //   only one line, like in the bar).
+    // - s and v specify the image's dimensions
+    tui::Elem::raw_print(format_args!(
+        "\x1b_Ga=T,f=32,C=1,s={},v={},{}={fill_len};{}\x1b\\",
+        img.width(),
+        img.height(),
+        match fill_axis {
+            tui::Axis::X => "c",
+            tui::Axis::Y => "r",
+        },
+        base64::display::Base64Display::new(
+            img.as_raw(),
+            &base64::engine::general_purpose::STANDARD,
+        )
+    ))
+    .with_min_axis(tui::MinAxis {
+        axis: fill_axis,
+        len: fill_len,
+        aspect_width: img.width(),
+        aspect_height: img.height(),
     })
 }
 
@@ -89,16 +109,24 @@ pub fn block<D: fmt::Display>(lines: BlockLines<D>, opts: BlockOpts) -> tui::Ele
         height: 1,
     };
     if left && top {
-        grid[0][0] = Some(tui::Elem::raw_print(top_left, byone).into());
+        grid[0][0] = Some(tui::Elem::raw_print(top_left).with_min_size(byone).into());
     }
     if left && bottom {
-        grid[0][2] = Some(tui::Elem::raw_print(bottom_left, byone).into());
+        grid[0][2] = Some(
+            tui::Elem::raw_print(bottom_left)
+                .with_min_size(byone)
+                .into(),
+        );
     }
     if right && top {
-        grid[2][0] = Some(tui::Elem::raw_print(top_right, byone).into());
+        grid[2][0] = Some(tui::Elem::raw_print(top_right).with_min_size(byone).into());
     }
     if right && bottom {
-        grid[2][2] = Some(tui::Elem::raw_print(bottom_right, byone).into());
+        grid[2][2] = Some(
+            tui::Elem::raw_print(bottom_right)
+                .with_min_size(byone)
+                .into(),
+        );
     }
     for (idx, cond) in [(0, left), (2, right)] {
         if cond {

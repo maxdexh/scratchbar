@@ -151,13 +151,10 @@ pub async fn tray_module(
                     *pixel = u32::from_be_bytes(*pixel).rotate_left(8).to_be_bytes();
                 }
 
-                tui_stack.push(
-                    xtui::rgba_image(
-                        img, //
-                        tui::ImageLayoutMode::FillAxis(tui::Axis::Y, 1),
-                    )
-                    .interactive(tag.clone()),
-                );
+                let img_elem =
+                    xtui::rgba_img_fill_axis(img, tui::Axis::Y, 1).interactive(tag.clone());
+                log::debug!("{img_elem:?}");
+                tui_stack.push(img_elem);
                 tui_stack.spacing(1);
             }
         }
@@ -211,10 +208,7 @@ pub async fn tray_module(
                             .context("Systray icon has invalid png data")
                             .ok_or_log()
                 {
-                    stack.push(xtui::rgba_image(
-                        img.into_rgba8(),
-                        tui::ImageLayoutMode::FillAxis(tui::Axis::Y, 1),
-                    ));
+                    stack.push(xtui::rgba_img_fill_axis(img.into_rgba8(), tui::Axis::Y, 1));
                     stack.spacing(1);
                 }
                 stack.push(text::TextOpts::default().render_line(label));

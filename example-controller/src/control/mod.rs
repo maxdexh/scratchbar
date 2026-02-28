@@ -408,11 +408,7 @@ pub async fn control_main(
             pulse::PulseModuleArgs {
                 pulse: pulse.clone(),
                 device_kind: clients::pulse::PulseDeviceKind::Source,
-                muted_sym: {
-                    let it = pulse_symbol_opts.render_cell("", pulse_symbol_width);
-                    log::debug!("{it:?}");
-                    it
-                },
+                muted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
                 unmuted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
             },
             pulse::pulse_module,
