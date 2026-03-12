@@ -138,7 +138,7 @@ impl Elem {
 
     pub fn fill_cells_single(symbol: impl fmt::Display) -> Self {
         ElemRepr::Fill(FillRepr {
-            symbol: symbol.to_string(),
+            symbol: symbol.to_string().into(),
         })
         .into()
     }

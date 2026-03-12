@@ -75,12 +75,7 @@ impl Render for ElemRepr {
         )?;
         match self {
             Self::Stack(repr) => repr.render(ctx, area),
-            Self::Print(PrintRepr { raw }) => {
-                if raw.starts_with(b"\x1b_") {
-                    log::debug!("{area:?}");
-                }
-                ctx.writer.write_all(raw)
-            }
+            Self::Print(PrintRepr { raw }) => ctx.writer.write_all(raw),
             Self::MinSize(MinSizeRepr { elem, .. }) => elem.render(ctx, area),
             Self::Interact(repr) => {
                 ctx.layout.insert(area, repr);
@@ -104,14 +99,13 @@ impl Render for ElemRepr {
                 hovered.unwrap_or(&repr.normal).render(ctx, area)
             }
             Self::Fill(FillRepr { symbol }) => {
-                log::debug!("{symbol:?}, {area:?}");
                 for y_off in 0..area.size.y {
                     crossterm::queue!(
                         ctx.writer,
                         crossterm::cursor::MoveTo(area.pos.x, area.pos.y.saturating_add(y_off))
                     )?;
                     for _ in 0..area.size.x {
-                        ctx.writer.write_all(symbol.as_bytes())?;
+                        ctx.writer.write_all(symbol)?;
                     }
                 }
                 Ok(())

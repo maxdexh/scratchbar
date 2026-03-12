@@ -153,7 +153,6 @@ pub async fn tray_module(
 
                 let img_elem =
                     xtui::rgba_img_fill_axis(img, tui::Axis::Y, 1).interactive(tag.clone());
-                log::debug!("{img_elem:?}");
                 tui_stack.push(img_elem);
                 tui_stack.spacing(1);
             }

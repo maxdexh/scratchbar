@@ -38,7 +38,7 @@ pub(crate) struct InteractRepr {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct FillRepr {
-    pub symbol: String,
+    pub symbol: Vec<u8>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MinAxisRepr {
