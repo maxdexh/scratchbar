@@ -7,8 +7,9 @@ use crate::{
         mk_fresh_interact_tag,
     },
     utils::ResultExt as _,
-    xtui::text,
+    xtui::{self, text},
 };
+use anyhow::Context as _;
 use scratchbar::tui;
 use tokio::sync::watch;
 
@@ -24,6 +25,28 @@ pub async fn ppd_module(
 
     let interact_tag = mk_fresh_interact_tag();
 
+    let [powersave_icon, balanced_icon, perf_icon] = [
+        xtui::icon!("battery-profile-powersave"),
+        xtui::icon!("battery-profile-balanced"),
+        xtui::icon!("battery-profile-performance"),
+    ]
+    .map(|buf| {
+        xtui::png_fill_axis(buf, tui::Axis::Y, 1)
+            .context("icon must be valid png data")
+            .ok_or_log()
+            .unwrap_or_else(tui::Elem::empty)
+            .interactive(interact_tag.clone())
+    });
+
+    let tooltip_tx = watch::Sender::new(tui::Elem::empty());
+    ctrl_tx.register_menu(RegisterMenu {
+        on_tag: interact_tag.clone(),
+        on_kind: tui::InteractKind::Hover,
+        tui_rx: tooltip_tx.subscribe(),
+        menu_kind: MenuKind::Tooltip,
+        opts: Default::default(),
+    });
+
     let on_interact = interact_callback_with(ppd.clone(), |ppd, interact| {
         if interact.kind != tui::InteractKind::Click(tui::MouseButton::Left) {
             return;
@@ -35,32 +58,18 @@ pub async fn ppd_module(
     let mut profile_rx = ppd.profile_rx.clone();
     while let Some(()) = profile_rx.changed().await.ok_or_debug() {
         let profile = profile_rx.borrow_and_update().clone();
-        let tui = text::TextOpts::default().render_line("No profile");
-        ctrl_tx.register_menu(RegisterMenu {
-            on_tag: interact_tag.clone(),
-            on_kind: tui::InteractKind::Hover,
-            tui_rx: watch::channel(tui).1,
-            menu_kind: MenuKind::Tooltip,
-            opts: Default::default(),
-        });
 
-        let icon = text::TextOpts::from(text::HorizontalAlign::Center).render_cell(
-            match profile.as_deref() {
-                Some("balanced") => "",
-                Some("performance") => "",
-                Some("power-saver") => "",
-                _ => {
-                    tui_tx.send_if_modified(|tui| {
-                        let old = std::mem::replace(tui, BarTuiElem::Hide);
-                        !matches!(old, BarTuiElem::Hide)
-                    });
-                    continue;
-                }
-            },
-            2.try_into().unwrap(),
+        tooltip_tx.send_replace(
+            text::TextOpts::default().render_line(profile.as_deref().unwrap_or("No profile")),
         );
 
-        tui_tx.send_replace(BarTuiElem::Shared(icon.interactive(interact_tag.clone())));
+        let icon = match profile.as_deref() {
+            Some("balanced") => balanced_icon.clone(),
+            Some("performance") => perf_icon.clone(),
+            Some("power-saver") => powersave_icon.clone(),
+            _ => tui::Elem::empty().interactive(interact_tag.clone()),
+        };
+        tui_tx.send_replace(BarTuiElem::Shared(icon));
     }
 }
 
@@ -82,7 +91,7 @@ pub async fn energy_module(
 
     let mut last_energy_text = String::default();
     let mut last_tooltip = String::default();
-    while let Some(()) = state_rx.changed().await.ok_or_debug() {
+    while let Ok(()) = state_rx.changed().await {
         let state = state_rx.borrow_and_update().clone();
         if !state.is_present {
             tui_tx.send_replace(BarTuiElem::Hide);

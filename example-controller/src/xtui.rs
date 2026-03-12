@@ -1,5 +1,6 @@
 use std::fmt;
 
+use anyhow::Context;
 use scratchbar::tui;
 
 pub mod text;
@@ -44,35 +45,76 @@ impl StackBuilder {
     }
 }
 
-pub fn rgba_img_fill_axis(img: image::RgbaImage, fill_axis: tui::Axis, fill_len: u16) -> tui::Elem {
+fn format_image(buf: &[u8], args: impl fmt::Display, min_axis: tui::MinAxis) -> tui::Elem {
     // https://sw.kovidgoyal.net/kitty/graphics-protocol/#control-data-reference
     // - \x1b_G...\x1b\\: kitty graphics apc
     // - a=T: Transfer and display
-    // - f=32: 32-bit RGBA
     // - C=1: Do not move the cursor behind the image after drawing. If the image is on the
     //   last line, the first line would move to scrollback (effectively a clear if there is
     //   only one line, like in the bar).
-    // - s and v specify the image's dimensions
+    // - c,r: Width/Height in cells
+    // - Note that args must contain the format and is thus non-empty
     tui::Elem::raw_print(format_args!(
-        "\x1b_Ga=T,f=32,C=1,s={},v={},{}={fill_len};{}\x1b\\",
-        img.width(),
-        img.height(),
-        match fill_axis {
+        "\x1b_Ga=T,C=1,{}={},{args};{}\x1b\\",
+        match min_axis.axis {
             tui::Axis::X => "c",
             tui::Axis::Y => "r",
         },
+        min_axis.len,
         base64::display::Base64Display::new(
-            img.as_raw(),
+            buf, //
             &base64::engine::general_purpose::STANDARD,
-        )
+        ),
     ))
-    .with_min_axis(tui::MinAxis {
-        axis: fill_axis,
-        len: fill_len,
-        aspect_width: img.width(),
-        aspect_height: img.height(),
-    })
+    .with_min_axis(min_axis)
 }
+
+pub fn rgba_img_fill_axis(img: image::RgbaImage, fill_axis: tui::Axis, fill_len: u16) -> tui::Elem {
+    format_image(
+        img.as_raw(),
+        // - f=32: 32-bit RGBA
+        // - s,v: Image dimensions
+        format_args!("f=32,s={},v={}", img.width(), img.height()),
+        tui::MinAxis {
+            axis: fill_axis,
+            len: fill_len,
+            aspect_width: img.width(),
+            aspect_height: img.height(),
+        },
+    )
+}
+
+pub fn png_fill_axis(img: &[u8], fill_axis: tui::Axis, fill_len: u16) -> anyhow::Result<tui::Elem> {
+    let (w, h) = image::ImageReader::with_format(
+        std::io::Cursor::new(img), //
+        image::ImageFormat::Png,
+    )
+    .into_dimensions()
+    .context("Failed to read dimensions from png buffer")?;
+
+    Ok(format_image(
+        img,
+        "f=100",
+        tui::MinAxis {
+            axis: fill_axis,
+            len: fill_len,
+            aspect_width: w,
+            aspect_height: h,
+        },
+    ))
+}
+
+macro_rules! icon {
+    ($name:expr) => {
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/icons/",
+            $name,
+            "-32.png"
+        )) as &'static [u8]
+    };
+}
+pub(crate) use icon;
 
 #[derive(Debug, Clone, Default)]
 pub struct BlockOpts {

@@ -199,12 +199,6 @@ impl TextOpts {
             tui::StackOpts::default(),
         )
     }
-
-    pub fn render_cell(&self, content: impl fmt::Display, width: NonZeroUsize) -> tui::Elem {
-        let mut fmt = LineFormatter::enter_new(String::new(), self);
-        fmt.write_cell(content, width);
-        fmt.render()
-    }
 }
 
 struct EscapeSafeWriter<W> {

@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     utils::{ReloadRx, ReloadTx, ResultExt as _},
-    xtui::{self, text},
+    xtui,
 };
 use scratchbar::{host, tui};
 use tokio::{sync::watch, task::JoinSet};
@@ -395,8 +395,6 @@ pub async fn control_main(
     };
 
     let pulse = Arc::new(clients::pulse::PulseClient::connect(reload_tx.subscribe()));
-    let pulse_symbol_opts = text::TextOpts::from(text::HorizontalAlign::Center);
-    let pulse_symbol_width = 2.try_into().unwrap();
 
     let mut modules = [
         fac.fixed(BarTuiElem::Spacing(1)),
@@ -408,8 +406,6 @@ pub async fn control_main(
             pulse::PulseModuleArgs {
                 pulse: pulse.clone(),
                 device_kind: clients::pulse::PulseDeviceKind::Source,
-                muted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
-                unmuted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
             },
             pulse::pulse_module,
         ),
@@ -418,8 +414,6 @@ pub async fn control_main(
             pulse::PulseModuleArgs {
                 pulse,
                 device_kind: clients::pulse::PulseDeviceKind::Sink,
-                muted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
-                unmuted_sym: pulse_symbol_opts.render_cell("", pulse_symbol_width),
             },
             pulse::pulse_module,
         ),
@@ -434,7 +428,7 @@ pub async fn control_main(
     let mut module_tasks = JoinSet::new();
 
     {
-        let bar_tui_tx_inner = watch::Sender::new(Vec::from_iter(
+        let (bar_tui_tx_inner, mut bar_tui_rx_inner) = watch::channel(Vec::from_iter(
             modules.iter_mut().map(|it| it.borrow_and_update().clone()),
         ));
         for (i, mut module) in modules.into_iter().enumerate() {
@@ -446,7 +440,6 @@ pub async fn control_main(
                 }
             });
         }
-        let mut bar_tui_rx_inner = bar_tui_tx_inner.subscribe();
         required_tasks.spawn(async move {
             while let Ok(()) = bar_tui_rx_inner.changed().await {
                 send_bar_tui(&bar_tui_rx_inner.borrow_and_update(), &connect.update_tx);

@@ -2,7 +2,7 @@ use crate::tui::*;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 
-/// Custom ID specified by the user. Holds custom bytes.
+/// Custom ID specified by the controller. Holds any sequence of bytes.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CustomId(Arc<[u8]>);
 

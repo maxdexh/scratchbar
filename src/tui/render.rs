@@ -167,8 +167,6 @@ impl Render for MinAxisRepr {
             .try_into()
             .unwrap_or(u16::MAX);
 
-        log::debug!("{size:?}");
-
         size.combine(elem.calc_min_size(args), std::cmp::max)
     }
 }
