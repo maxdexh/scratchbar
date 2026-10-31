@@ -7,7 +7,7 @@ rust-version = "1.93"
 [dependencies]
 log = "0.4.35"
 
-crossterm = { git = "https://github.com/maxdexh/crossterm-scratchbar", default-features = false, features = ["events", "event-stream", "serde"] }
+crossterm = { git = "https://github.com/maxdexh/crossterm-scratchbar", rev = "cd11d5c0eb24c9ed061dd2b86b6a78f603afd8d7", default-features = false, features = ["events", "event-stream", "serde"] }
 anyhow = "1.0.104"
 flexi_logger = "0.31.10"
 serde = { version = "1.0.229", features = ["rc"] }

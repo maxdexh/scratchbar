@@ -277,7 +277,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/maxdexh/crossterm-scratchbar#cd11d5c0eb24c9ed061dd2b86b6a78f603afd8d7"
+source = "git+https://github.com/maxdexh/crossterm-scratchbar?rev=cd11d5c0eb24c9ed061dd2b86b6a78f603afd8d7#cd11d5c0eb24c9ed061dd2b86b6a78f603afd8d7"
 dependencies = [
  "bitflags",
  "futures-core",
