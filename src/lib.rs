@@ -1,4 +1,4 @@
-pub extern crate log; // FIXME: Feature flag
+pub extern crate log;
 
 extern crate self as scratchbar;
 

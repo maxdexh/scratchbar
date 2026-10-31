@@ -368,7 +368,7 @@ async fn run_monitor_main(
                 }
             }
 
-            // FIXME: Only send when necessary
+            // TODO: Only send when necessary
             env.menu
                 .term_upd_tx
                 .send(set_vis_update(show_menu.is_some()))

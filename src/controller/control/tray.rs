@@ -126,8 +126,6 @@ pub async fn tray_module(
                 });
             }
 
-            // FIXME: Handle the other options
-            // FIXME: Why are we showing all icons?
             for system_tray::item::IconPixmap {
                 width,
                 height,
