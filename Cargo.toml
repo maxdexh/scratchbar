@@ -38,7 +38,8 @@ hyprland = { version = "0.4.0-beta.3", features = [
     "async-lite",
     "listener",
 ], default-features = false }
-zbus = "6.2.0"
+# feature required for Option<T> decoder
+zbus = { version = "6.2.0", features = ["option-as-array"] }
 libpulse-binding = "2.30.1"
 system-tray = "0.8.9"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

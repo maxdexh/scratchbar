@@ -8,8 +8,7 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::controller::utils::{ReloadRx, ResultExt};
 
 mod dbus {
-    use serde::{Deserialize, Serialize};
-    use zbus::{OwnedVariant, Type, Variant, proxy};
+    use zbus::{DeserializeDict, SerializeDict, Type, proxy};
 
     #[proxy(
         interface = "org.freedesktop.UPower.PowerProfiles",
@@ -27,9 +26,8 @@ mod dbus {
         fn profiles(&self) -> zbus::Result<Vec<Profile>>;
     }
 
-    #[derive(Serialize, Deserialize, Debug, Type, OwnedVariant, Variant, Clone)]
+    #[derive(SerializeDict, DeserializeDict, Debug, Type, Clone)]
     #[zvariant(signature = "dict", rename_all = "PascalCase")]
-    #[serde(rename_all = "PascalCase")]
     pub struct Profile {
         pub profile: String,
         pub driver: String,

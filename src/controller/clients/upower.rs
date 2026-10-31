@@ -212,24 +212,41 @@ async fn try_run_bg(
         })
     });
 
-    let mut prop_change_rx = device_proxy.receive_all_signals().await?;
-    while let Some(msg) = prop_change_rx.next().await {
-        let state_tx = state_tx.clone();
-        let device_interface = device_interface.clone();
-        let properties = properties.clone();
-        tokio::spawn(async move {
-            let header = msg.header();
-            let Some(member) = header.member() else {
-                return;
-            };
+    let mut prop_change_rx = properties.receive_properties_changed().await?;
 
-            let Some(value) = properties.get(device_interface, member).await.ok_or_log() else {
-                return;
-            };
+    let fetch_update_all = async || {
+        let Some(props) = properties
+            .get_all(device_interface.clone())
+            .await
+            .ok_or_log()
+        else {
+            return;
+        };
 
-            state_tx
-                .send_if_modified(|state| state.update(member, value).ok_or_log().unwrap_or(false));
+        state_tx.send_modify(|state| {
+            for (member, value) in props {
+                state
+                    .update(&member, value)
+                    .context("Failed to update upower energy state")
+                    .ok_or_log();
+            }
         });
+    };
+
+    // Initial fetch after subscribe so nothing is missed
+    fetch_update_all().await;
+
+    while let Some(msg) = prop_change_rx.next().await {
+        if msg
+            .args()
+            .context("Failed to parse UPower PropertiesChanged signal")
+            .ok_or_log()
+            .is_none_or(|args| *args.interface_name() != device_interface)
+        {
+            continue;
+        }
+
+        fetch_update_all().await;
     }
 
     Ok(())
