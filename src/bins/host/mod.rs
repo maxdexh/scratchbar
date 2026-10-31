@@ -104,11 +104,7 @@ async fn run_update_handler(
                     match update {
                         host::BarUpdate::SetTui(host::SetBarTui {
                             tui,
-                            options:
-                                host::SetBarTuiOpts {
-                                    #[expect(deprecated)]
-                                        __non_exhaustive_struct_update: (),
-                                },
+                            options: host::SetBarTuiOpts {},
                         }) => {
                             doit(bar_tui_states, tui, |state| &mut state.tui);
                         }
@@ -148,11 +144,7 @@ async fn run_update_handler(
                     match update {
                         host::BarUpdate::SetTui(host::SetBarTui {
                             tui,
-                            options:
-                                host::SetBarTuiOpts {
-                                    #[expect(deprecated)]
-                                        __non_exhaustive_struct_update: (),
-                                },
+                            options: host::SetBarTuiOpts {},
                         }) => {
                             doit(bar_tui_states, monitor_name, tui, |state| &mut state.tui);
                         }
@@ -169,11 +161,7 @@ async fn run_update_handler(
             }
             host::HostUpdate::SetDefaultTui(host::SetBarTui {
                 tui,
-                options:
-                    host::SetBarTuiOpts {
-                        #[expect(deprecated)]
-                            __non_exhaustive_struct_update: (),
-                    },
+                options: host::SetBarTuiOpts {},
             }) => {
                 bar_tui_states_tx.borrow().defaults.tui.send_replace(tui);
             }

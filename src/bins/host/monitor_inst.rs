@@ -127,11 +127,7 @@ impl ShowMenu {
             tui,
             monitor: _,
             bar_anchor,
-            opts:
-                host::OpenMenuOpts {
-                    #[expect(deprecated)]
-                        __non_exhaustive_struct_update: (),
-                },
+            opts: host::OpenMenuOpts {},
         } = open;
 
         let pix_location = if let Some(this) = this
