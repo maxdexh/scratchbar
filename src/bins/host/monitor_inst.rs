@@ -106,10 +106,11 @@ async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
     }
 }
 
-const EDGE: &str = "top";
+const EDGE: &str = "bottom";
 
 /// Adds an extra line and centers the content of the menu with padding of half a cell.
 const VERTICAL_PADDING: bool = false;
+
 const HORIZONTAL_PADDING: u16 = 4;
 
 #[derive(Debug)]
