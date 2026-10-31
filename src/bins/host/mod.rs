@@ -77,12 +77,14 @@ async fn run_host(
     }
 }
 
+// FIXME: Function too big
 async fn run_update_handler(
     update_rx: impl Stream<Item = host::HostUpdate> + Send + 'static,
     open_menu_tx: watch::Sender<Option<host::OpenMenu>>,
     bar_tui_states_tx: watch::Sender<BarTuiStates>,
 ) -> std::process::ExitCode {
     tokio::pin!(update_rx);
+
     while let Some(update) = update_rx.next().await {
         match update {
             host::HostUpdate::UpdateBars(host::BarSelect::All, update) => {
@@ -180,6 +182,11 @@ async fn run_update_handler(
             }
             host::HostUpdate::CloseMenu => {
                 open_menu_tx.send_replace(None);
+            }
+            host::HostUpdate::ToggleHideAll => {
+                bar_tui_states_tx.send_modify(|bar_tui_states| {
+                    bar_tui_states.defaults.hidden.send_modify(|it| *it ^= true);
+                });
             }
         }
     }

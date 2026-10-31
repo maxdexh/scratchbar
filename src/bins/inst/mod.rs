@@ -32,7 +32,7 @@ pub(crate) async fn start_generic_panel(
         .arg(INTERNAL_INST_ARG)
         .envs(extra_envs)
         .env(ipc::SOCK_PATH_VAR, sock_path)
-        .env(ipc::PROC_LOG_NAME_VAR, log_name)
+        .env(ipc::PROC_NAME_VAR, log_name)
         .kill_on_drop(true)
         .stdout(std::io::stderr())
         .spawn()
@@ -146,13 +146,13 @@ fn fwd_log_self_exe() -> Option<std::process::Command> {
 
 pub(crate) const INTERNAL_INST_ARG: &str = "--internal-inst";
 pub(crate) fn inst_main() -> ExitCode {
-    let (log_name, res) =
-        match std::env::var(ipc::PROC_LOG_NAME_VAR).context("Bad log name env var") {
-            Ok(name) => (name, Ok(())),
-            Err(err) => ("UNKNOWN".into(), Err(err)),
-        };
+    let (name, res) = match std::env::var(ipc::PROC_NAME_VAR).context("Bad log name env var") {
+        Ok(name) => (name, Ok(())),
+        Err(err) => ("UNKNOWN".into(), Err(err)),
+    };
 
-    crate::logging::init_logger(log_name);
+    crate::utils::set_process_name(format!("bar-{name}"));
+    crate::logging::init_logger(name);
 
     if let Some(mut cmd) = fwd_log_self_exe() {
         let err = anyhow::Error::from(std::os::unix::process::CommandExt::exec(&mut cmd))
@@ -183,6 +183,7 @@ pub(crate) fn inst_main() -> ExitCode {
     }
 }
 
+// TODO: Register signal handlers. Hide for USR1, exit instance otherwise
 async fn term_proc_main_inner() -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
     let cancel = CancellationToken::new();

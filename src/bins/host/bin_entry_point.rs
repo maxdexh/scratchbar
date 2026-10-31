@@ -7,6 +7,8 @@ use crate::utils::ResultExt as _;
 pub(super) fn host_main_inner() -> Option<ExitCode> {
     crate::logging::init_logger("HOST".into());
 
+    crate::utils::set_process_name("scratchbar-host".into());
+
     let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel();
 
     {
@@ -33,9 +35,15 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let exit_tx_clone = exit_tx.clone();
+    let update_tx_clone = update_tx.clone();
     runtime.spawn(async move {
-        let code =
-            crate::controller::run(crate::host::HostUpdateSender { tx: update_tx }, event_rx).await;
+        let code = crate::controller::run(
+            crate::host::HostUpdateSender {
+                tx: update_tx_clone,
+            },
+            event_rx,
+        )
+        .await;
         exit_tx_clone.send(code).ok_or_debug();
     });
 
@@ -49,7 +57,6 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
             SK::hangup(),
             SK::pipe(),
             SK::terminate(),
-            SK::user_defined1(),
             SK::user_defined2(),
         ] {
             let Some(mut signal) = tokio::signal::unix::signal(kind).ok_or_log() else {
@@ -60,6 +67,16 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
                 if let Some(()) = signal.recv().await {
                     let code = kind.as_raw_value().wrapping_add(128);
                     exit_tx.send(ExitCode::from(code as u8)).ok_or_debug();
+                }
+            });
+        }
+
+        if let Some(mut signal) = tokio::signal::unix::signal(SK::user_defined1()).ok_or_log() {
+            runtime.spawn(async move {
+                while let Some(()) = signal.recv().await {
+                    update_tx
+                        .send(crate::host::HostUpdate::ToggleHideAll)
+                        .ok_or_log();
                 }
             });
         }

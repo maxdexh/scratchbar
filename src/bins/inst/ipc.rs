@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::{sync::CancellationToken, time::FutureExt as _};
 
 pub(crate) const SOCK_PATH_VAR: &str = "BAR_TERM_INSTANCE_SOCK_PATH";
-pub(crate) const PROC_LOG_NAME_VAR: &str = "BAR_TERM_INSTANCE_NAME";
+pub(crate) const PROC_NAME_VAR: &str = "BAR_TERM_INSTANCE_NAME";
 
 #[derive(Serialize, Deserialize, Debug)]
 #[non_exhaustive]

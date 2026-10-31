@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use crate::tui;
 
+// FIXME: Remove non-exhaustiveness
+
 pub struct HostError(anyhow::Error);
 impl std::fmt::Debug for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,6 +50,7 @@ pub enum HostUpdate {
     SetDefaultTui(SetBarTui),
     OpenMenu(OpenMenu),
     CloseMenu,
+    ToggleHideAll,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
