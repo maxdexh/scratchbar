@@ -312,11 +312,14 @@ async fn run_bg(
     {
         let awaiting_reload = awaiting_reload.clone();
         let cancel = cancel.clone();
-        // FIXME: Rerun on failure
-        std::thread::spawn(|| {
-            run_blocking(state_tx, cancel, awaiting_reload)
-                .context("PulseAudio client has failed")
-                .ok_or_log();
+        std::thread::spawn(move || {
+            while !cancel.is_cancelled() {
+                run_blocking(state_tx.clone(), cancel.clone(), awaiting_reload.clone())
+                    .context("PulseAudio client has failed")
+                    .ok_or_log();
+
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
         });
     }
     let _auto_cancel = cancel.drop_guard();

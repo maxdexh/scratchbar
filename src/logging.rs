@@ -80,7 +80,7 @@ pub(crate) fn init_logger(log_name: String) {
 fn try_init_logger() -> anyhow::Result<()> {
     use flexi_logger::*;
 
-    // FIXME: Also use env var
+    // TODO: Also use env var
     let log_spec: LogSpecification = if cfg!(debug_assertions) {
         flexi_logger::LevelFilter::Debug.into()
     } else {
