@@ -22,7 +22,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use crate::utils::{ReloadRx, ResultExt};
+use crate::controller::utils::{ReloadRx, ResultExt};
 
 #[derive(Debug, Clone, Default)]
 pub struct PulseState {

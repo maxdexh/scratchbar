@@ -6,14 +6,14 @@ mod tray;
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{
+use crate::controller::{
     utils::{ReloadRx, ReloadTx, ResultExt as _},
     xtui,
 };
 use scratchbar::{host, tui};
 use tokio::{sync::watch, task::JoinSet};
 
-use crate::clients;
+use crate::controller::clients;
 
 #[derive(Clone, Debug)]
 enum BarTuiElem {
@@ -349,7 +349,6 @@ async fn run_event_handler(
                                 .is_some()
                         });
                     }
-                    _ => {}
                 }
             }
             host::HostEvent::Term(
@@ -369,7 +368,7 @@ async fn run_event_handler(
 }
 
 pub async fn control_main(
-    connect: host::HostConnection,
+    update_tx: host::HostUpdateSender,
     ctrl_ev_rx: tokio::sync::mpsc::UnboundedReceiver<host::HostEvent>,
 ) -> std::process::ExitCode {
     let mut required_tasks = JoinSet::new();
@@ -379,7 +378,7 @@ pub async fn control_main(
     let tag_cb_tx = watch::Sender::new(Callbacks::default());
     let bar_menus_tx = watch::Sender::new(BarMenus::default());
     tokio::spawn(run_event_handler(
-        connect.update_tx.clone(),
+        update_tx.clone(),
         ctrl_ev_rx,
         bar_menus_tx.subscribe(),
         tag_cb_tx.subscribe(),
@@ -442,7 +441,7 @@ pub async fn control_main(
         }
         required_tasks.spawn(async move {
             while let Ok(()) = bar_tui_rx_inner.changed().await {
-                send_bar_tui(&bar_tui_rx_inner.borrow_and_update(), &connect.update_tx);
+                send_bar_tui(&bar_tui_rx_inner.borrow_and_update(), &update_tx);
             }
         });
     }

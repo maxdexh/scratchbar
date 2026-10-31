@@ -6,7 +6,7 @@ use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 use zbus::proxy;
 
-use crate::utils::{ReloadRx, ResultExt, run_or_retry};
+use crate::controller::utils::{ReloadRx, ResultExt, run_or_retry};
 
 macro_rules! declare_properties {
     (

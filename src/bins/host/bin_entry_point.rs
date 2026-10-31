@@ -1,9 +1,8 @@
 use std::process::ExitCode;
 
 use anyhow::Context as _;
-use tokio_util::time::FutureExt as _;
 
-use crate::{ctrl_ipc, utils::ResultExt as _};
+use crate::utils::ResultExt as _;
 
 pub(super) fn host_main_inner() -> Option<ExitCode> {
     crate::logging::init_logger("HOST".into());
@@ -29,56 +28,16 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
 
     let _guard = runtime.enter();
 
-    // FIXME: Proper arg parsing
-    let ctrl_cmd = std::env::args_os()
-        .nth(1)
-        .context("Missing controller command")
-        .ok_or_log()?;
-
-    let (mut ctrl_child, ctrl_socket) = {
-        let socket_dir = tempfile::TempDir::new().ok_or_log()?;
-        let sock_path = socket_dir.path().join("host.sock");
-        let socket = std::os::unix::net::UnixListener::bind(&sock_path).ok_or_log()?;
-
-        let child = tokio::process::Command::new(ctrl_cmd)
-            .kill_on_drop(true)
-            .args(std::env::args_os().skip(2))
-            .env(ctrl_ipc::HOST_SOCK_PATH_VAR, sock_path)
-            .spawn()
-            .ok_or_log()?;
-
-        let (conn, _) = socket.accept().ok_or_log()?;
-
-        (child, conn)
-    };
-
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let exit_tx_clone = exit_tx.clone();
-    let (opts, event_tx) = ctrl_ipc::connect_from_host(
-        ctrl_socket,
-        |init| {
-            let ctrl_ipc::HostCtrlInit { version, opts } = init;
-            check_version(&version)?;
-            Ok((ctrl_ipc::HostInitResponse {}, opts))
-        },
-        move |upd| update_tx.send(upd).ok(),
-        move |res| {
-            exit_tx_clone
-                .send(if res.ok_or_log().is_some() {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                })
-                .ok_or_debug();
-        },
-    )
-    .ok_or_log()?;
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let crate::host::HostConnectOpts {
-        #[expect(deprecated)]
-            __non_exhaustive_struct_update: (),
-    } = opts;
+    let exit_tx_clone = exit_tx.clone();
+    runtime.spawn(async move {
+        let code =
+            crate::controller::run(crate::host::HostUpdateSender { tx: update_tx }, event_rx).await;
+        exit_tx_clone.send(code).ok_or_debug();
+    });
 
     {
         type SK = tokio::signal::unix::SignalKind;
@@ -117,56 +76,5 @@ pub(super) fn host_main_inner() -> Option<ExitCode> {
         exit_tx_clone.send(code).ok_or_debug();
     });
 
-    let exit_task = runtime.spawn(async move {
-        let host_code;
-        let ctrl_status;
-        tokio::select! {
-            res = ctrl_child.wait() => {
-                host_code = ExitCode::SUCCESS;
-                ctrl_status = res.ok_or_log();
-            },
-            Some(code) = exit_rx.recv() => {
-                host_code = code;
-                let res = ctrl_child
-                    .wait()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .await
-                    .context("Controller failed to exit on its own")
-                    .ok_or_log();
-
-                if let Some(res) = res {
-                    ctrl_status = res.ok_or_log();
-                } else {
-                    ctrl_status = None;
-
-                    if ctrl_child.start_kill().context("Failed to kill controller").ok_or_log().is_some() {
-                       ctrl_child.wait().await.ok_or_log();
-                    }
-                }
-            },
-        };
-        let ctrl_code = ctrl_status.map_or(ExitCode::FAILURE, |status| {
-            ExitCode::from(status.code().unwrap_or(0) as u8)
-        });
-
-        // Prefer the controller's code if it did not exit correctly
-        if ctrl_code != ExitCode::SUCCESS {
-            ctrl_code
-        } else {
-            host_code
-        }
-    });
-
-    runtime.block_on(async move { exit_task.await.ok_or_log() })
-}
-
-fn check_version(version: &str) -> anyhow::Result<()> {
-    let this_ver = ctrl_ipc::VERSION;
-    if version == this_ver {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "Cannot run controller built against version {version:?} under version {this_ver:?}"
-        )
-    }
+    runtime.block_on(exit_rx.recv())
 }

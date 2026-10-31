@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::{ReloadRx, ReloadTx, ResultExt, run_or_retry};
+use crate::controller::utils::{ReloadRx, ReloadTx, ResultExt, run_or_retry};
 
 #[derive(Debug)]
 pub struct TrayEntry {

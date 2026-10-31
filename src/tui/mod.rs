@@ -1,11 +1,7 @@
-#[cfg(feature = "__bin")]
 mod render;
-#[cfg(feature = "__bin")]
 pub(crate) use render::*;
 
-#[cfg(feature = "__bin")]
 mod layout;
-#[cfg(feature = "__bin")]
 pub(crate) use layout::*;
 
 mod api;

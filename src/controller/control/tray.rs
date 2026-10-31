@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{
+use crate::controller::{
     clients,
     control::{
         BarTuiElem, InteractArgs, InteractTagRegistry, MenuKind, ModuleArgs, RegisterMenu,
@@ -21,7 +21,7 @@ pub async fn tray_module(
         ..
     }: ModuleArgs,
 ) {
-    use crate::clients::tray::*;
+    use crate::controller::clients::tray::*;
     let tray = Arc::new(clients::tray::connect(reload_rx));
 
     let mut entry_reg = InteractTagRegistry::new();

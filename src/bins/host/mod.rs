@@ -46,7 +46,7 @@ pub(crate) struct MonitorInfo {
 
 async fn run_host(
     update_rx: impl Stream<Item = host::HostUpdate> + Send + 'static,
-    event_tx: std::sync::mpsc::Sender<host::HostEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<host::HostEvent>,
 ) -> std::process::ExitCode {
     let mut required_tasks = tokio::task::JoinSet::<std::process::ExitCode>::new();
 

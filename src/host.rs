@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-use crate::{ctrl_ipc, tui, utils::ResultExt};
+use crate::tui;
 
 pub struct HostError(anyhow::Error);
 impl std::fmt::Debug for HostError {
@@ -31,11 +31,13 @@ pub struct HostConnection {
 }
 #[derive(Clone, Debug)]
 pub struct HostUpdateSender {
-    tx: std::sync::mpsc::Sender<HostUpdate>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<HostUpdate>,
 }
 impl HostUpdateSender {
     pub fn send(&self, update: HostUpdate) -> Result<(), std::sync::mpsc::SendError<HostUpdate>> {
-        self.tx.send(update)
+        self.tx
+            .send(update)
+            .map_err(|it| std::sync::mpsc::SendError(it.0))
     }
 }
 
@@ -150,30 +152,6 @@ pub struct TermInfo {
 pub enum TermKind {
     Menu,
     Bar,
-}
-
-pub fn connect(
-    opts: HostConnectOpts,
-    mut event_tx: impl FnMut(HostEvent) -> Result<(), HostEvent> + Send + 'static,
-    on_stop: impl FnOnce(Result<(), HostError>) + Send + 'static,
-) -> Result<HostConnection, HostError> {
-    match ctrl_ipc::connect_from_ctrl(
-        ctrl_ipc::HostCtrlInit {
-            version: ctrl_ipc::VERSION.into(),
-            opts,
-        },
-        move |ev| {
-            event_tx(ev)
-                .map_err(std::sync::mpsc::SendError)
-                .ok_or_debug()
-        },
-        |res| on_stop(res.map_err(HostError)),
-    ) {
-        Ok((ctrl_ipc::HostInitResponse {}, tx)) => Ok(HostConnection {
-            update_tx: HostUpdateSender { tx },
-        }),
-        Err(err) => Err(HostError(err)),
-    }
 }
 
 pub fn init_controller_logger() {

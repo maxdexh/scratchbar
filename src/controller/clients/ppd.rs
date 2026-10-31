@@ -5,7 +5,7 @@ use futures::StreamExt as _;
 use tokio::sync::{Semaphore, watch};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::utils::{ReloadRx, ResultExt};
+use crate::controller::utils::{ReloadRx, ResultExt};
 
 mod dbus {
     use serde::{Deserialize, Serialize};

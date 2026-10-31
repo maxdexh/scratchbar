@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{
+use crate::controller::{
     clients,
     control::{BarTuiElem, InteractTagRegistry, ModuleArgs, interact_callback_with},
     utils::ResultExt as _,

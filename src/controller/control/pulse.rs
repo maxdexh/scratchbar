@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{
+use crate::controller::{
     clients,
     control::{BarTuiElem, ModuleArgs, interact_callback_with, mk_fresh_interact_tag},
     utils::ResultExt as _,
@@ -20,7 +20,7 @@ pub async fn pulse_module(
         tui_tx, ctrl_tx, ..
     }: ModuleArgs,
 ) {
-    use crate::clients::pulse::*;
+    use crate::controller::clients::pulse::*;
 
     let [mut_icon, lo_icon, med_icon, hi_icon] = match device_kind {
         PulseDeviceKind::Sink => [

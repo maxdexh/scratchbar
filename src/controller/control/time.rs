@@ -1,4 +1,4 @@
-use crate::{
+use crate::controller::{
     control::{
         BarTuiElem, MenuKind, ModuleArgs, RegisterMenu, interact_callback_with,
         mk_fresh_interact_tag,

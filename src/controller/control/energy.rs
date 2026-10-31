@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{
+use crate::controller::{
     clients,
     control::{
         BarTuiElem, MenuKind, ModuleArgs, RegisterMenu, interact_callback_with,
@@ -81,7 +81,7 @@ pub async fn energy_module(
         ..
     }: ModuleArgs,
 ) {
-    use crate::clients::upower::*;
+    use crate::controller::clients::upower::*;
     let energy = Arc::new(clients::upower::connect(reload_rx));
 
     let interact_tag = mk_fresh_interact_tag();

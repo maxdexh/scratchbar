@@ -1,5 +1,5 @@
-use crate::desktop::{BasicDesktopState, BasicWorkspace, WorkspaceId};
-use crate::utils::ReloadRx;
+use crate::controller::desktop::{BasicDesktopState, BasicWorkspace, WorkspaceId};
+use crate::controller::utils::ReloadRx;
 use crate::utils::ResultExt;
 use anyhow::Context;
 use futures::StreamExt;

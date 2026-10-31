@@ -12,7 +12,7 @@ const CHANGE_SLEEP: Duration = Duration::from_millis(500);
 pub(super) async fn run_monitor_listener(
     bar_tui_states_tx: watch::Sender<super::BarTuiStates>,
     open_menu_rx: watch::Receiver<Option<crate::host::OpenMenu>>,
-    event_tx: std::sync::mpsc::Sender<crate::host::HostEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<crate::host::HostEvent>,
 ) -> std::process::ExitCode {
     // TODO: Consider moving this to BarTuiStates to ensure consistent data
     let mut monitors_auto_cancel = HashMap::<Arc<str>, tokio_util::sync::DropGuard>::new();

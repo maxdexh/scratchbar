@@ -191,6 +191,7 @@ impl Render for StackRepr {
             0
         });
 
+        #[expect(clippy::manual_checked_ops, reason = "wtf clippy")]
         if total_weight > 0 {
             let mut rem_fill_len = tot_fill_len;
 

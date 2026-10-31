@@ -1,0 +1,1 @@
+use scratchbar::bins::main;
