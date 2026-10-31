@@ -110,6 +110,15 @@ impl Elem {
         .into()
     }
 
+    #[track_caller]
+    pub fn fallback() -> Self {
+        let loc = std::panic::Location::caller();
+        let raw = format!("{}:{}", loc.file(), loc.line());
+        let width = raw.chars().count() as u16;
+        Elem::from(ElemRepr::Print(PrintRepr { raw: raw.into() }))
+            .with_min_size(Size { width, height: 1 })
+    }
+
     pub fn spacing(axis: Axis, len: u16) -> Self {
         Elem::empty().with_min_size({
             let mut size = Vec2::default();

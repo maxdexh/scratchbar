@@ -1,5 +1,7 @@
 use std::fmt;
 
+// FIXME: Move to tui module
+
 use anyhow::Context;
 use scratchbar::tui;
 

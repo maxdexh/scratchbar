@@ -53,7 +53,7 @@ async fn run_host(
     let bar_tui_states_tx = watch::Sender::new(BarTuiStates {
         by_monitor: Default::default(),
         defaults: BarTuiStateSender {
-            tui: watch::Sender::new(tui::Elem::empty()),
+            tui: watch::Sender::new(tui::Elem::fallback()),
             hidden: watch::Sender::new(false),
         },
     });

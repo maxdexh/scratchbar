@@ -164,7 +164,7 @@ async fn run_monitor_main(
 ) -> anyhow::Result<std::convert::Infallible> {
     let mut show_menu = None::<ShowMenu>;
     let mut bar_tui_state = super::BarTuiState {
-        tui: tui::Elem::empty(),
+        tui: tui::Elem::fallback(),
         hidden: false,
     };
     loop {
@@ -498,7 +498,7 @@ async fn try_init_monitor(
             "-o=foreground=white".into(),
             "-o=background=black".into(),
             // location of the bar
-            format!("--edge={}", EDGE).into(),
+            format!("--edge={EDGE}").into(),
             // disable hiding the mouse
             "-o=mouse_hide_wait=0".into(),
         ],
@@ -527,7 +527,7 @@ async fn try_init_monitor(
                 // Center within leftover pixels if cell size does not divide window size.
                 "-o=placement_strategy=center".into(),
                 // location of the menu
-                "--edge=top".into(),
+                format!("--edge={EDGE}").into(),
                 // disable hiding the mouse
                 "-o=mouse_hide_wait=0".into(),
                 // Window behavior of the menu panel. Makes panel
@@ -584,7 +584,7 @@ async fn try_init_monitor(
 
     let (bar, menu) = res??;
 
-    let (bar_tui_tx, bar_tui_rx) = watch::channel(tui::Elem::empty());
+    let (bar_tui_tx, bar_tui_rx) = watch::channel(tui::Elem::fallback());
     let (bar_hide_tx, bar_hide_rx) = watch::channel(false);
     {
         let mut bar_state_tx_rx = args.bar_state_tx.subscribe();

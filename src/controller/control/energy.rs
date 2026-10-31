@@ -34,11 +34,11 @@ pub async fn ppd_module(
         xtui::png_fill_axis(buf, tui::Axis::Y, 1)
             .context("icon must be valid png data")
             .ok_or_log()
-            .unwrap_or_else(tui::Elem::empty)
+            .unwrap_or_else(tui::Elem::fallback)
             .interactive(interact_tag.clone())
     });
 
-    let tooltip_tx = watch::Sender::new(tui::Elem::empty());
+    let tooltip_tx = watch::Sender::new(tui::Elem::fallback());
     ctrl_tx.register_menu(RegisterMenu {
         on_tag: interact_tag.clone(),
         on_kind: tui::InteractKind::Hover,

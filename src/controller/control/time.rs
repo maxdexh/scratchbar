@@ -24,7 +24,7 @@ pub async fn time_module(
     let bar_tag = mk_fresh_interact_tag();
     let (cal_today_tx, mut cal_today_rx) = watch::channel(chrono::Local::now().date_naive());
 
-    let _cal_task = {
+    let _cal_tasks = {
         let cal_menu_ctrls = CalendarControls {
             reset_now: mk_fresh_interact_tag(),
             next_month: mk_fresh_interact_tag(),
@@ -69,8 +69,8 @@ pub async fn time_module(
             ctrl_tx.register_callback(tag, cb);
         }
 
-        let cal_menu_tx = watch::Sender::new(tui::Elem::empty());
-        let cal_tooltip_tx = watch::Sender::new(tui::Elem::empty());
+        let cal_menu_tx = watch::Sender::new(tui::Elem::fallback());
+        let cal_tooltip_tx = watch::Sender::new(tui::Elem::fallback());
         ctrl_tx.register_menu(RegisterMenu {
             on_tag: bar_tag.clone(),
             on_kind: tui::InteractKind::Hover,
@@ -90,15 +90,16 @@ pub async fn time_module(
             cal_today_rx.mark_changed();
             cal_menu_month_rx.mark_changed();
             loop {
+                let mut today_has_changed = false;
                 tokio::select! {
                     Ok(()) = cal_menu_month_rx.changed() => {}
-                    Ok(()) = cal_today_rx.changed() => {}
+                    Ok(()) = cal_today_rx.changed() => today_has_changed = true,
                     else => break,
                 }
-                let (today, today_has_changed) = {
-                    let it = cal_today_rx.borrow_and_update();
-                    (*it, it.has_changed())
-                };
+                // only borrow, so we don't lose the update when the month changes first
+                let today = *cal_today_rx.borrow();
+
+                // calendar menu needs update either way, we can also clear the change
                 let menu_month = *cal_menu_month_rx.borrow_and_update();
 
                 if today_has_changed && let Some(tui) = mk_calendar(today, today, None) {
@@ -244,5 +245,17 @@ fn mk_calendar(
         tui_ystack.push(week_xstack.build());
     }
 
-    Some(tui_ystack.build())
+    Some(xtui::block(
+        xtui::BlockLines::double(),
+        xtui::BlockOpts {
+            borders: xtui::BlockBorders::all(),
+            inner: Some({
+                let mut padded = xtui::StackBuilder::new(tui::Axis::X);
+                padded.spacing(1);
+                padded.push(tui_ystack.build());
+                padded.spacing(1);
+                padded.build()
+            }),
+        },
+    ))
 }
