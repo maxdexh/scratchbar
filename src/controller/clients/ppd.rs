@@ -9,10 +9,7 @@ use crate::controller::utils::{ReloadRx, ResultExt};
 
 mod dbus {
     use serde::{Deserialize, Serialize};
-    use zbus::{
-        proxy,
-        zvariant::{OwnedValue, Type, Value},
-    };
+    use zbus::{OwnedVariant, Type, Variant, proxy};
 
     #[proxy(
         interface = "org.freedesktop.UPower.PowerProfiles",
@@ -30,7 +27,7 @@ mod dbus {
         fn profiles(&self) -> zbus::Result<Vec<Profile>>;
     }
 
-    #[derive(Serialize, Deserialize, Debug, Type, OwnedValue, Value, Clone)]
+    #[derive(Serialize, Deserialize, Debug, Type, OwnedVariant, Variant, Clone)]
     #[zvariant(signature = "dict", rename_all = "PascalCase")]
     #[serde(rename_all = "PascalCase")]
     pub struct Profile {

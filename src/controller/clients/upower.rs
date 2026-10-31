@@ -25,7 +25,7 @@ macro_rules! declare_properties {
         }
 
         impl UpowerState {
-            fn update(&mut self, prop_name: &str, value: zbus::zvariant::OwnedValue) -> anyhow::Result<bool> {
+            fn update(&mut self, prop_name: &str, value: zbus::OwnedVariant) -> anyhow::Result<bool> {
                 match prop_name {
                     $($prop_name => {
                         let value = ($try_from_value)(value)?;
@@ -95,7 +95,7 @@ declare_properties!([
     ),
 ]);
 
-fn duration_from_value(value: zbus::zvariant::OwnedValue) -> anyhow::Result<Duration> {
+fn duration_from_value(value: zbus::OwnedVariant) -> anyhow::Result<Duration> {
     Ok(Duration::from_secs(
         i64::try_from(value)?
             .try_into()
@@ -114,10 +114,10 @@ pub enum BatteryState {
     PendingCharge,
     PendingDischarge,
 }
-impl TryFrom<&zbus::zvariant::Value<'_>> for BatteryState {
-    type Error = zbus::zvariant::Error;
+impl TryFrom<&zbus::Variant<'_>> for BatteryState {
+    type Error = zbus::Error;
 
-    fn try_from(value: &zbus::zvariant::Value<'_>) -> Result<Self, Self::Error> {
+    fn try_from(value: &zbus::Variant<'_>) -> Result<Self, Self::Error> {
         let value = value.downcast_ref::<u32>()?;
         macro_rules! mk {
                 ($(($variant:ident, $value:literal)),*) => {
@@ -141,16 +141,11 @@ impl TryFrom<&zbus::zvariant::Value<'_>> for BatteryState {
 #[proxy(
     interface = "org.freedesktop.UPower.Device",
     default_service = "org.freedesktop.UPower",
-    assume_defaults = false,
-    gen_blocking = false
+    assume_defaults = false
 )]
 trait Device {}
 
-#[proxy(
-    interface = "org.freedesktop.UPower",
-    assume_defaults = true,
-    gen_blocking = false
-)]
+#[proxy(interface = "org.freedesktop.UPower", assume_defaults = true)]
 trait UPower {
     #[zbus(object = "Device")]
     fn get_display_device(&self);
@@ -183,8 +178,8 @@ async fn try_run_bg(
     let device_proxy = upower.get_display_device().await?.into_inner();
 
     let properties = zbus::fdo::PropertiesProxy::builder(&dbus)
-        .destination(device_proxy.destination())?
-        .path(device_proxy.path())?
+        .destination(device_proxy.destination())
+        .path(device_proxy.path())
         .build()
         .await?;
 
