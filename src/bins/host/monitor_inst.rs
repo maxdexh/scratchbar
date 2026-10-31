@@ -106,7 +106,6 @@ async fn try_run_monitor(args: &mut RunMonitorArgs) -> anyhow::Result<()> {
     }
 }
 
-// FIXME: Add to update enum
 const EDGE: &str = "top";
 
 /// Adds an extra line and centers the content of the menu with padding of half a cell.
