@@ -280,6 +280,7 @@ async fn run_monitor_main(
             }
         }
 
+        // FIXME: Do not resize unless size has actually changed. Hover rerenders are way too slow
         if rerender_menu {
             if let Some(&ShowMenu {
                 pix_location: location,
@@ -571,8 +572,8 @@ async fn try_init_monitor(
                 // resize and reloads is completely inappropriate and
                 // just results in a larger delay between resize and
                 // the old menu content being replaced with the new one.
-                "-o=resize_debounce_time=0 0".into(),
                 // TODO: Mess with repaint_delay, input_delay
+                "-o=resize_debounce_time=0 0".into(),
             ],
             [],
             cancel,

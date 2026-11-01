@@ -172,7 +172,7 @@ fn mk_calendar(
             prev_month,
         }) => {
             let normal = text::TextOpts::default();
-            let hovered = normal.clone().with(|it| it.attrs.set_underlined(true));
+            let hovered = normal.clone().with(|it| it.fg_color = text::Color::Red);
 
             // TODO: Large title scale
             let mut title_stack = xtui::StackBuilder::new(tui::Axis::X);

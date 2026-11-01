@@ -197,20 +197,32 @@ pub async fn tray_module(
                 disposition: _, // TODO: what to do with this?
                 submenu: _,
             } => {
-                let mut stack = xtui::StackBuilder::new(tui::Axis::X);
-                stack.spacing(depth + 1);
-                if let Some(icon) = icon_data
-                    && let Some(img) =
+                let img = icon_data
+                    .as_ref()
+                    .and_then(|icon| {
                         image::load_from_memory_with_format(icon, image::ImageFormat::Png)
                             .context("Systray icon has invalid png data")
                             .ok_or_log()
-                {
-                    stack.push(xtui::rgba_img_fill_axis(img.into_rgba8(), tui::Axis::Y, 1));
-                    stack.spacing(1);
-                }
-                stack.push(text::TextOpts::default().render_line(label));
-                // FIXME: Add hover
-                stack.build().interactive(mk_interact(*id))
+                    })
+                    .map(|img| xtui::rgba_img_fill_axis(img.into_rgba8(), tui::Axis::Y, 1));
+
+                let normal = text::TextOpts::default();
+                let hovered = normal.clone().with(|it| {
+                    it.fg_color = text::Color::Red;
+                });
+
+                let [normal, hovered] = [normal, hovered].map(|text_opts| {
+                    let mut stack = xtui::StackBuilder::new(tui::Axis::X);
+                    stack.spacing(depth + 1);
+
+                    if let Some(img) = img.clone() {
+                        stack.push(img);
+                        stack.spacing(1);
+                    }
+                    stack.push(text_opts.render_line(label));
+                    stack.build()
+                });
+                normal.interactive_hover(mk_interact(*id), hovered)
             }
 
             _ => {

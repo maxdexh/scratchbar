@@ -37,7 +37,7 @@ pub async fn hypr_module(
                             it.fg_color = text::Color::Green
                         }
                     });
-                    let hovered = base.clone().with(|it| it.attrs.set_underlined(true));
+                    let hovered = base.clone().with(|it| it.fg_color = text::Color::Red);
                     text::render_with_hover(&base, tag.clone(), &hovered, |it| {
                         it.render_line(&ws.name)
                     })
