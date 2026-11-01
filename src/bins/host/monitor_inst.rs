@@ -111,7 +111,7 @@ const EDGE: &str = "bottom";
 /// Adds an extra line and centers the content of the menu with padding of half a cell.
 const VERTICAL_PADDING: bool = false;
 
-const HORIZONTAL_PADDING: u16 = 4;
+const HORIZONTAL_PADDING: u16 = 2;
 
 #[derive(Debug)]
 struct ShowMenu {

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
-// TODO: Detailed state (for menu), including clients
+// TODO: Detailed state (on hover/right click), including windows/clients, maybe using icons?
 
 pub struct HyprClient {
     pub basic_rx: watch::Receiver<BasicDesktopState>,
