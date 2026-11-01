@@ -116,7 +116,7 @@ const HORIZONTAL_PADDING: u16 = 2;
 #[derive(Debug)]
 struct ShowMenu {
     pix_location: tui::Vec2<u32>,
-    cached_size: tui::Vec2<u16>,
+    cached_tui_size: tui::Vec2<u16>,
     sizing: tui::SizingArgs,
     tui: tui::Elem,
     bar_anchor: tui::CustomId,
@@ -146,7 +146,7 @@ impl ShowMenu {
         };
         this.replace(ShowMenu {
             pix_location,
-            cached_size: tui::calc_min_size(&tui, &sizing),
+            cached_tui_size: tui::calc_min_size(&tui, &sizing),
             sizing,
             tui,
             bar_anchor,
@@ -163,8 +163,20 @@ async fn run_monitor_main(
         tui: tui::Elem::fallback(),
         hidden: false,
     };
+    #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+    enum UpdateMenu {
+        No = 0,
+        RerenderOnly,
+        Full,
+    }
+    impl UpdateMenu {
+        fn set(&mut self, val: Self) {
+            *self = val.max(*self);
+        }
+    }
+
     loop {
-        let mut rerender_menu = false;
+        let mut update_menu = UpdateMenu::No;
         let mut bar_tui_changed = false;
         let mut bar_vis_changed = false;
 
@@ -192,7 +204,10 @@ async fn run_monitor_main(
                     show_menu = None;
                 }
                 env.menu.layout = Default::default(); // TODO: optionally keep layout
-                rerender_menu = true;
+
+                // NOTE: We could check if the size or position actually changed and
+                // keep only rerender if not, but this hasn't caused issues yet.
+                update_menu.set(UpdateMenu::Full);
                 Upd::Noop
             },
         };
@@ -219,7 +234,7 @@ async fn run_monitor_main(
 
                             if rerender {
                                 match term_kind {
-                                    TermKind::Menu => rerender_menu = true,
+                                    TermKind::Menu => update_menu.set(UpdateMenu::RerenderOnly),
                                     TermKind::Bar => bar_tui_changed = true,
                                 }
                             }
@@ -242,7 +257,7 @@ async fn run_monitor_main(
                         tui::MouseEventRes::MouseLeave => {
                             if term.layout.ext_focus_loss() {
                                 match term_kind {
-                                    TermKind::Menu => rerender_menu = true,
+                                    TermKind::Menu => update_menu.set(UpdateMenu::Full),
                                     TermKind::Bar => bar_tui_changed = true,
                                 }
                             }
@@ -267,7 +282,7 @@ async fn run_monitor_main(
                 log::trace!("Received menu sizes for {monitor:?}: {sizes:?}");
 
                 if sizes.font_size() != env.menu.sizes.font_size() {
-                    rerender_menu = true;
+                    update_menu.set(UpdateMenu::Full);
                 }
 
                 env.menu.sizes = sizes;
@@ -280,100 +295,107 @@ async fn run_monitor_main(
             }
         }
 
-        // FIXME: Do not resize unless size has actually changed. Hover rerenders are way too slow
-        if rerender_menu {
-            if let Some(&ShowMenu {
+        if update_menu == UpdateMenu::Full
+            && let Some(ShowMenu {
                 pix_location: location,
-                cached_size: cached_tui_size,
+                cached_tui_size,
+                ..
+            }) = show_menu
+        {
+            // HACK: This minimizes the rounding error for some reason (as far as I can tell).
+            let scale = (monitor.scale * 1000.0).ceil() / 1000.0;
+
+            // NOTE: There is no absolute positioning system, nor a way to directly specify the
+            // geometry (since this is controlled by the compositor). So we have to get creative by
+            // using the right and left margin to control both position and size of the panel.
+
+            let lines = cached_tui_size.y.saturating_add(VERTICAL_PADDING.into());
+
+            // Find the distance between window edge and center
+            let half_pix_w = {
+                let cell_pix_w = u32::from(env.menu.sizes.font_size().x);
+                let cell_w = cached_tui_size.x + HORIZONTAL_PADDING;
+                let pix_w = u32::from(cell_w) * cell_pix_w;
+                pix_w.div_ceil(2)
+            };
+
+            // Clamp position such that we fit. Note that this does not guarantee
+            // that there is enough space for the entire width.
+            let x = location.x.clamp(
+                half_pix_w, //
+                monitor.width.saturating_sub(half_pix_w),
+            );
+
+            // The left margin should be such that half the space is between
+            // left margin and x. Use saturating_sub so that the left
+            // margin becomes zero if the width would reach outside the screen.
+            let mleft = x.saturating_sub(half_pix_w);
+
+            // The right margin is calculated the same way, but starting from the right edge.
+            let mright = (monitor.width - x).saturating_sub(half_pix_w);
+
+            // The font size (on which cell->pixel conversion is based) and the monitor's
+            // size are in physical pixels. This makes sense because different monitors can
+            // have different scales, and the application should not be affected by that
+            // (this is not x11 after all).
+            // However, panels are bound to a monitor and the margins are in scaled pixels,
+            // so we have to make this correction.
+            let margin_left = (f64::from(mleft) / scale) as u32;
+            let margin_right = (f64::from(mright) / scale) as u32;
+
+            env.menu
+                .term_upd_tx
+                .send(TermUpdate::RemoteControl(vec![
+                    "resize-os-window".into(),
+                    "--incremental".into(),
+                    "--action=os-panel".into(),
+                    format!("margin-left={margin_left}").into(),
+                    format!("margin-right={margin_right}").into(),
+                    format!("lines={lines}").into(),
+                ]))
+                .ok_or_log();
+        }
+
+        if update_menu != UpdateMenu::No
+            && let Some(ShowMenu {
+                cached_tui_size,
                 ref tui,
                 ref sizing,
-                bar_anchor: _,
-            }) = show_menu.as_ref()
+                ..
+            }) = show_menu
+        {
+            let mut buf = Vec::new();
+
+            // NOTE: The terminal might not be done resizing at this point,
+            // which would cause issues if passing the terminal's size here.
+            // Passing the tui's desired size sidesteps this because kitty
+            // will rerender it correctly once the resize is done.
+            if let Some(layout) = tui::render(
+                tui,
+                tui::Area {
+                    size: cached_tui_size,
+                    pos: tui::Vec2 {
+                        x: HORIZONTAL_PADDING / 2,
+                        y: 0,
+                    },
+                },
+                &mut buf,
+                sizing,
+                &env.menu.layout,
+            )
+            .context("Failed to draw menu")
+            .ok_or_log()
             {
-                // HACK: This minimizes the rounding error for some reason (as far as I can tell).
-                let scale = (monitor.scale * 1000.0).ceil() / 1000.0;
-
-                // NOTE: There is no absolute positioning system, nor a way to directly specify the
-                // geometry (since this is controlled by the compositor). So we have to get creative by
-                // using the right and left margin to control both position and size of the panel.
-
-                let lines = cached_tui_size.y.saturating_add(VERTICAL_PADDING.into());
-
-                // Find the distance between window edge and center
-                let half_pix_w = {
-                    let cell_pix_w = u32::from(env.menu.sizes.font_size().x);
-                    let cell_w = cached_tui_size.x + HORIZONTAL_PADDING;
-                    let pix_w = u32::from(cell_w) * cell_pix_w;
-                    pix_w.div_ceil(2)
-                };
-
-                // Clamp position such that we fit. Note that this does not guarantee
-                // that there is enough space for the entire width.
-                let x = location.x.clamp(
-                    half_pix_w, //
-                    monitor.width.saturating_sub(half_pix_w),
-                );
-
-                // The left margin should be such that half the space is between
-                // left margin and x. Use saturating_sub so that the left
-                // margin becomes zero if the width would reach outside the screen.
-                let mleft = x.saturating_sub(half_pix_w);
-
-                // The right margin is calculated the same way, but starting from the right edge.
-                let mright = (monitor.width - x).saturating_sub(half_pix_w);
-
-                // The font size (on which cell->pixel conversion is based) and the monitor's
-                // size are in physical pixels. This makes sense because different monitors can
-                // have different scales, and the application should not be affected by that
-                // (this is not x11 after all).
-                // However, panels are bound to a monitor and the margins are in scaled pixels,
-                // so we have to make this correction.
-                let margin_left = (f64::from(mleft) / scale) as u32;
-                let margin_right = (f64::from(mright) / scale) as u32;
-
+                env.menu.layout = layout;
                 env.menu
                     .term_upd_tx
-                    .send(TermUpdate::RemoteControl(vec![
-                        "resize-os-window".into(),
-                        "--incremental".into(),
-                        "--action=os-panel".into(),
-                        format!("margin-left={margin_left}").into(),
-                        format!("margin-right={margin_right}").into(),
-                        format!("lines={lines}").into(),
-                    ]))
+                    .send(TermUpdate::Print(buf))
                     .ok_or_log();
-
-                let mut buf = Vec::new();
-
-                // NOTE: The terminal might not be done resizing at this point,
-                // which would cause issues if passing the terminal's size here.
-                // Passing the tui's desired size sidesteps this because kitty
-                // will rerender it correctly once the resize is done.
-                if let Some(layout) = tui::render(
-                    tui,
-                    tui::Area {
-                        size: cached_tui_size,
-                        pos: tui::Vec2 {
-                            x: HORIZONTAL_PADDING / 2,
-                            y: 0,
-                        },
-                    },
-                    &mut buf,
-                    sizing,
-                    &env.menu.layout,
-                )
-                .context("Failed to draw menu")
-                .ok_or_log()
-                {
-                    env.menu.layout = layout;
-                    env.menu
-                        .term_upd_tx
-                        .send(TermUpdate::Print(buf))
-                        .ok_or_log();
-                    env.menu.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
-                }
+                env.menu.term_upd_tx.send(TermUpdate::Flush).ok_or_log();
             }
+        }
 
+        if update_menu == UpdateMenu::Full {
             // TODO: Only send when necessary
             env.menu
                 .term_upd_tx
