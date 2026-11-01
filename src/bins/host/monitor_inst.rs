@@ -264,12 +264,17 @@ async fn run_monitor_main(
                 }
             },
             Upd::Term(TermKind::Menu, TermEvent::Sizes(sizes)) => {
+                log::trace!("Received menu sizes for {monitor:?}: {sizes:?}");
+
                 if sizes.font_size() != env.menu.sizes.font_size() {
                     rerender_menu = true;
                 }
+
                 env.menu.sizes = sizes;
             }
             Upd::Term(TermKind::Bar, TermEvent::Sizes(sizes)) => {
+                log::trace!("Received bar sizes for {monitor:?}: {sizes:?}");
+
                 env.bar.sizes = sizes;
                 bar_tui_changed = true;
             }
@@ -493,6 +498,7 @@ async fn try_init_monitor(
             // Basic look of the bar
             "-o=foreground=white".into(),
             "-o=background=black".into(),
+            "-o=font_size=11.5".into(), // FIXME: For some reason, even font sizes don't work
             // location of the bar
             format!("--edge={EDGE}").into(),
             // disable hiding the mouse

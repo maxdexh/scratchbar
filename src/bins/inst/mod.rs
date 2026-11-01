@@ -224,6 +224,7 @@ async fn term_proc_main_inner() -> anyhow::Result<()> {
     let Some(init_sizes) = tui::Sizes::query()? else {
         anyhow::bail!("Terminal reported window size of 0. Do not start as hidden!");
     };
+    log::trace!("Initial sizes: {init_sizes:?}");
 
     ev_tx
         .send(TermEvent::Sizes(init_sizes))

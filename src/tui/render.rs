@@ -184,7 +184,7 @@ impl Render for StackRepr {
             }
             lens.push(len)
         }
-        assert_eq!(lens.len(), self.items.len());
+        debug_assert_eq!(lens.len(), self.items.len());
 
         let tot_fill_len = rem_len.unwrap_or_else(|| {
             log::warn!("Stack does not fit into {area:?}: {self:?}");
