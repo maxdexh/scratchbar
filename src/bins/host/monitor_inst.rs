@@ -1,6 +1,6 @@
 use tempfile::TempDir;
 
-use std::{ffi::OsString, time::Duration};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use anyhow::Context;
 use tokio::{
@@ -425,8 +425,8 @@ fn set_vis_update(vis: bool) -> TermUpdate {
 }
 
 async fn init_term(
-    sock_path: std::path::PathBuf,
-    log_name: String,
+    sock_path: PathBuf,
+    log_name: &str,
     extra_args: impl IntoIterator<Item = OsString>,
     extra_envs: impl IntoIterator<Item = (OsString, OsString)>,
     cancel: &CancellationToken,
@@ -442,7 +442,7 @@ async fn init_term(
 
     crate::bins::inst::start_generic_panel(
         &sock_path,
-        &log_name,
+        log_name,
         futures::stream::poll_fn(move |cx| term_upd_rx.poll_recv(cx)),
         extra_args,
         extra_envs,
@@ -480,44 +480,71 @@ async fn try_init_monitor(
 ) -> anyhow::Result<StartedMonitorEnv> {
     let monitor = args.monitor.clone();
 
-    let tmpdir = tokio::task::spawn_blocking(TempDir::new).await??;
+    static RUNTIME_DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let mut dir = if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR")
+            && !xdg.is_empty()
+        {
+            PathBuf::from(xdg)
+        } else {
+            std::env::temp_dir()
+        };
+        dir.push("scratchbar");
+        dir
+    });
+    let runtime_dir = &**RUNTIME_DIR;
+    tokio::fs::create_dir_all(runtime_dir).await?;
 
-    let bar_fut = init_term(
-        tmpdir.path().join("bar-term-socket.sock"),
-        format!("BAR@{}", monitor.name),
-        [
-            NERD_FONT_CONFIG_OVERRIDE.into(),
-            format!("--output-name={}", monitor.name).into(),
-            // Allow remote control
-            "-o=allow_remote_control=socket-only".into(),
-            "--listen-on=unix:/tmp/kitty-bar-panel.sock".into(),
-            // Allow logging to $KITTY_STDIO_FORWARDED
-            "-o=forward_stdio=yes".into(),
-            // Do not use the system's kitty.conf
-            "--config=NONE".into(),
-            // Basic look of the bar
-            "-o=foreground=white".into(),
-            "-o=background=black".into(),
-            "-o=font_size=11.5".into(), // FIXME: For some reason, even font sizes don't work
-            // location of the bar
-            format!("--edge={EDGE}").into(),
-            // disable hiding the mouse
-            "-o=mouse_hide_wait=0".into(),
-        ],
-        [],
-        cancel,
-    );
+    let pid = std::process::id();
+    let listen_on_arg = |name: &str| {
+        let mut it = OsString::from("--listen-on=unix:");
+        it.push(runtime_dir.join(format!("{pid}-panel-{name}.sock")));
+        it
+    };
+
+    // temporary dir for sockets that are only used to establish a connection
+    let tmpdir = tokio::task::spawn_blocking(|| TempDir::new_in(&*RUNTIME_DIR)).await??;
+
+    let bar_fut = async {
+        let name = format!("BAR@{}", monitor.name);
+        init_term(
+            tmpdir.path().join("bar-term-socket.sock"),
+            &name,
+            [
+                NERD_FONT_CONFIG_OVERRIDE.into(),
+                format!("--output-name={}", monitor.name).into(),
+                // Allow remote control
+                "-o=allow_remote_control=socket-only".into(),
+                listen_on_arg(&name),
+                // Allow logging to $KITTY_STDIO_FORWARDED
+                "-o=forward_stdio=yes".into(),
+                // Do not use the system's kitty.conf
+                "--config=NONE".into(),
+                // Basic look of the bar
+                "-o=foreground=white".into(),
+                "-o=background=black".into(),
+                "-o=font_size=11.5".into(), // FIXME: For some reason, even font sizes don't work
+                // location of the bar
+                format!("--edge={EDGE}").into(),
+                // disable hiding the mouse
+                "-o=mouse_hide_wait=0".into(),
+            ],
+            [],
+            cancel,
+        )
+        .await
+    };
 
     let menu_fut = async {
+        let name = format!("MENU@{}", monitor.name);
         let menu = init_term(
             tmpdir.path().join("menu-term-socket.sock"),
-            format!("MENU@{}", monitor.name),
+            &name,
             [
                 NERD_FONT_CONFIG_OVERRIDE.into(),
                 format!("--output-name={}", monitor.name).into(),
                 // Configure remote control via socket
                 "-o=allow_remote_control=socket-only".into(),
-                "--listen-on=unix:/tmp/kitty-bar-menu-panel.sock".into(),
+                listen_on_arg(&name),
                 // Allow logging to $KITTY_STDIO_FORWARDED
                 "-o=forward_stdio=yes".into(),
                 // Do not use the system's kitty.conf

@@ -12,6 +12,8 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::controller::utils::{ReloadRx, ReloadTx, ResultExt, run_or_retry};
 
+// FIXME: Highlight selected
+
 #[derive(Debug)]
 pub struct TrayEntry {
     pub addr: Arc<str>,
