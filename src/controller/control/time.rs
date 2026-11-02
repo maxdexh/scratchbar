@@ -213,8 +213,10 @@ fn mk_calendar(
         xstack.build()
     });
 
-    let mut week_xstack = xtui::StackBuilder::new(tui::Axis::X);
-    week_xstack.spacing(3 * first_weekday_offset);
+    // 31 days can be spread across at most 6 weeks
+    let mut week_xstacks: [_; 6] = std::array::from_fn(|_| xtui::StackBuilder::new(tui::Axis::X));
+    week_xstacks[0].spacing(3 * first_weekday_offset);
+    let mut cur_week_idx = 0;
     for d0 in 0u16..month.num_days_in_month().into() {
         let d1 = d0.checked_add(1).context("Overflow").ok_or_log()?;
         let day = month
@@ -224,7 +226,7 @@ fn mk_calendar(
 
         let text = format!("{d1:>2}");
 
-        week_xstack.push(
+        week_xstacks[cur_week_idx].push(
             text::TextOpts::default()
                 .with(|it| {
                     if day == today {
@@ -235,14 +237,16 @@ fn mk_calendar(
         );
 
         if day.weekday() == chrono::Weekday::Sun {
-            tui_ystack.push(week_xstack.build());
-            week_xstack = xtui::StackBuilder::new(tui::Axis::X);
+            cur_week_idx += 1;
         } else {
-            week_xstack.spacing(1);
+            week_xstacks[cur_week_idx].spacing(1);
         }
     }
-    if !week_xstack.is_empty() {
-        tui_ystack.push(week_xstack.build());
+    for week in week_xstacks {
+        tui_ystack.push(week.build().with_min_size(tui::Size {
+            width: 0,
+            height: 1,
+        }));
     }
 
     Some(xtui::block(
@@ -251,9 +255,9 @@ fn mk_calendar(
             borders: xtui::BlockBorders::all(),
             inner: Some({
                 let mut padded = xtui::StackBuilder::new(tui::Axis::X);
-                padded.spacing(1);
+                padded.spacing(2);
                 padded.push(tui_ystack.build());
-                padded.spacing(1);
+                padded.spacing(2);
                 padded.build()
             }),
         },

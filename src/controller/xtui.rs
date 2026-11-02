@@ -39,9 +39,6 @@ impl StackBuilder {
     pub fn build(self) -> tui::Elem {
         tui::Elem::stack(self.axis, self.items, self.opts)
     }
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
     pub fn delete_last(&mut self) {
         self.items.pop();
     }
